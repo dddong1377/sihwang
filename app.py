@@ -3,7 +3,6 @@ import io
 import pandas as pd
 import requests
 import streamlit as st
-from bs4 import BeautifulSoup
 from pykrx import stock
 
 # 페이지 기본 설정
@@ -12,9 +11,7 @@ st.set_page_config(
 )
 
 st.title("📈 실시간 증시 & 특징주 분석 대시보드")
-st.caption(
-    "네이버 금융 및 KRX 데이터를 수집하여 표시합니다. (업무 리포트 추출 지원)"
-)
+st.caption("KRX 및 네이버 금융 데이터를 수집하여 표시합니다. (업무 리포트 추출 지원)")
 
 
 @st.cache_data(ttl=5)
@@ -69,7 +66,7 @@ def get_naver_market_index():
   except Exception:
     pass
 
-  # 3. 원/달러 환율 실시간 조회 (네이버 금융 API 우회 대응)
+  # 3. 원/달러 환율 조회
   try:
     res = requests.get(
         "https://m.stock.naver.com/api/marketIndex/basic?category=exchange",
@@ -89,91 +86,67 @@ def get_naver_market_index():
           )
           break
   except Exception:
-    # 환율 API 실패 시 대체 값
     result["usd_now"] = "1,380.00"
     result["usd_change"] = "+0.00 (0.00%)"
 
   return result
 
 
-@st.cache_data(ttl=15)
-def get_top20_stocks(type_mode="up"):
-  headers = {
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-          " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      )
-  }
-
-  url = (
-      "https://finance.naver.com/sise/sise_rise.naver?sosok=0"
-      if type_mode == "up"
-      else "https://finance.naver.com/sise/sise_fall.naver?sosok=0"
-  )
-
+@st.cache_data(ttl=30)
+def get_krx_top20_stocks(type_mode="up"):
   try:
-    res = requests.get(url, headers=headers, timeout=3)
-    soup = BeautifulSoup(res.content.decode("euc-kr", "ignore"), "html.parser")
-    rows = soup.select("table.type_2 tr")
-    data = []
-    for r in rows:
-      cols = r.select("td")
-      if len(cols) > 4 and cols[1].find("a"):
-        name = cols[1].text.strip()
-        link_tag = cols[1].find("a")["href"]
-        code = link_tag.split("code=")[-1]
-        price = cols[2].text.strip()
-        # 등락률 컬럼 위치 대응 (상승/하락 페이지 구조 미세 차이 방어)
-        change_rate_text = ""
-        for col in cols:
-          text_val = col.text.strip()
-          if "%" in text_val:
-            change_rate_text = (
-                text_val.replace("\n", "")
-                .replace("\t", "")
-                .replace(" ", "")
-            )
-            break
-        if not change_rate_text:
-          change_rate_text = (
-              cols[4]
-              .text.strip()
-              .replace("\n", "")
-              .replace("\t", "")
-              .replace(" ", "")
-          )
+    today_str = datetime.date.today().strftime("%Y%m%d")
+    # pykrx를 통해 전 종목 등락률 조회
+    df = stock.get_market_price_change_by_ticker(today_str, today_str)
+    if df.empty:
+      # 오늘 데이터가 아직 없거나 주말인 경우 가장 최근 거래일 조회
+      from pandas.tseries.offsets import BusinessDay
 
-        volume = cols[5].text.strip() if len(cols) > 5 else "-"
+      prev_day = (datetime.date.today() - BusinessDay(1)).strftime("%Y%m%d")
+      df = stock.get_market_price_change_by_ticker(prev_day, prev_day)
+
+    if not df.empty:
+      data = []
+      for ticker, row in df.iterrows():
+        name = stock.get_market_ticker_name(ticker)
+        close_p = row["종가"]
+        change_r = row["등락률"]
+        volume = row["거래량"]
         data.append({
             "종목명": name,
-            "종목코드": code,
-            "현재가": price,
-            "등락률": change_rate_text,
-            "거래량": volume,
+            "종목코드": str(ticker),
+            "현재가": f"{close_p:,}",
+            "등락률": f"{change_r:+.2f}%",
+            "거래량": f"{volume:,}",
         })
-    df = pd.DataFrame(data)
-    if not df.empty:
-      df = df[df["종목명"] != ""]  # 빈 행 제거
-      df["rate_num"] = (
-          df["등락률"]
-          .str.replace("%", "", regex=False)
-          .str.replace("+", "", regex=False)
-          .str.replace(",", "", regex=False)
-          .astype(float)
-      )
+
+      df_result = pd.DataFrame(data)
       if type_mode == "up":
-        df = df.sort_values(by="rate_num", ascending=False)
+        df_result = df_result.sort_values(
+            by="등락률", ascending=False
+        ).head(20)
       else:
-        df = df.sort_values(by="rate_num", ascending=True)
-      df = df.head(20).drop(columns=["rate_num"])
-      df["등락 이유 및 주요 뉴스"] = "관련 특징주 뉴스 참조"
-      df["관련 테마"] = df["종목명"] + " 관련 테마주"
-      return df
+        df_result = df_result.sort_values(
+            by="등락률", ascending=True
+        ).head(20)
+
+      df_result["등락 이유 및 주요 뉴스"] = "관련 특징주 뉴스 참조"
+      df_result["관련 테마"] = df_result["종목명"] + " 관련 테마주"
+      return df_result
   except Exception as e:
     print(e)
 
-  # 크롤링 실패 시 안내용 빈 DataFrame 반환
-  return pd.DataFrame(columns=["종목명", "종목코드", "현재가", "등락률", "거래량", "등락 이유 및 주요 뉴스", "관련 테마"])
+  # 실패 시 예시 데이터 반환
+  sample_data = [{
+      "종목명": "삼성전자(예시)",
+      "종목코드": "005930",
+      "현재가": "70,000",
+      "등락률": "+5.00%",
+      "거래량": "10,000,000",
+      "등락 이유 및 주요 뉴스": "반도체 업황 회복 기대감",
+      "관련 테마": "반도체",
+  }]
+  return pd.DataFrame(sample_data)
 
 
 # 사이드바 설정
@@ -213,8 +186,8 @@ st.divider()
 st.subheader("🔥 당일 급등 & 급락 특징주 TOP 20")
 tab1, tab2 = st.tabs(["🚀 급등 TOP 20", "📉 급락 TOP 20"])
 
-df_up = get_top20_stocks("up")
-df_down = get_top20_stocks("down")
+df_up = get_krx_top20_stocks("up")
+df_down = get_krx_top20_stocks("down")
 
 with tab1:
   st.dataframe(df_up, width="stretch", hide_index=True)
@@ -311,5 +284,5 @@ st.download_button(
     label="📊 [급등/급락 TOP 5 + 지수 요약 리포트] CSV 다운로드",
     data=csv_data,
     file_name=f"증시_특징주_리포트_{selected_date.strftime('%Y%m%d')}.csv",
-    mime="text/csv",
+    mime="text/css",
 )
