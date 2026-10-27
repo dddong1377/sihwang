@@ -1,6 +1,6 @@
 import datetime
 import hmac
-import html as htmllib
+import html
 import json
 import os
 import re
@@ -11,100 +11,60 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
-
-# ============================================================
-# 기본 설정
-# ============================================================
-
-st.set_page_config(
-    page_title="MTNW 오후 시황",
-    layout="wide",
-)
+st.set_page_config(page_title="MTNW 오후 시황", layout="wide")
 
 KST = ZoneInfo("Asia/Seoul")
+BASE = "https://openapi.tossinvest.com"
 WEEKDAYS = "월화수목금토일"
 
-NAVER_API = "https://m.stock.naver.com/front-api"
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0.0.0 Safari/537.36"
-    ),
-    "Referer": "https://m.stock.naver.com/",
-    "Accept": "application/json, text/plain, */*",
-}
-
-EXCLUDE_NAME = re.compile(
-    r"스팩|제\d+호|ETN|KODEX|TIGER|ACE|SOL|RISE|HANARO|"
-    r"KOSEF|ARIRANG|PLUS|KIWOOM|우[A-C]?$"
-)
-
-REASON_WORDS = re.compile(
-    r"특징주|수주|계약|실적|공시|승인|인수|합병|유증|증자|전망"
-)
-
-UP_WORDS = re.compile(
-    r"급등|상승|강세|상한가|신고가|반등|매수|호재|훈풍"
-)
-
-DOWN_WORDS = re.compile(
-    r"급락|하락|약세|하한가|신저가|매도|악재|차익|우려|부진"
-)
-
-THEME_RULES = [
-    ("HBM·반도체", r"HBM|D램|낸드|반도체|파운드리|메모리|소부장|웨이퍼"),
-    ("AI", r"(?<![A-Za-z])AI(?![A-Za-z])|인공지능|데이터센터|엔비디아|챗GPT|오픈AI|앤트로픽"),
-    ("2차전지", r"2차전지|배터리|양극재|음극재|전해액|리튬|전고체"),
-    ("바이오·제약", r"바이오|제약|신약|임상|FDA|항암|치료제|백신|CDMO"),
+THEMES = [
+    ("HBM·반도체", r"HBM|D램|낸드|반도체|파운드리|메모리|소부장"),
+    ("AI", r"AI|인공지능|데이터센터|엔비디아|챗GPT|앤트로픽"),
+    ("2차전지", r"2차전지|배터리|양극재|음극재|리튬|전고체"),
+    ("바이오·제약", r"바이오|제약|신약|임상|FDA|항암|치료제|백신"),
     ("로봇", r"로봇|휴머노이드|자동화"),
-    ("방산·우주", r"방산|무기|미사일|우주|항공우주|위성|K9|천무"),
-    ("조선·해운", r"조선|선박|LNG선|해운|해양플랜트"),
-    ("원전·전력", r"원전|SMR|전력|변압기|전선|송전|배전"),
-    ("엔터", r"엔터|K팝|케이팝|아이돌|콘서트|음반"),
+    ("방산·우주", r"방산|미사일|우주|위성|K9|천무"),
+    ("조선·해운", r"조선|선박|LNG선|해운"),
+    ("원전·전력", r"원전|SMR|전력|변압기|전선|송전"),
+    ("엔터", r"엔터|K팝|아이돌|콘서트|음반"),
     ("게임", r"게임|신작|퍼블리싱"),
     ("화장품·소비", r"화장품|뷰티|면세|K푸드|음식료"),
-    ("자동차", r"자동차|전기차|자율주행|완성차"),
-    ("금융", r"은행|증권|보험|금융지주|밸류업|배당"),
-    ("건설·부동산", r"건설|부동산|분양|재건축|PF"),
+    ("자동차", r"자동차|전기차|자율주행"),
+    ("금융", r"은행|증권|보험|금융지주|배당"),
+    ("건설·부동산", r"건설|부동산|분양|재건축"),
     ("정유·에너지", r"정유|유가|에너지|석유|가스"),
-    ("철강·소재", r"철강|화학|비철|소재|구리"),
-    ("가상자산", r"비트코인|가상자산|코인|블록체인"),
+    ("철강·소재", r"철강|화학|비철|구리"),
 ]
 
+EXCLUDE = re.compile(
+    r"스팩|제\d+호|ETN|KODEX|TIGER|ACE |SOL |RISE|HANARO|KOSEF|ARIRANG|PLUS |KIWOOM|우$"
+)
 
-# ============================================================
-# 설정 / 비밀번호
-# ============================================================
 
-def secret(name, default=""):
+def secret(key, default=""):
+    """Streamlit Secrets 또는 환경변수에서 설정값을 가져옵니다."""
     try:
-        value = st.secrets.get(name)
+        value = st.secrets.get(key)
     except Exception:
         value = None
 
-    return str(value) if value else os.getenv(name, default)
+    return str(value) if value else os.getenv(key, default)
 
 
-def check_password():
+def login():
+    """사이트 접속 비밀번호 확인."""
     expected = secret("app_password")
 
     if not expected:
-        st.error(
-            "비밀번호가 설정되지 않았습니다. "
-            "Streamlit Secrets에 app_password를 추가하세요."
-        )
+        st.error("Streamlit Secrets에 app_password를 설정하세요.")
         return False
 
-    def entered():
-        typed = st.session_state.get("pw", "").encode("utf-8")
-
+    def verify():
+        entered = st.session_state.get("pw", "").encode()
         st.session_state["pw_ok"] = hmac.compare_digest(
-            typed,
-            expected.encode("utf-8"),
+            entered,
+            expected.encode()
         )
-
         st.session_state["pw"] = ""
 
     if st.session_state.get("pw_ok"):
@@ -116,7 +76,7 @@ def check_password():
         "비밀번호",
         type="password",
         key="pw",
-        on_change=entered,
+        on_change=verify
     )
 
     if st.session_state.get("pw_ok") is False:
@@ -125,593 +85,509 @@ def check_password():
     return False
 
 
-if not check_password():
+if not login():
     st.stop()
 
 
-# ============================================================
-# API 설정
-# ============================================================
+CLIENT_ID = secret("TOSS_CLIENT_ID")
+CLIENT_SECRET = secret("TOSS_CLIENT_SECRET")
 
 NAVER_ID = secret("NAVER_CLIENT_ID")
 NAVER_SECRET = secret("NAVER_CLIENT_SECRET")
 
-# requests.Session을 재사용합니다.
-SESSION = requests.Session()
-SESSION.headers.update(HEADERS)
+
+class TossError(Exception):
+    """토스증권 API 관련 오류."""
+    pass
 
 
-# ============================================================
-# 공통 데이터 처리
-# ============================================================
+@st.cache_data(ttl=20 * 60 * 60, show_spinner=False)
+def get_token(client_id, client_secret):
+    """토스증권 API 액세스 토큰 발급."""
 
-def to_number(value):
-    """쉼표, 퍼센트 기호 등을 제거하고 숫자로 변환합니다."""
-
-    if value is None:
-        return None
-
-    if isinstance(value, (int, float)):
-        return float(value)
-
-    value = str(value).strip()
-
-    if not value or value in ("-", "--", "N/A", "null"):
-        return None
-
-    value = (
-        value.replace(",", "")
-        .replace("%", "")
-        .replace("+", "")
-        .strip()
-    )
-
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return None
-
-
-def request_json(url, params=None, timeout=10):
-    """JSON 응답을 요청하고 HTTP 및 데이터 오류를 구분합니다."""
-
-    response = SESSION.get(
-        url,
-        params=params,
-        timeout=timeout,
-    )
-
-    response.raise_for_status()
-
-    try:
-        return response.json()
-    except ValueError as exc:
-        raise ValueError(
-            f"JSON 응답이 아닙니다: {response.url}"
-        ) from exc
-
-
-# ============================================================
-# 코스피 / 코스닥 지수
-# ============================================================
-
-def fetch_one_index(code):
-    """
-    네이버 증권의 지수 기본 정보를 조회합니다.
-
-    조회 실패 시 임의의 기본값을 반환하지 않습니다.
-    """
-
-    url = f"{NAVER_API}/stock/domestic/basic"
-
-    payload = request_json(
-        url,
-        params={
-            "code": code,
-            "endType": "index",
-        },
-    )
-
-    if not isinstance(payload, dict):
-        raise ValueError("지수 응답 형식이 올바르지 않습니다.")
-
-    # 일부 응답은 result 또는 data 아래에 데이터가 들어갑니다.
-    data = payload
-
-    for key in ("result", "data"):
-        if isinstance(data.get(key), dict):
-            data = data[key]
-            break
-
-    price = None
-    pct = None
-
-    # 응답 버전에 따라 필드명이 달라질 수 있습니다.
-    for key in (
-        "closePrice",
-        "currentPrice",
-        "nowVal",
-        "price",
-    ):
-        if data.get(key) is not None:
-            price = to_number(data[key])
-            if price is not None:
-                break
-
-    for key in (
-        "fluctuationsRatio",
-        "changeRate",
-        "compareToPreviousPriceRatio",
-        "changeRateValue",
-    ):
-        if data.get(key) is not None:
-            pct = to_number(data[key])
-            if pct is not None:
-                break
-
-    if price is None or price <= 0:
-        raise ValueError(
-            f"{code} 지수의 현재가를 확인할 수 없습니다."
+    if not client_id or not client_secret:
+        raise TossError(
+            "TOSS_CLIENT_ID / TOSS_CLIENT_SECRET이 "
+            "Streamlit Secrets에 없습니다."
         )
 
-    if pct is None:
-        raise ValueError(
-            f"{code} 지수의 등락률을 확인할 수 없습니다."
+    try:
+        response = requests.post(
+            f"{BASE}/oauth2/token",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded"
+            },
+            timeout=12,
         )
 
-    return {
-        "price": price,
-        "pct": pct,
+    except requests.RequestException as error:
+        raise TossError(
+            f"토큰 서버 연결 실패: {error}"
+        ) from error
+
+    if response.status_code != 200:
+        raise TossError(
+            f"토큰 발급 실패 HTTP {response.status_code}: "
+            f"{response.text[:500]}"
+        )
+
+    token_data = response.json()
+    token = token_data.get("access_token")
+
+    if not token:
+        raise TossError(
+            "토큰 응답에 access_token이 없습니다: "
+            f"{response.text[:300]}"
+        )
+
+    return token
+
+
+def api_get(path, params=None):
+    """토스증권 API GET 요청."""
+
+    token = get_token(CLIENT_ID, CLIENT_SECRET)
+
+    try:
+        response = requests.get(
+            f"{BASE}{path}",
+            params=params or {},
+            headers={
+                "Authorization": f"Bearer {token}"
+            },
+            timeout=15,
+        )
+
+    except requests.RequestException as error:
+        raise TossError(
+            f"{path} 연결 실패: {error}"
+        ) from error
+
+    if response.status_code != 200:
+        try:
+            detail = response.json()
+        except ValueError:
+            detail = response.text[:400]
+
+        if response.status_code == 403:
+            raise TossError(
+                "HTTP 403: 토스증권 Open API 허용 IP에 "
+                "배포 서버 IP를 등록했는지 확인하세요. "
+                f"{detail}"
+            )
+
+        if response.status_code == 429:
+            raise TossError(
+                "HTTP 429: 요청 한도 초과. "
+                f"Retry-After={response.headers.get('Retry-After', '미제공')}. "
+                f"{detail}"
+            )
+
+        raise TossError(
+            f"{path} HTTP {response.status_code}: {detail}"
+        )
+
+    data = response.json()
+
+    if data.get("error"):
+        error_data = data["error"]
+
+        raise TossError(
+            f"{error_data.get('code')}: "
+            f"{error_data.get('message')}"
+        )
+
+    return data.get("result", {})
+
+
+def num(value, default=None):
+    """숫자 변환."""
+
+    try:
+        return float(str(value).replace(",", ""))
+
+    except (TypeError, ValueError):
+        return default
+
+
+def get_indices():
+    """
+    코스피·코스닥 지수 조회.
+
+    주의:
+    아래 시장 지표 API 경로와 응답 필드는
+    실제 토스 API 명세에 맞는지 별도 검증이 필요합니다.
+    """
+
+    result = api_get(
+        "/api/v1/market-indicators/prices",
+        {
+            "symbols": "KOSPI,KOSDAQ"
+        }
+    )
+
+    if isinstance(result, dict):
+        rows = result.get("prices", [])
+    elif isinstance(result, list):
+        rows = result
+    else:
+        rows = []
+
+    by_symbol = {
+        item.get("symbol"): item
+        for item in rows
+        if isinstance(item, dict)
     }
 
+    output = {}
 
-def fetch_naver_market_index():
-    result = {}
+    for symbol in ("KOSPI", "KOSDAQ"):
+        item = by_symbol.get(symbol, {})
 
-    for key, code in (
-        ("kospi", "KOSPI"),
-        ("kosdaq", "KOSDAQ"),
-    ):
+        price = num(item.get("lastPrice"))
+        pct = None
+
         try:
-            result[key] = fetch_one_index(code)
-            result[key]["error"] = None
-
-        except Exception as exc:
-            result[key] = {
-                "price": None,
-                "pct": None,
-                "error": str(exc),
-            }
-
-    return result
-
-
-# ============================================================
-# 급등 / 급락 종목 조회
-# ============================================================
-
-def extract_stock_records(payload):
-    """
-    JSON 응답에서 종목 데이터를 재귀적으로 찾습니다.
-
-    현재가와 등락률 필드가 모두 확인된 데이터만 반환합니다.
-    """
-
-    records = []
-
-    def walk(obj):
-        if isinstance(obj, dict):
-
-            name = (
-                obj.get("stockName")
-                or obj.get("name")
-                or obj.get("itemName")
+            candle_result = api_get(
+                f"/api/v1/market-indicators/{symbol}/candles",
+                {
+                    "interval": "1d",
+                    "count": 3,
+                }
             )
 
-            price_value = None
+            candles = candle_result.get("candles", [])
 
-            for key in (
-                "closePrice",
-                "currentPrice",
-                "nowPrice",
-                "price",
-            ):
-                if obj.get(key) is not None:
-                    price_value = obj[key]
-                    break
+            if price is not None and len(candles) >= 2:
+                previous_close = num(
+                    candles[1].get("closePrice")
+                )
 
-            pct_value = None
+                if previous_close:
+                    pct = (
+                        price / previous_close - 1
+                    ) * 100
 
-            for key in (
-                "fluctuationsRatio",
-                "changeRate",
-                "compareToPreviousPriceRatio",
-                "fluctuationRate",
-            ):
-                if obj.get(key) is not None:
-                    pct_value = obj[key]
-                    break
+        except Exception:
+            pass
 
-            if (
-                isinstance(name, str)
-                and price_value is not None
-                and pct_value is not None
-            ):
-                price = to_number(price_value)
-                pct = to_number(pct_value)
-
-                if (
-                    price is not None
-                    and pct is not None
-                    and price > 0
-                    and -100 <= pct <= 100
-                ):
-                    records.append({
-                        "name": name.strip(),
-                        "price": price,
-                        "pct": pct,
-                    })
-
-            for value in obj.values():
-                if isinstance(value, (dict, list)):
-                    walk(value)
-
-        elif isinstance(obj, list):
-            for value in obj:
-                walk(value)
-
-    walk(payload)
-
-    return records
-
-
-def fetch_top5_stocks(type_mode="up"):
-    """
-    실제 네이버 증권 종목 목록을 조회합니다.
-
-    up   : 상승률 상위
-    down : 하락률 상위
-
-    데이터 수집 실패 시 임의의 종목이나 가격을 만들지 않습니다.
-    """
-
-    if type_mode not in ("up", "down"):
-        raise ValueError("type_mode는 up 또는 down이어야 합니다.")
-
-    url = f"{NAVER_API}/stock/domestic/stockList"
-
-    all_data = []
-    errors = []
-
-    # 코스피와 코스닥을 각각 조회합니다.
-    for market in ("KOSPI", "KOSDAQ"):
-
-        params = {
-            "sortType": type_mode,
-            "category": market,
-            "page": 1,
-            "pageSize": 100,
+        output[symbol.lower()] = {
+            "price": price,
+            "pct": pct,
+            "timestamp": item.get("timestamp"),
         }
 
-        try:
-            payload = request_json(
-                url,
-                params=params,
-                timeout=12,
-            )
+    return output
 
-            records = extract_stock_records(payload)
 
-            if not records:
-                errors.append(
-                    f"{market}: 종목 데이터를 찾지 못했습니다. "
-                    "API 응답 구조를 확인해야 합니다."
-                )
-                continue
+def get_stock_names(symbols):
+    """종목 코드에 해당하는 종목명 조회."""
 
-            for stock in records:
-                stock["sector"] = market
-                all_data.append(stock)
+    names = {}
 
-        except requests.HTTPError as exc:
-            status = (
-                exc.response.status_code
-                if exc.response is not None
-                else "확인 불가"
-            )
+    for start in range(0, len(symbols), 200):
+        batch = symbols[start:start + 200]
 
-            errors.append(
-                f"{market}: HTTP 오류 {status}"
-            )
-
-        except Exception as exc:
-            errors.append(
-                f"{market}: {type(exc).__name__}: {exc}"
-            )
-
-    # 동일 종목 제거
-    unique = {}
-
-    for stock in all_data:
-        unique[stock["name"]] = stock
-
-    stocks = list(unique.values())
-
-    # ETF, ETN, 스팩 등 제외
-    filtered = []
-
-    for stock in stocks:
-        name = stock["name"]
-        pct = stock["pct"]
-
-        if EXCLUDE_NAME.search(name):
+        if not batch:
             continue
-
-        # 상승 / 하락 방향 검증
-        if type_mode == "up" and pct <= 0:
-            continue
-
-        if type_mode == "down" and pct >= 0:
-            continue
-
-        filtered.append(stock)
-
-    # 상승률 내림차순 / 하락률 오름차순
-    if type_mode == "up":
-        filtered.sort(
-            key=lambda item: item["pct"],
-            reverse=True,
-        )
-    else:
-        filtered.sort(
-            key=lambda item: item["pct"],
-        )
-
-    # 5개가 확보되지 않았더라도 실제 수집된 종목만 반환
-    result = filtered[:5]
-
-    # 오류 정보도 앱에서 확인할 수 있도록 저장
-    st.session_state[f"stock_errors_{type_mode}"] = errors
-
-    return result
-
-
-# ============================================================
-# 네이버 뉴스
-# ============================================================
-
-def clean_title(value):
-    value = re.sub(r"<[^>]+>", "", value)
-
-    return (
-        value.replace("&quot;", '"')
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&apos;", "'")
-        .strip()
-    )
-
-
-def fetch_headlines(name, today, up=True):
-    """
-    네이버 뉴스 검색 API가 설정되어 있을 때만 뉴스를 조회합니다.
-    """
-
-    if not (NAVER_ID and NAVER_SECRET):
-        return []
-
-    output = []
-    seen = set()
-
-    for suffix in ("특징주", "주가"):
 
         try:
-            response = SESSION.get(
-                "https://openapi.naver.com/v1/search/news.json",
-                params={
-                    "query": f"{name} {suffix}",
-                    "display": 10,
-                    "sort": "date",
-                },
-                headers={
-                    "X-Naver-Client-Id": NAVER_ID,
-                    "X-Naver-Client-Secret": NAVER_SECRET,
-                },
-                timeout=8,
+            rows = api_get(
+                "/api/v1/stocks",
+                {
+                    "symbols": ",".join(batch)
+                }
             )
 
-            if response.status_code != 200:
-                continue
+            if isinstance(rows, dict):
+                rows = rows.get("stocks", [])
 
-            items = response.json().get("items", [])
+            if isinstance(rows, list):
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
 
-            for item in items:
-                title = clean_title(item.get("title", ""))
+                    symbol = str(
+                        row.get("symbol", "")
+                    ).strip()
 
-                try:
-                    published = datetime.datetime.strptime(
-                        item["pubDate"],
-                        "%a, %d %b %Y %H:%M:%S %z",
-                    ).astimezone(KST)
+                    name = (
+                        row.get("name")
+                        or row.get("stockName")
+                        or row.get("displayName")
+                    )
 
-                except Exception:
-                    continue
-
-                if published.date() != today:
-                    continue
-
-                if name not in title or title in seen:
-                    continue
-
-                seen.add(title)
-
-                direction_words = UP_WORDS if up else DOWN_WORDS
-
-                score = (
-                    2 if direction_words.search(title) else 0
-                ) + (
-                    1 if REASON_WORDS.search(title) else 0
-                )
-
-                output.append({
-                    "title": title,
-                    "time": published.strftime("%H:%M"),
-                    "score": score,
-                })
+                    if symbol and name:
+                        names[symbol] = str(name).strip()
 
         except Exception:
             continue
 
-        if output:
-            break
+    return names
 
-    output.sort(
-        key=lambda item: (
-            item["score"],
-            item["time"],
-        ),
-        reverse=True,
+
+def get_rankings(mode="up", duration="1d"):
+    """
+    상승·하락 종목 순위 조회.
+
+    주의:
+    /api/v1/rankings 및 전달 파라미터는
+    토스 API의 실제 명세와 일치하는지 확인해야 합니다.
+    """
+
+    rank_type = (
+        "TOP_GAINERS"
+        if mode == "up"
+        else "TOP_LOSERS"
     )
 
-    return [
+    result = api_get(
+        "/api/v1/rankings",
         {
-            "title": item["title"],
-            "time": item["time"],
+            "type": rank_type,
+            "marketCountry": "KR",
+            "duration": duration,
+            "count": 100,
+            "excludeInvestmentCaution": True,
         }
-        for item in output[:3]
+    )
+
+    if isinstance(result, list):
+        rows = result
+        ranked_at = None
+
+    elif isinstance(result, dict):
+        rows = result.get("rankings", [])
+        ranked_at = result.get("rankedAt")
+
+    else:
+        rows = []
+        ranked_at = None
+
+    symbols = [
+        str(row.get("symbol", "")).strip()
+        for row in rows
+        if isinstance(row, dict) and row.get("symbol")
     ]
 
+    names = get_stock_names(symbols)
 
-# ============================================================
-# 테마 / 상승·하락 이유
-# ============================================================
+    stocks = []
 
-def derive_theme(stock):
-    texts = [
-        " ".join(
-            headline["title"]
-            for headline in stock.get("headlines", [])
-        ),
-        stock["name"],
-    ]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
 
-    found = []
+        symbol = str(
+            row.get("symbol", "")
+        ).strip()
 
-    for text in texts:
-        for label, pattern in THEME_RULES:
-            if (
-                label not in found
-                and re.search(pattern, text)
-            ):
-                found.append(label)
+        name = names.get(symbol)
 
-    if found:
-        return " · ".join(found[:2])
+        if not name or EXCLUDE.search(name):
+            continue
 
-    return "테마 확인 필요"
+        price_data = row.get("price") or {}
+
+        change = num(price_data.get("changeRate"))
+        price = num(price_data.get("lastPrice"))
+
+        if change is None or price is None:
+            continue
+
+        # changeRate가 비율로 반환된다는 전제입니다.
+        # 실제 응답 형식에 따라 계산식을 확인해야 합니다.
+        pct = change * 100
+
+        if mode == "up" and pct <= 0:
+            continue
+
+        if mode == "down" and pct >= 0:
+            continue
+
+        theme = next(
+            (
+                label
+                for label, pattern in THEMES
+                if re.search(pattern, name, re.I)
+            ),
+            "주요업종"
+        )
+
+        stocks.append({
+            "name": name,
+            "symbol": symbol,
+            "price": price,
+            "pct": pct,
+            "base_price": num(
+                price_data.get("basePrice")
+            ),
+            "rank": row.get("rank"),
+            "theme": theme,
+            "reason": "토스증권 당일 등락률 순위 기준",
+            "timestamp": ranked_at,
+        })
+
+    stocks.sort(
+        key=lambda stock: stock["pct"],
+        reverse=(mode == "up")
+    )
+
+    return stocks[:5], ranked_at
 
 
-def auto_reason(stock):
-    headlines = stock.get("headlines") or []
+def fetch_news(name, today):
+    """네이버 뉴스 API를 이용한 당일 관련 기사 조회."""
 
-    if headlines:
-        return headlines[0]["title"]
+    if not (NAVER_ID and NAVER_SECRET):
+        return []
 
-    return "관련 뉴스 확인 필요"
+    try:
+        response = requests.get(
+            "https://openapi.naver.com/v1/search/news.json",
+            params={
+                "query": f"{name} 특징주",
+                "display": 10,
+                "sort": "date",
+            },
+            headers={
+                "X-Naver-Client-Id": NAVER_ID,
+                "X-Naver-Client-Secret": NAVER_SECRET,
+            },
+            timeout=5,
+        )
+
+        if response.status_code != 200:
+            return []
+
+        found = []
+
+        for item in response.json().get("items", []):
+            title = re.sub(
+                r"<[^>]+>",
+                "",
+                item.get("title", "")
+            )
+
+            title = html.unescape(title)
+
+            try:
+                published = datetime.datetime.strptime(
+                    item["pubDate"],
+                    "%a, %d %b %Y %H:%M:%S %z"
+                ).astimezone(KST)
+
+            except Exception:
+                continue
+
+            if published.date() == today and name in title:
+                found.append({
+                    "title": title,
+                    "time": published.strftime("%H:%M"),
+                })
+
+        return found[:3]
+
+    except Exception:
+        return []
 
 
-def fetch_snapshot():
+def fetch_snapshot(duration):
+    """지수와 급등·급락 종목 데이터를 한 번에 조회."""
+
     now = datetime.datetime.now(KST)
 
-    indices = fetch_naver_market_index()
+    indices = get_indices()
 
-    gainers = fetch_top5_stocks("up")
-    losers = fetch_top5_stocks("down")
+    gainers, up_at = get_rankings(
+        "up",
+        duration
+    )
 
-    for stock in gainers:
-        stock["headlines"] = fetch_headlines(
+    losers, down_at = get_rankings(
+        "down",
+        duration
+    )
+
+    for stock in gainers + losers:
+        headlines = fetch_news(
             stock["name"],
-            now.date(),
-            up=True,
+            now.date()
         )
-        stock["theme"] = derive_theme(stock)
 
-    for stock in losers:
-        stock["headlines"] = fetch_headlines(
-            stock["name"],
-            now.date(),
-            up=False,
-        )
-        stock["theme"] = derive_theme(stock)
+        if headlines:
+            stock["reason"] = headlines[0]["title"]
 
     return {
-        "ts": time.time(),
-        "fetched_at": now.strftime("%H:%M:%S"),
         "date": (
-            f"{now.year}년 {now.month:02d}월 "
-            f"{now.day:02d}일 ({WEEKDAYS[now.weekday()]})"
+            f"{now.year}년 "
+            f"{now.month:02d}월 "
+            f"{now.day:02d}일 "
+            f"({WEEKDAYS[now.weekday()]})"
         ),
-        "kospi": indices["kospi"],
-        "kosdaq": indices["kosdaq"],
+        "fetched_at": now.strftime("%H:%M:%S"),
+        "ranking_at": up_at or down_at,
+        "duration": duration,
+        "indices": indices,
         "gainers": gainers,
         "losers": losers,
     }
 
 
-# ============================================================
-# 시황글 생성
-# ============================================================
-
 def fmt(value, digits=2):
+    """숫자 표시 형식."""
+
     if value is None:
         return "확인 불가"
 
     return f"{value:,.{digits}f}"
 
 
-def sgn(value):
+def pct_text(value):
+    """등락률 표시 형식."""
+
     if value is None:
         return "확인 불가"
 
-    return f"{value:+,.2f}%"
+    return f"{value:+.2f}%"
 
 
-def em(value):
-    if value is None:
-        return "➖"
+def arrow(value):
+    """등락률에 따른 아이콘."""
 
-    return "🔺" if value > 0 else "🔻" if value < 0 else "➖"
+    if value is not None and value > 0:
+        return "🔺"
+
+    if value is not None and value < 0:
+        return "🔻"
+
+    return "➖"
 
 
-def build_md(snap):
-    ss = st.session_state
+def build_markdown(snapshot):
+    """시황글 마크다운 생성."""
 
-    tm = snap["fetched_at"][:5]
+    session = st.session_state
 
     lines = [
-        f"# 📅 {snap['date']} | 오후 시황",
+        f"# 📅 {snapshot['date']} | 오후 시황",
         "",
-    ]
-
-    summary = ss.get(
-        "summary",
-        "실시간 지수와 종목별 등락을 확인하세요.",
-    ).strip()
-
-    if summary:
-        lines += [
-            f"📌 **한 줄 요약**: {summary}",
-            "",
-        ]
-
-    intro = ss.get("intro_text", "").strip()
-
-    if intro:
-        lines += [intro, ""]
-
-    # 지수
-    lines += [
+        (
+            f"📌 **한 줄 요약**: "
+            f"{session.get('summary', '당일 등락률 상위 종목과 시장 흐름을 확인하세요.')}"
+        ),
+        "",
+        session.get(
+            "intro_text",
+            "종목 순위는 토스증권 Open API의 기간별 등락률 기준입니다. "
+            "실시간 순위와 다를 수 있으므로 기준 시각을 확인해 주세요."
+        ),
+        "",
         "### 🇰🇷 장중 지수 현황",
         "",
         "| 지수 | 현재가 | 등락률 | 기준 시각 |",
@@ -722,209 +598,140 @@ def build_md(snap):
         ("kospi", "코스피"),
         ("kosdaq", "코스닥"),
     ):
-        data = snap[key]
+        data = snapshot["indices"].get(key, {})
 
         lines.append(
             f"| {label} "
-            f"| {fmt(data['price'])} "
-            f"| {em(data['pct'])} {sgn(data['pct'])} "
-            f"| {tm} |"
+            f"| {fmt(data.get('price'))} "
+            f"| {arrow(data.get('pct'))} {pct_text(data.get('pct'))} "
+            f"| {data.get('timestamp') or '확인 불가'} |"
         )
 
-    lines += ["", ""]
-
-    # 급등주
     lines += [
-        "### 🔺 급등 특징주",
+        "",
+        "",
+        "### 🔺 급등 특징주 TOP 5",
         "",
         "| 종목 | 현재가 | 등락률 | 상승 이유 | 관련 테마 |",
         "|---|---:|---:|---|---|",
     ]
 
-    for stock in snap["gainers"]:
-        name = stock["name"]
-
-        reason = (
-            ss.get(f"reason_{name}")
-            or auto_reason(stock)
-        ).replace("|", "/")
-
-        theme = (
-            ss.get(f"theme_{name}")
-            or stock.get("theme", "")
-        ).replace("|", "/")
-
+    for stock in snapshot["gainers"]:
         lines.append(
-            f"| **{name}** "
+            f"| **{stock['name']}** "
             f"| {fmt(stock['price'], 0)}원 "
-            f"| **{sgn(stock['pct'])}** "
-            f"| {reason} "
-            f"| {theme} |"
+            f"| **{pct_text(stock['pct'])}** "
+            f"| {stock['reason']} "
+            f"| {stock['theme']} |"
         )
 
-    if not snap["gainers"]:
+    if not snapshot["gainers"]:
         lines.append(
-            "| 확인된 종목 없음 | - | - | "
-            "시세 데이터 조회 필요 | - |"
+            "| 데이터 없음 | 확인 불가 | 확인 불가 | API 응답 확인 필요 | - |"
         )
 
-    lines += ["", ""]
-
-    # 급락주
     lines += [
-        "### 🔻 급락 특징주",
+        "",
+        "",
+        "### 🔻 급락 특징주 TOP 5",
         "",
         "| 종목 | 현재가 | 등락률 | 하락 이유 | 관련 테마 |",
         "|---|---:|---:|---|---|",
     ]
 
-    for stock in snap["losers"]:
-        name = stock["name"]
-
-        reason = (
-            ss.get(f"reason_{name}")
-            or auto_reason(stock)
-        ).replace("|", "/")
-
-        theme = (
-            ss.get(f"theme_{name}")
-            or stock.get("theme", "")
-        ).replace("|", "/")
-
+    for stock in snapshot["losers"]:
         lines.append(
-            f"| **{name}** "
+            f"| **{stock['name']}** "
             f"| {fmt(stock['price'], 0)}원 "
-            f"| **{sgn(stock['pct'])}** "
-            f"| {reason} "
-            f"| {theme} |"
+            f"| **{pct_text(stock['pct'])}** "
+            f"| {stock['reason']} "
+            f"| {stock['theme']} |"
         )
 
-    if not snap["losers"]:
+    if not snapshot["losers"]:
         lines.append(
-            "| 확인된 종목 없음 | - | - | "
-            "시세 데이터 조회 필요 | - |"
+            "| 데이터 없음 | 확인 불가 | 확인 불가 | API 응답 확인 필요 | - |"
         )
 
-    lines += ["", ""]
-
-    # 경제 이슈
     lines += [
+        "",
+        "",
         "### 🔥 오늘의 주요 경제 이슈",
         "",
     ]
 
     for i in (1, 2, 3):
-        title = ss.get(f"is{i}t", "").strip()
-        direction = ss.get(f"is{i}m", "➖")
-        content = ss.get(f"is{i}c", "").strip()
-        stocks = ss.get(f"is{i}s", "").strip()
-        check = ss.get(f"is{i}k", "").strip()
+        title = session.get(f"is{i}t", "").strip()
 
-        number = ("①", "②", "③")[i - 1]
+        if not title:
+            continue
 
-        if title:
-            lines.append(f"**{number} {direction} {title}**")
+        lines.append(
+            f"**{i}. {session.get(f'is{i}m', '➖')} {title}**"
+        )
+
+        content = session.get(f"is{i}c", "").strip()
 
         if content:
             lines.append(f"- 내용: {content}")
 
-        if stocks:
-            names = ", ".join(
-                f"**{item.strip()}**"
-                for item in re.split(r"[,，]", stocks)
-                if item.strip()
-            )
-            lines.append(f"- 📌 관련 종목: {names}")
+        related = session.get(f"is{i}s", "").strip()
+
+        if related:
+            lines.append(f"- 📌 관련 종목: {related}")
+
+        check = session.get(f"is{i}k", "").strip()
 
         if check:
             lines.append(f"- ⏰ 체크: {check}")
 
         lines.append("")
 
-    # 테마
-    themes = ss.get("themes", "").strip()
+    sections = [
+        (
+            "🏷️ 오늘 강했던 테마",
+            "themes",
+            "AI 반도체 · 2차전지",
+        ),
+        (
+            "👀 내일 체크 포인트",
+            "checks",
+            "급등 종목 상승 지속 여부 / 급락 종목 추가 하락 여부",
+        ),
+        (
+            "🔍 핵심 키워드",
+            "keywords",
+            "#코스피 #코스닥 #급등주 #급락주",
+        ),
+        (
+            "⚠️ 한 줄 주의",
+            "caution",
+            "등락률 순위는 선택한 기간 기준이며 실시간 순위와 다를 수 있습니다.",
+        ),
+    ]
 
-    if themes:
-        formatted = " · ".join(
-            f"**{item.strip()}**"
-            for item in re.split(r"[·,]", themes)
-            if item.strip()
-        )
+    for title, key, default in sections:
+        value = session.get(key, default).strip()
 
-        lines += [
-            "### 🏷️ 오늘 강했던 테마",
-            "",
-            formatted,
-            "",
-        ]
-
-    # 체크 포인트
-    checks = ss.get("checks", "").strip()
-
-    if checks:
-        lines += [
-            "### 👀 내일 체크 포인트",
-            "",
-        ]
-
-        lines += [
-            f"- {item.strip()}"
-            for item in checks.split("/")
-            if item.strip()
-        ]
-
-        lines.append("")
-
-    keywords = ss.get("keywords", "").strip()
-
-    if keywords:
-        lines += [
-            "### 🔍 핵심 키워드",
-            "",
-            keywords,
-            "",
-        ]
-
-    caution = ss.get("caution", "").strip()
-
-    if caution:
-        lines += [
-            "### ⚠️ 한 줄 주의",
-            "",
-            caution,
-            "",
-        ]
+        if value:
+            lines += [
+                f"### {title}",
+                "",
+                value.replace("/", "\n- "),
+                "",
+            ]
 
     return "\n".join(lines)
 
 
-# ============================================================
-# 마크다운 → HTML
-# ============================================================
+def md_to_html(markdown):
+    """마크다운을 간단한 HTML로 변환."""
 
-def _inline(value):
-    escaped = htmllib.escape(value)
-
-    return re.sub(
-        r"\*\*(.+?)\*\*",
-        r"<b>\1</b>",
-        escaped,
-    )
-
-
-def md_to_html(md):
     output = []
-    table_open = False
-    list_open = False
+    in_table = False
 
-    for line in md.split("\n"):
-
+    for line in markdown.splitlines():
         if line.startswith("|"):
-
-            if list_open:
-                output.append("</ul>")
-                list_open = False
-
             cells = [
                 cell.strip()
                 for cell in line.split("|")[1:-1]
@@ -936,437 +743,118 @@ def md_to_html(md):
             ):
                 continue
 
-            if not table_open:
-                table_open = True
-
+            if not in_table:
                 output.append(
-                    '<table border="1" cellspacing="0" '
-                    'cellpadding="6" '
-                    'style="border-collapse:collapse">'
-                    "<thead><tr>"
-                    + "".join(
-                        f"<th>{_inline(cell)}</th>"
-                        for cell in cells
-                    )
-                    + "</tr></thead><tbody>"
+                    "<table border='1' cellpadding='6' "
+                    "cellspacing='0' "
+                    "style='border-collapse:collapse'>"
                 )
+                in_table = True
 
-            else:
-                output.append(
-                    "<tr>"
-                    + "".join(
-                        f"<td>{_inline(cell)}</td>"
-                        for cell in cells
-                    )
-                    + "</tr>"
+            rendered_cells = []
+
+            for cell in cells:
+                safe = html.escape(cell)
+                safe = re.sub(
+                    r"\*\*(.*?)\*\*",
+                    r"<b>\1</b>",
+                    safe
                 )
-
-            continue
-
-        if table_open:
-            output.append("</tbody></table>")
-            table_open = False
-
-        if line.startswith("- "):
-
-            if not list_open:
-                output.append("<ul>")
-                list_open = True
+                rendered_cells.append(f"<td>{safe}</td>")
 
             output.append(
-                f"<li>{_inline(line[2:])}</li>"
+                "<tr>" + "".join(rendered_cells) + "</tr>"
             )
+
             continue
 
-        if list_open:
-            output.append("</ul>")
-            list_open = False
+        if in_table:
+            output.append("</table>")
+            in_table = False
 
         if line.startswith("# "):
             output.append(
-                f"<h1>{_inline(line[2:])}</h1>"
+                "<h1>" + html.escape(line[2:]) + "</h1>"
             )
 
         elif line.startswith("### "):
             output.append(
-                f"<h3>{_inline(line[4:])}</h3>"
-            )
-
-        elif line.startswith("> "):
-            output.append(
-                f"<blockquote>{_inline(line[2:])}</blockquote>"
+                "<h3>" + html.escape(line[4:]) + "</h3>"
             )
 
         elif line.strip():
-            output.append(
-                f"<p>{_inline(line)}</p>"
+            safe = html.escape(line)
+
+            safe = re.sub(
+                r"\*\*(.*?)\*\*",
+                r"<b>\1</b>",
+                safe
             )
 
-    if list_open:
-        output.append("</ul>")
+            output.append("<p>" + safe + "</p>")
 
-    if table_open:
-        output.append("</tbody></table>")
+    if in_table:
+        output.append("</table>")
 
     return "\n".join(output)
 
 
-# ============================================================
-# 복사 버튼
-# ============================================================
+def copy_buttons(markdown):
+    """서식 포함 복사 및 마크다운 복사 버튼."""
 
-COPY_HTML = """
-<div style="display:flex;gap:8px;align-items:center;
-font-family:sans-serif;font-size:13px">
+    payload = json.dumps(
+        {
+            "md": markdown,
+            "html": md_to_html(markdown),
+        },
+        ensure_ascii=False
+    ).replace("</", "<\\/")
 
-<button id="r"
-style="padding:8px 14px;border-radius:6px;border:0;
-background:#0f5c5c;color:#fff;font-weight:600;cursor:pointer">
-복사 (서식 포함)
-</button>
+    page = f"""
+    <button id="rich">복사 (서식 포함)</button>
+    <button id="plain">복사 (마크다운)</button>
+    <span id="status"></span>
 
-<button id="m"
-style="padding:8px 14px;border-radius:6px;
-border:1px solid #bbb;background:#fff;cursor:pointer">
-복사 (마크다운)
-</button>
+    <script>
+    const P = {payload};
+    const s = document.getElementById('status');
 
-<span id="t" style="color:#555"></span>
-</div>
-
-<script>
-const P = __PAYLOAD__;
-
-const msg = s => {
-    document.getElementById('t').textContent = s;
-};
-
-function copyText(text) {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    document.body.appendChild(ta);
-    ta.select();
-
-    const ok = document.execCommand('copy');
-    ta.remove();
-
-    return ok;
-}
-
-function copyRichFallback(html) {
-    const d = document.createElement('div');
-    d.innerHTML = html;
-    d.style.position = 'fixed';
-    d.style.left = '-9999px';
-
-    document.body.appendChild(d);
-
-    const r = document.createRange();
-    r.selectNodeContents(d);
-
-    const s = window.getSelection();
-    s.removeAllRanges();
-    s.addRange(r);
-
-    const ok = document.execCommand('copy');
-
-    s.removeAllRanges();
-    d.remove();
-
-    return ok;
-}
-
-document.getElementById('r').onclick = async () => {
-    try {
-        if (
-            window.ClipboardItem &&
-            navigator.clipboard &&
-            navigator.clipboard.write
-        ) {
+    document.getElementById('rich').onclick = async () => {{
+        try {{
             await navigator.clipboard.write([
-                new ClipboardItem({
+                new ClipboardItem({{
                     'text/html': new Blob(
                         [P.html],
-                        {type: 'text/html'}
+                        {{type: 'text/html'}}
                     ),
                     'text/plain': new Blob(
                         [P.md],
-                        {type: 'text/plain'}
+                        {{type: 'text/plain'}}
                     )
-                })
+                }})
             ]);
 
-            msg('서식 포함으로 복사했습니다');
-            return;
-        }
-    } catch (e) {}
+            s.textContent = ' 복사 완료';
 
-    msg(
-        copyRichFallback(P.html)
-        ? '서식 포함으로 복사했습니다'
-        : '복사 실패'
-    );
-};
+        }} catch (e) {{
+            s.textContent = ' 복사 실패';
+        }}
+    }};
 
-document.getElementById('m').onclick = async () => {
-    try {
-        await navigator.clipboard.writeText(P.md);
-        msg('마크다운으로 복사했습니다');
-        return;
-    } catch (e) {}
+    document.getElementById('plain').onclick = async () => {{
+        try {{
+            await navigator.clipboard.writeText(P.md);
+            s.textContent = ' 복사 완료';
 
-    msg(
-        copyText(P.md)
-        ? '마크다운으로 복사했습니다'
-        : '복사 실패'
-    );
-};
-</script>
-"""
+        }} catch (e) {{
+            s.textContent = ' 복사 실패';
+        }}
+    }};
+    </script>
+    """
 
+    components.html(page, height=45)
 
-def copy_buttons(md):
-    payload = json.dumps(
-        {
-            "md": md,
-            "html": md_to_html(md),
-        },
-        ensure_ascii=False,
-    ).replace("</", "<\\/")
-
-    page = COPY_HTML.replace(
-        "__PAYLOAD__",
-        payload,
-    )
-
-    components.html(
-        page,
-        height=60,
-    )
-
-
-# ============================================================
-# 화면 구성
-# ============================================================
-
-def colored(value, text):
-    if value is None:
-        return text
-
-    if value > 0:
-        return f":red[{text}]"
-
-    if value < 0:
-        return f":blue[{text}]"
-
-    return text
-
-
-def stock_table(title, stocks, word, mode):
-    st.subheader(title)
-
-    errors = st.session_state.get(
-        f"stock_errors_{mode}",
-        [],
-    )
-
-    if not stocks:
-
-        st.warning(
-            "실제 시세 데이터를 가져오지 못했거나 "
-            "표시할 종목이 없습니다."
-        )
-
-        for error in errors:
-            st.caption(error)
-
-        st.caption(
-            "네이버 증권 API 응답 및 Streamlit 배포 로그를 "
-            "확인해 주세요."
-        )
-
-        return
-
-    columns = st.columns(
-        [2.2, 1.2, 1.3, 4.5, 2.2]
-    )
-
-    for column, label in zip(
-        columns,
-        [
-            "종목",
-            "현재가",
-            "등락률",
-            f"{word} 이유",
-            "관련 테마",
-        ],
-    ):
-        column.caption(label)
-
-    for stock in stocks:
-        columns = st.columns(
-            [2.2, 1.2, 1.3, 4.5, 2.2]
-        )
-
-        name = stock["name"]
-
-        columns[0].markdown(
-            f"**{name}**"
-        )
-
-        columns[1].markdown(
-            f"{stock['price']:,.0f}"
-        )
-
-        columns[2].markdown(
-            colored(
-                stock["pct"],
-                f"{em(stock['pct'])} {sgn(stock['pct'])}",
-            )
-        )
-
-        reason_key = f"reason_{name}"
-        theme_key = f"theme_{name}"
-
-        if reason_key not in st.session_state:
-            st.session_state[reason_key] = auto_reason(stock)
-
-        if theme_key not in st.session_state:
-            st.session_state[theme_key] = stock.get(
-                "theme",
-                "테마 확인 필요",
-            )
-
-        columns[3].text_input(
-            "이유",
-            key=reason_key,
-            label_visibility="collapsed",
-        )
-
-        columns[4].text_input(
-            "테마",
-            key=theme_key,
-            label_visibility="collapsed",
-        )
-
-
-def manual_inputs():
-    with st.expander(
-        "📝 시황글 추가 내용 편집 (요약, 이슈, 테마 등)",
-        expanded=True,
-    ):
-
-        if "summary" not in st.session_state:
-            st.session_state["summary"] = (
-                "실시간 지수와 종목별 등락을 확인하세요."
-            )
-
-        if "intro_text" not in st.session_state:
-            st.session_state["intro_text"] = (
-                "국내 증시의 주요 지수와 종목별 등락 현황을 "
-                "조회 시각 기준으로 정리했습니다. "
-                "종목별 상승·하락 이유는 관련 뉴스 확인 후 "
-                "작성해 주세요."
-            )
-
-        st.text_input(
-            "한 줄 요약",
-            key="summary",
-        )
-
-        st.text_area(
-            "인트로 문구",
-            key="intro_text",
-        )
-
-        for i in (1, 2, 3):
-
-            st.markdown(f"**이슈 {i}**")
-
-            a, b, c = st.columns([1, 3, 3])
-
-            if f"is{i}m" not in st.session_state:
-                st.session_state[f"is{i}m"] = "➖"
-
-            if f"is{i}t" not in st.session_state:
-                st.session_state[f"is{i}t"] = ""
-
-            if f"is{i}s" not in st.session_state:
-                st.session_state[f"is{i}s"] = ""
-
-            if f"is{i}c" not in st.session_state:
-                st.session_state[f"is{i}c"] = ""
-
-            if f"is{i}k" not in st.session_state:
-                st.session_state[f"is{i}k"] = ""
-
-            a.selectbox(
-                "방향",
-                ["🔺", "🔻", "➖"],
-                key=f"is{i}m",
-                label_visibility="collapsed",
-            )
-
-            b.text_input(
-                "제목",
-                key=f"is{i}t",
-                label_visibility="collapsed",
-            )
-
-            c.text_input(
-                "관련 종목",
-                key=f"is{i}s",
-                label_visibility="collapsed",
-            )
-
-            st.text_input(
-                "내용",
-                key=f"is{i}c",
-            )
-
-            st.text_input(
-                "체크",
-                key=f"is{i}k",
-            )
-
-        defaults = {
-            "themes": "",
-            "checks": "",
-            "keywords": "",
-            "caution": (
-                "급등에 따른 차익실현과 종목별 변동성 확대에 "
-                "유의하세요."
-            ),
-        }
-
-        for key, value in defaults.items():
-            if key not in st.session_state:
-                st.session_state[key] = value
-
-        st.text_input(
-            "강했던 테마",
-            key="themes",
-        )
-
-        st.text_input(
-            "내일 체크 포인트 (/로 구분)",
-            key="checks",
-        )
-
-        st.text_input(
-            "핵심 키워드",
-            key="keywords",
-        )
-
-        st.text_input(
-            "한 줄 주의",
-            key="caution",
-        )
-
-
-# ============================================================
-# 메인 앱
-# ============================================================
 
 def main():
     st.title("MTNW 오후 시황")
@@ -1376,126 +864,270 @@ def main():
 
         auto = st.selectbox(
             "자동 갱신",
-            [0, 30, 60, 120],
+            [0, 60, 120, 300],
             format_func=lambda value: (
                 "끔" if value == 0 else f"{value}초"
-            ),
+            )
+        )
+
+        duration = st.selectbox(
+            "급등·급락 순위 기준",
+            ["1d", "1w", "1mo", "3mo", "6mo", "1y"],
+            format_func=lambda value: {
+                "1d": "당일",
+                "1w": "1주",
+                "1mo": "1개월",
+                "3mo": "3개월",
+                "6mo": "6개월",
+                "1y": "1년",
+            }[value]
+        )
+
+        st.caption(
+            "토스증권 TOP_GAINERS/TOP_LOSERS는 "
+            "realtime 기간을 지원하지 않습니다."
         )
 
         if st.button("로그아웃"):
             st.session_state["pw_ok"] = False
             st.rerun()
 
-    @st.fragment(
-        run_every=auto if auto else None
-    )
+    @st.fragment(run_every=auto if auto else None)
     def body():
 
-        ss = st.session_state
-
-        clicked = st.button(
-            "지금 시세 조회",
-            type="primary",
+        should_fetch = (
+            st.button("지금 시세 조회", type="primary")
+            or "snapshot" not in st.session_state
+            or st.session_state.get("duration") != duration
         )
 
-        if clicked or "snap" not in ss:
-
+        if should_fetch:
             try:
-                with st.spinner(
-                    "실시간 시세 조회 중..."
-                ):
-                    snap = fetch_snapshot()
+                with st.spinner("토스증권 시세 조회 중..."):
+                    st.session_state["snapshot"] = fetch_snapshot(
+                        duration
+                    )
 
-                ss["snap"] = snap
+                    st.session_state["duration"] = duration
+                    st.session_state.pop("api_error", None)
 
-            except Exception as exc:
-                st.error(
-                    f"시세 조회 중 오류가 발생했습니다: {exc}"
-                )
+            except Exception as error:
+                st.session_state["api_error"] = str(error)
+                st.error(f"시세 조회 실패: {error}")
 
-                return
+        snapshot = st.session_state.get("snapshot")
 
-        snap = ss.get("snap")
-
-        if not snap:
+        if not snapshot:
             st.info(
-                "'지금 시세 조회' 버튼을 눌러 "
-                "시세를 불러오세요."
+                "토스증권 API 인증·허용 IP·랭킹 응답을 확인해 주세요."
             )
             return
 
+        if st.session_state.get("api_error"):
+            st.warning(
+                f"최근 조회 오류: {st.session_state['api_error']}"
+            )
+
         st.caption(
-            f"{snap['date']} · "
-            f"조회 {snap['fetched_at']}"
+            f"{snapshot['date']} · "
+            f"화면 조회 {snapshot['fetched_at']} · "
+            f"랭킹 기준 {snapshot['ranking_at'] or '확인 불가'} · "
+            "토스증권 Open API"
         )
 
-        # 지수 표시
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
 
-        for column, key, label in (
+        for col, key, label in (
             (c1, "kospi", "코스피"),
             (c2, "kosdaq", "코스닥"),
         ):
+            data = snapshot["indices"].get(key, {})
 
-            data = snap[key]
+            col.markdown(
+                f"**{label}**  \n### {fmt(data.get('price'))}"
+            )
 
-            column.markdown(f"**{label}**")
+            col.markdown(
+                f"{arrow(data.get('pct'))} "
+                f"{pct_text(data.get('pct'))}"
+            )
 
-            if data["price"] is None:
-                column.error("지수 조회 실패")
-                column.caption(data.get("error") or "")
-            else:
-                column.markdown(
-                    f"### {fmt(data['price'])}"
+            if data.get("pct") is None:
+                col.caption(
+                    "전일 종가를 확인할 수 없어 "
+                    "등락률은 표시하지 않았습니다."
                 )
 
-                column.markdown(
-                    colored(
-                        data["pct"],
-                        f"{em(data['pct'])} {sgn(data['pct'])}",
-                    )
+        st.subheader("🔺 급등 특징주 TOP 5")
+
+        if not snapshot["gainers"]:
+            st.warning(
+                "급등 랭킹이 비어 있습니다. "
+                "선택한 기간의 랭킹 데이터가 있는지 확인하세요."
+            )
+
+        else:
+            for stock in snapshot["gainers"]:
+                a, b, c, d, e = st.columns(
+                    [2, 1.2, 1.2, 4, 2]
                 )
 
-        c3.markdown("**원/달러 환율**")
+                a.markdown(f"**{stock['name']}**")
+                b.write(fmt(stock["price"], 0))
 
-        c3.info(
-            "환율 데이터는 별도 연동이 필요합니다. "
-            "실시간 값으로 확인된 수치가 아닙니다."
-        )
+                c.markdown(
+                    f"🔺 {pct_text(stock['pct'])}"
+                )
 
-        # 급등 / 급락
-        stock_table(
-            "🔺 급등 특징주 TOP 5",
-            snap["gainers"],
-            "상승",
-            "up",
-        )
+                stock["reason"] = d.text_input(
+                    "상승 이유",
+                    value=stock["reason"],
+                    key=f"up_reason_{stock['symbol']}",
+                    label_visibility="collapsed",
+                )
 
-        stock_table(
-            "🔻 급락 특징주 TOP 5",
-            snap["losers"],
-            "하락",
-            "down",
-        )
+                stock["theme"] = e.text_input(
+                    "테마",
+                    value=stock["theme"],
+                    key=f"up_theme_{stock['symbol']}",
+                    label_visibility="collapsed",
+                )
 
-        # 추가 입력
-        manual_inputs()
+        st.subheader("🔻 급락 특징주 TOP 5")
 
-        # 미리보기
+        if not snapshot["losers"]:
+            st.warning(
+                "급락 랭킹이 비어 있습니다. "
+                "선택한 기간의 랭킹 데이터가 있는지 확인하세요."
+            )
+
+        else:
+            for stock in snapshot["losers"]:
+                a, b, c, d, e = st.columns(
+                    [2, 1.2, 1.2, 4, 2]
+                )
+
+                a.markdown(f"**{stock['name']}**")
+                b.write(fmt(stock["price"], 0))
+
+                c.markdown(
+                    f"🔻 {pct_text(stock['pct'])}"
+                )
+
+                stock["reason"] = d.text_input(
+                    "하락 이유",
+                    value=stock["reason"],
+                    key=f"down_reason_{stock['symbol']}",
+                    label_visibility="collapsed",
+                )
+
+                stock["theme"] = e.text_input(
+                    "테마",
+                    value=stock["theme"],
+                    key=f"down_theme_{stock['symbol']}",
+                    label_visibility="collapsed",
+                )
+
+        with st.expander(
+            "📝 시황글 추가 내용 편집",
+            expanded=True
+        ):
+            st.text_input(
+                "한 줄 요약",
+                key="summary",
+                value="당일 등락률 상위 종목과 시장 흐름을 확인하세요."
+            )
+
+            st.text_area(
+                "인트로 문구",
+                key="intro_text",
+                value=(
+                    "종목 순위는 토스증권 Open API의 기간별 등락률 기준입니다. "
+                    "실시간 순위와 다를 수 있으므로 기준 시각을 확인해 주세요."
+                )
+            )
+
+            issues = [
+                (1, "🔺", "당일 상승률 상위 종목 흐름"),
+                (2, "🔻", "당일 하락률 상위 종목 흐름"),
+                (3, "➖", "시장 변동성 확인"),
+            ]
+
+            for i, direction, title in issues:
+                st.markdown(f"**이슈 {i}**")
+
+                a, b, c = st.columns([1, 3, 3])
+
+                a.selectbox(
+                    "방향",
+                    ["🔺", "🔻", "➖"],
+                    index=["🔺", "🔻", "➖"].index(direction),
+                    key=f"is{i}m",
+                )
+
+                b.text_input(
+                    "제목",
+                    value=title,
+                    key=f"is{i}t",
+                )
+
+                c.text_input(
+                    "관련 종목",
+                    key=f"is{i}s",
+                )
+
+                st.text_input(
+                    "내용",
+                    key=f"is{i}c",
+                )
+
+                st.text_input(
+                    "체크",
+                    key=f"is{i}k",
+                )
+
+            st.text_input(
+                "강했던 테마",
+                key="themes",
+                value="AI 반도체 · 2차전지",
+            )
+
+            st.text_input(
+                "내일 체크 포인트 (/로 구분)",
+                key="checks",
+                value=(
+                    "급등 종목 상승 지속 여부 / "
+                    "급락 종목 추가 하락 여부 / "
+                    "시장 거래대금 변화"
+                ),
+            )
+
+            st.text_input(
+                "핵심 키워드",
+                key="keywords",
+                value="#코스피 #코스닥 #급등주 #급락주 #주식시황",
+            )
+
+            st.text_input(
+                "한 줄 주의",
+                key="caution",
+                value=(
+                    "등락률 순위는 선택한 기간 기준이며 "
+                    "실시간 순위와 다를 수 있습니다."
+                ),
+            )
+
         st.subheader("시황글 미리보기")
 
-        md = build_md(snap)
+        markdown = build_markdown(snapshot)
 
-        copy_buttons(md)
+        copy_buttons(markdown)
 
         with st.container(border=True):
-            st.markdown(md)
+            st.markdown(markdown)
 
         with st.expander("마크다운 원문 보기"):
-            st.code(
-                md,
-                language="markdown",
-            )
+            st.code(markdown, language="markdown")
 
     body()
 
