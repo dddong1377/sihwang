@@ -126,68 +126,210 @@ def fetch_naver_market_index():
 
 
 def fetch_top5_stocks(type_mode="up"):
-    all_data = []
+    """
+    네이버 증권 JSON 데이터를 이용해 급등·급락 종목을 조회합니다.
+
+    type_mode:
+        up   = 상승률 상위
+        down = 하락률 상위
+
+    실제 응답에서 확인된 종목만 반환하며,
+    데이터 조회 실패를 정상적인 빈 결과로 숨기지 않습니다.
+    """
+
+    import requests
+    import re
+
+    session = requests.Session()
+
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://finance.naver.com/"
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://m.stock.naver.com/",
+        "Accept": "application/json, text/plain, */*",
     }
-    
-    # 코스피(0), 코스닥(1) 순위 페이지 크롤링
-    for sosok in ["0", "1"]:
-        url = f"https://finance.naver.com/sise/{'sise_rise.naver' if type_mode=='up' else 'sise_fall.naver'}?sosok={sosok}"
+
+    sort_type = "up" if type_mode == "up" else "down"
+
+    all_data = []
+    errors = []
+
+    # KOSPI와 KOSDAQ을 각각 조회합니다.
+    markets = ["KOSPI", "KOSDAQ"]
+
+    for market in markets:
+        url = (
+            "https://m.stock.naver.com/front-api/"
+            "stock/domestic/stockList"
+        )
+
+        params = {
+            "sortType": sort_type,
+            "category": market,
+            "page": 1,
+            "pageSize": 50,
+        }
+
         try:
-            res = requests.get(url, headers=headers, timeout=7)
-            if res.status_code != 200:
+            response = session.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=10,
+            )
+
+            # 접근 거부 또는 비정상 응답은 별도로 기록합니다.
+            if response.status_code != 200:
+                errors.append(
+                    f"{market}: HTTP {response.status_code}"
+                )
                 continue
-            
-            soup = BeautifulSoup(res.content.decode("euc-kr", "ignore"), "html.parser")
-            rows = soup.select("table.type_2 tr")
-            
-            for r in rows:
-                cols = r.select("td")
-                if len(cols) > 4 and cols[1].find("a"):
-                    name = cols[1].text.strip()
-                    if not name or EXCLUDE_NAME.search(name):
-                        continue
-                    
-                    price_str = cols[2].text.strip().replace(",", "")
-                    try:
-                        price = float(price_str)
-                    except ValueError:
-                        continue
 
-                    change_rate = 0.0
-                    for col in cols:
-                        t = col.text.strip()
-                        if "%" in t:
-                            cleaned = t.replace("%", "").replace("+", "").replace(",", "").strip()
-                            try:
-                                change_rate = float(cleaned)
-                                if type_mode == "down" and ("-" in t or change_rate > 0):
-                                    change_rate = -abs(change_rate)
-                            except ValueError:
-                                pass
-                            break
+            try:
+                payload = response.json()
+            except ValueError:
+                errors.append(
+                    f"{market}: JSON 응답을 읽을 수 없습니다."
+                )
+                continue
 
-                    all_data.append({
-                        "name": name, 
-                        "price": price, 
-                        "pct": change_rate, 
-                        "sector": "주요업종"
-                    })
-        except Exception as e:
-            print(f"Crawling Error ({sosok}): {e}")
+            if not isinstance(payload, (dict, list)):
+                errors.append(
+                    f"{market}: 예상하지 못한 응답 형식입니다."
+                )
+                continue
 
-    # 중복 제거 및 정렬
-    unique_data = {d["name"]: d for d in all_data}
-    sorted_data = list(unique_data.values())
-    
+            # 응답 구조가 달라져도 종목 데이터를 탐색합니다.
+            candidates = []
+
+            def walk(obj):
+                if isinstance(obj, dict):
+                    # 네이버 응답의 대표적인 종목 필드명
+                    name = (
+                        obj.get("stockName")
+                        or obj.get("name")
+                        or obj.get("itemName")
+                    )
+
+                    price_value = (
+                        obj.get("closePrice")
+                        if obj.get("closePrice") is not None
+                        else obj.get("currentPrice")
+                    )
+
+                    pct_value = (
+                        obj.get("fluctuationsRatio")
+                        if obj.get("fluctuationsRatio") is not None
+                        else obj.get("changeRate")
+                    )
+
+                    # 종목명, 현재가, 등락률이 모두 있는 항목만 처리
+                    if (
+                        isinstance(name, str)
+                        and price_value is not None
+                        and pct_value is not None
+                    ):
+                        try:
+                            price = float(
+                                str(price_value)
+                                .replace(",", "")
+                                .replace("+", "")
+                                .strip()
+                            )
+
+                            pct = float(
+                                str(pct_value)
+                                .replace("%", "")
+                                .replace(",", "")
+                                .replace("+", "")
+                                .strip()
+                            )
+
+                            name = name.strip()
+
+                            if (
+                                name
+                                and price > 0
+                                and -100 <= pct <= 100
+                            ):
+                                candidates.append({
+                                    "name": name,
+                                    "price": price,
+                                    "pct": pct,
+                                    "sector": market,
+                                })
+
+                        except (ValueError, TypeError):
+                            pass
+
+                    for value in obj.values():
+                        if isinstance(value, (dict, list)):
+                            walk(value)
+
+                elif isinstance(obj, list):
+                    for value in obj:
+                        walk(value)
+
+            walk(payload)
+
+            # 동일 종목 중복 제거
+            for stock in candidates:
+                if not any(
+                    item["name"] == stock["name"]
+                    for item in all_data
+                ):
+                    all_data.append(stock)
+
+        except requests.RequestException as e:
+            errors.append(f"{market}: {type(e).__name__}")
+
+    # 실제 종목 데이터가 수집되지 않았다면 원인을 표시합니다.
+    if not all_data:
+        st.warning(
+            f"네이버 증권에서 종목 데이터를 가져오지 못했습니다. "
+            f"조회 모드: {sort_type}"
+        )
+
+        if errors:
+            for error in errors:
+                st.caption(error)
+
+        return []
+
+    # ETF, ETN, 스팩, 우선주 등 제외
+    filtered = []
+
+    for stock in all_data:
+        name = stock["name"]
+
+        if EXCLUDE_NAME.search(name):
+            continue
+
+        # 상승·하락 방향이 실제로 일치하는 종목만 남깁니다.
+        if type_mode == "up" and stock["pct"] <= 0:
+            continue
+
+        if type_mode == "down" and stock["pct"] >= 0:
+            continue
+
+        filtered.append(stock)
+
+    # 상승률 또는 하락률 기준으로 정렬
     if type_mode == "up":
-        sorted_data.sort(key=lambda x: x["pct"], reverse=True)
+        filtered.sort(
+            key=lambda x: x["pct"],
+            reverse=True,
+        )
     else:
-        sorted_data.sort(key=lambda x: x["pct"], reverse=False)
+        filtered.sort(
+            key=lambda x: x["pct"],
+            reverse=False,
+        )
 
-    return sorted_data[:5]
+    return filtered[:5]
 
 
 # ============================================================ 네이버 뉴스
