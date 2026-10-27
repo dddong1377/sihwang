@@ -106,9 +106,8 @@ THEME_RULES = [
 ]
 
 
-# ============================================================ TOSS API & 데이터 수집
+# ============================================================ 데이터 수집 로직
 def get_toss_auth_status():
-  """Toss Client Key 검증 및 인증 상태 확인"""
   if TOSS_CLIENT_ID and TOSS_CLIENT_SECRET:
     return "토스 API 연동 성공 (인증 완료)"
   return "토스 API 키 미설정 (기본 인증 연동 모드)"
@@ -123,10 +122,12 @@ def fetch_naver_market_index():
         headers=headers,
         timeout=3,
     ).json()
-    res["kospi"]["price"] = float(r_k.get("closePrice", "0").replace(",", ""))
+    res["kospi"]["price"] = float(
+        str(r_k.get("closePrice", "0")).replace(",", "")
+    )
     res["kospi"]["pct"] = float(r_k.get("fluctuationsRatio", "0"))
   except Exception:
-    res["kospi"] = {"price": 5709.27, "pct": 4.38}
+    res["kospi"] = {"price": 5638.34, "pct": 3.09}
 
   try:
     r_kq = requests.get(
@@ -135,142 +136,104 @@ def fetch_naver_market_index():
         timeout=3,
     ).json()
     res["kosdaq"]["price"] = float(
-        r_kq.get("closePrice", "0").replace(",", "")
+        str(r_kq.get("closePrice", "0")).replace(",", "")
     )
     res["kosdaq"]["pct"] = float(r_kq.get("fluctuationsRatio", "0"))
   except Exception:
-    res["kosdaq"] = {"price": 757.97, "pct": 4.23}
+    res["kosdaq"] = {"price": 743.83, "pct": 2.29}
 
   return res
 
 
 def fetch_top5_stocks(type_mode="up"):
-  url = (
-      "https://finance.naver.com/sise/sise_rise.naver?sosok=0"
-      if type_mode == "up"
-      else "https://finance.naver.com/sise/sise_fall.naver?sosok=0"
-  )
-  headers = {"User-Agent": "Mozilla/5.0"}
-  try:
-    res = requests.get(url, headers=headers, timeout=5)
-    tables = pd.read_html(res.content.decode("euc-kr", "ignore"), header=0)
-    target_df = None
-    for df in tables:
-      if "종목명" in df.columns and "현재가" in df.columns:
-        target_df = df
-        break
+  all_data = []
+  # 코스피(0), 코스닥(1) 모두 수집하여 정확한 상하위 종목 추출
+  for sosok in ["0", "1"]:
+    url = (
+        f"https://finance.naver.com/sise/{'sise_rise.naver' if type_mode=='up' else 'sise_fall.naver'}?sosok={sosok}"
+    )
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+      res = requests.get(url, headers=headers, timeout=5)
+      tables = pd.read_html(res.content.decode("euc-kr", "ignore"), header=0)
+      for df in tables:
+        if len(df) > 5:
+          cols = [str(c) for c in df.columns]
+          name_col = next((c for c in cols if "종목명" in c), None)
+          price_col = next((c for c in cols if "현재가" in c), None)
+          rate_col = next((c for c in cols if "등락률" in c), None)
 
-    if target_df is not None:
-      target_df = target_df.dropna(subset=["종목명"])
-      data = []
-      for _, row in target_df.iterrows():
-        name = str(row.get("종목명", "")).strip()
-        if not name or name == "nan" or EXCLUDE_NAME.search(name):
-          continue
-        price = str(row.get("현재가", "0"))
-        change_rate_str = (
-            str(row.get("등락률", "0%"))
-            .replace("%", "")
-            .replace("+", "")
-            .replace(",", "")
-            .strip()
-        )
-        try:
-          pct = float(change_rate_str)
-          if type_mode == "down" and pct > 0:
-            pct = -pct
-        except ValueError:
-          pct = 0.0
+          if name_col and price_col and rate_col:
+            for _, row in df.iterrows():
+              name = str(row.get(name_col, "")).strip()
+              if not name or name == "nan" or EXCLUDE_NAME.search(name):
+                continue
+              try:
+                price_val = float(
+                    str(row.get(price_col, "0")).replace(",", "")
+                )
+                rate_str = (
+                    str(row.get(rate_col, "0%"))
+                    .replace("%", "")
+                    .replace("+", "")
+                    .replace(",", "")
+                    .strip()
+                )
+                pct_val = float(rate_str)
+                if type_mode == "down" and pct_val > 0:
+                  pct_val = -pct_val
+                all_data.append({
+                    "name": name,
+                    "price": price_val,
+                    "pct": pct_val,
+                    "sector": "주요업종",
+                })
+              except Exception:
+                continue
+    except Exception as e:
+      print(e)
 
-        data.append({
-            "code": "000000",
-            "name": name,
-            "price": float(price.replace(",", "")),
-            "pct": pct,
-            "sector": "주요업종",
-        })
-      result_df = pd.DataFrame(data)
-      if not result_df.empty:
-        return result_df.head(5).to_dict("records")
-  except Exception as e:
-    print(e)
+  # 중복 제거 및 정렬
+  unique_data = {}
+  for item in all_data:
+    if item["name"] not in unique_data:
+      unique_data[item["name"]] = item
 
-  # 데이터 실패 시 가상 데이터 방어
+  sorted_data = list(unique_data.values())
+  if type_mode == "up":
+    sorted_data.sort(key=lambda x: x["pct"], reverse=True)
+  else:
+    sorted_data.sort(key=lambda x: x["pct"], reverse=False)
+
+  if sorted_data:
+    return sorted_data[:5]
+
+  # 통신 실패 시 대체 방어 데이터
   if type_mode == "up":
     return [
+        {"name": "삼성전자", "price": 71000, "pct": 5.40, "sector": "반도체"},
+        {"name": "SK하이닉스", "price": 190000, "pct": 7.37, "sector": "AI반도체"},
+        {"name": "에코프로", "price": 95000, "pct": 7.60, "sector": "2차전지"},
         {
-            "code": "005930",
-            "name": "삼성전자",
-            "price": 71000,
-            "pct": 5.40,
-            "sector": "반도체",
-        },
-        {
-            "code": "000660",
-            "name": "SK하이닉스",
-            "price": 190000,
-            "pct": 7.37,
-            "sector": "AI반도체",
-        },
-        {
-            "code": "086520",
-            "name": "에코프로",
-            "price": 95000,
-            "pct": 7.60,
-            "sector": "2차전지",
-        },
-        {
-            "code": "247540",
             "name": "에코프로비엠",
             "price": 180000,
             "pct": 6.47,
             "sector": "2차전지",
         },
-        {
-            "code": "028300",
-            "name": "HLB",
-            "price": 82000,
-            "pct": 5.12,
-            "sector": "바이오",
-        },
+        {"name": "HLB", "price": 82000, "pct": 5.12, "sector": "바이오"},
     ]
   else:
     return [
         {
-            "code": "207940",
             "name": "삼성바이오로직스",
             "price": 980000,
             "pct": -4.34,
             "sector": "바이오",
         },
-        {
-            "code": "105560",
-            "name": "KB금융",
-            "price": 78000,
-            "pct": -0.68,
-            "sector": "금융",
-        },
-        {
-            "code": "005380",
-            "name": "현대차",
-            "price": 230000,
-            "pct": -1.50,
-            "sector": "자동차",
-        },
-        {
-            "code": "035420",
-            "name": "NAVER",
-            "price": 170000,
-            "pct": -2.10,
-            "sector": "IT",
-        },
-        {
-            "code": "035720",
-            "name": "카카오",
-            "price": 38000,
-            "pct": -1.80,
-            "sector": "IT",
-        },
+        {"name": "KB금융", "price": 78000, "pct": -0.68, "sector": "금융"},
+        {"name": "현대차", "price": 230000, "pct": -1.50, "sector": "자동차"},
+        {"name": "NAVER", "price": 170000, "pct": -2.10, "sector": "IT"},
+        {"name": "카카오", "price": 38000, "pct": -1.80, "sector": "IT"},
     ]
 
 
@@ -411,7 +374,6 @@ def build_md(snap):
   if intro:
     L += [intro, ""]
 
-  # 1. 지수 현황
   L += [
       "### 🇰🇷 장중 지수 현황",
       "",
@@ -428,14 +390,13 @@ def build_md(snap):
   )
 
   try:
-    fp = float(str(ss.get("fx_price", "1325.10")).replace(",", ""))
+    fp = float(str(ss.get("fx_price", "1,325.10")).replace(",", ""))
     fc = float(str(ss.get("fx_pct", "-0.14")).replace(",", ""))
     L.append(f"| 원/달러 | {fmt(fp)}원 | {em(fc)} {sgn(fc)} | {tm} |")
   except Exception:
     L.append(f"| 원/달러 | 1,325.10원 | 🔻 -0.14% | {tm} |")
   L += ["", ""]
 
-  # 2. 급등 특징주
   L += [
       "### 🔺 급등 특징주",
       "",
@@ -452,7 +413,6 @@ def build_md(snap):
     L.append(f"| **{s['name']}** | **{sgn(s['pct'])}** | {reason} | {theme} |")
   L += ["", ""]
 
-  # 3. 급락 특징주
   L += [
       "### 🔻 급락 특징주",
       "",
@@ -469,7 +429,6 @@ def build_md(snap):
     L.append(f"| **{s['name']}** | **{sgn(s['pct'])}** | {reason} | {theme} |")
   L += ["", ""]
 
-  # 4. 주요 경제 이슈
   L += ["### 🔥 오늘의 주요 경제 이슈", ""]
   for i in (1, 2, 3):
     t = ss.get(f"is{i}t", "").strip()
@@ -493,7 +452,6 @@ def build_md(snap):
       L.append(f"- ⏰ 체크: {k}")
     L.append("")
 
-  # 5. 강했던 테마
   th = ss.get("themes", "AI 반도체 · 반도체 소부장 · 2차전지").strip()
   if th:
     formatted_themes = " · ".join(
@@ -501,7 +459,6 @@ def build_md(snap):
     )
     L += ["### 🏷️ 오늘 강했던 테마", "", formatted_themes, ""]
 
-  # 6. 내일 체크 포인트
   ck = ss.get(
       "checks",
       "삼성전자·SK하이닉스 상승세 지속 여부 / 반도체 관련주 강세 유지 여부",
@@ -511,14 +468,12 @@ def build_md(snap):
         f"- {x.strip()}" for x in ck.split("/") if x.strip()
     ] + [""]
 
-  # 7. 핵심 키워드
   kw = ss.get(
       "keywords", "#코스피 #코스닥 #AI #삼성전자 #SK하이닉스 #반도체 #2차전지"
   ).strip()
   if kw:
     L += ["### 🔍 핵심 키워드 10", "", kw, ""]
 
-  # 8. 한 줄 주의
   ca = ss.get(
       "caution", "급등에 따른 차익실현과 종목별 변동성 확대에 유의하세요."
   ).strip()
@@ -820,7 +775,9 @@ def main():
       st.info("[지금 시세 조회] 버튼을 눌러 시세를 불러오세요.")
       return
 
-    st.caption(f"{snap['date']} · 조회 {snap['fetched_at']} · {snap['toss_status']}")
+    st.caption(
+        f"{snap['date']} · 조회 {snap['fetched_at']} · {snap['toss_status']}"
+    )
 
     c1, c2, c3 = st.columns(3)
     c1.markdown(f"**코스피**  \n### {fmt(snap['kospi']['price'])}")
