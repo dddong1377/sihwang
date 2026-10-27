@@ -1,54 +1,85 @@
-#!/usr/bin/env python3
 """
-MTNW 오후 시황 대시보드
-- 한국투자증권(KIS) Open API로 코스피·코스닥, 급등·급락 종목을 한 번에 조회 (같은 시각 기준)
-- 네이버 뉴스 검색 API로 종목별 오늘자 헤드라인을 이유 후보로 자동 입력
-- 화면에서 이유·테마를 고친 뒤 [복사]를 누르면 시황글이 클립보드에 저장됨
+MTNW 오후 시황 (Streamlit 배포용)
+- 입장 시 비밀번호 입력
+- 한국투자증권(KIS) Open API로 코스피·코스닥, 급등·급락 종목 TOP N 조회 (같은 시각 기준)
+- 네이버 뉴스 API로 종목별 오늘자 헤드라인을 이유 후보로 입력, KIS 업종 + 키워드로 테마 자동 분류
+- 이유·테마를 고친 뒤 [복사] 버튼으로 시황글을 클립보드에 저장
 
-실행:  python mtnw_dashboard.py        → 브라우저에서 http://127.0.0.1:5055
-점검:  python mtnw_dashboard.py --test → API 응답 원본 일부를 출력 (오류 확인용)
+필요한 Secrets (Streamlit 설정 > Secrets):
+  app_password, KIS_APP_KEY, KIS_APP_SECRET, NAVER_CLIENT_ID(선택), NAVER_CLIENT_SECRET(선택)
 """
+import hmac
+import html as htmllib
 import json
 import os
 import re
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
-from flask import Flask, Response, jsonify, request
+import streamlit as st
+import streamlit.components.v1 as components
 
-BASE_DIR = Path(__file__).resolve().parent
+# 반드시 첫 번째 Streamlit 명령
+st.set_page_config(page_title="MTNW 오후 시황", layout="wide")
+
 KST = ZoneInfo("Asia/Seoul")
 WEEKDAYS = "월화수목금토일"
 
 
-# ---------------------------------------------------------------- 설정
-def load_env():
-    """같은 폴더의 .env 파일을 읽어 환경변수로 등록 (외부 라이브러리 없이)."""
-    f = BASE_DIR / ".env"
-    if not f.exists():
-        return
-    for line in f.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+# ============================================================ 설정 / 비밀번호
+def secret(name, default=""):
+    """Streamlit Secrets → 환경변수 순으로 읽는다. 값이 없으면 default."""
+    try:
+        v = st.secrets.get(name)
+    except Exception:  # secrets 파일이 아예 없는 경우
+        v = None
+    return str(v) if v else os.getenv(name, default)
 
 
-load_env()
-KIS_APP_KEY = os.getenv("KIS_APP_KEY", "")
-KIS_APP_SECRET = os.getenv("KIS_APP_SECRET", "")
-KIS_BASE = os.getenv("KIS_BASE_URL", "https://openapi.koreainvestment.com:9443")
-NAVER_ID = os.getenv("NAVER_CLIENT_ID", "")
-NAVER_SECRET = os.getenv("NAVER_CLIENT_SECRET", "")
-TOKEN_FILE = BASE_DIR / ".kis_token.json"
+def check_password() -> bool:
+    expected = secret("app_password")
+    if not expected:
+        # 비밀번호가 설정되지 않았으면 열어 두지 않고 막는다 (실수로 공개되는 것을 방지)
+        st.error("비밀번호가 설정되지 않았습니다. Streamlit 설정의 Secrets에 app_password를 추가하세요.")
+        return False
 
-# 급등·급락 목록에서 제외할 이름 패턴 (스팩, ETF/ETN, 우선주)
+    def entered():
+        typed = st.session_state.get("pw", "").encode("utf-8")
+        st.session_state["pw_ok"] = hmac.compare_digest(typed, expected.encode("utf-8"))
+        st.session_state["pw"] = ""  # 입력값은 바로 지운다
+
+    if st.session_state.get("pw_ok"):
+        return True
+    st.title("MTNW 시황")
+    st.text_input("비밀번호", type="password", key="pw", on_change=entered)
+    if st.session_state.get("pw_ok") is False:
+        st.error("비밀번호가 올바르지 않습니다.")
+    return False
+
+
+if not check_password():
+    st.stop()  # 통과하기 전에는 아래 코드(증권사·뉴스 API 호출 포함)가 실행되지 않는다
+
+# ---- 비밀번호 통과 후 설정 값 읽기 (메인 스레드에서 한 번만) ----
+KIS_APP_KEY = secret("KIS_APP_KEY")
+KIS_APP_SECRET = secret("KIS_APP_SECRET")
+KIS_BASE = secret("KIS_BASE_URL", "https://openapi.koreainvestment.com:9443")
+NAVER_ID = secret("NAVER_CLIENT_ID")
+NAVER_SECRET = secret("NAVER_CLIENT_SECRET")
+
+
+@st.cache_resource
+def _store():
+    # 서버가 켜져 있는 동안 유지되는 저장소 (토큰, 업종, 뉴스 캐시)
+    return {"token": {}, "sector": {}, "news": {}}
+
+
+STORE = _store()
+NEWS_TTL = 300
+
 EXCLUDE_NAME = re.compile(
     r"스팩|제\d+호|ETN|KODEX|TIGER|ACE |SOL |RISE|HANARO|KOSEF|ARIRANG|PLUS |KIWOOM|우[A-C]?$"
 )
@@ -56,7 +87,7 @@ REASON_WORDS = re.compile(r"특징주|수주|계약|실적|공시|승인|인수|
 UP_WORDS = re.compile(r"급등|상승|강세|상한가|신고가|반등|매수|호재|훈풍")
 DOWN_WORDS = re.compile(r"급락|하락|약세|하한가|신저가|매도|악재|차익|우려|부진")
 
-# 헤드라인·종목명·업종명에서 테마를 뽑는 규칙 (앞에서부터 최대 2개 사용). 필요하면 자유롭게 추가하세요.
+# 헤드라인·종목명·업종명에서 테마를 뽑는 규칙 (앞에서부터 최대 2개). 필요하면 자유롭게 추가하세요.
 THEME_RULES = [
     ("HBM·반도체", r"HBM|D램|낸드|반도체|파운드리|메모리|소부장|웨이퍼"),
     ("AI", r"(?<![A-Za-z])AI(?![A-Za-z])|인공지능|데이터센터|엔비디아|챗GPT|오픈AI|앤트로픽"),
@@ -75,31 +106,21 @@ THEME_RULES = [
     ("정유·에너지", r"정유|유가|에너지|석유|가스"),
     ("철강·소재", r"철강|화학|비철|소재|구리"),
     ("가상자산", r"비트코인|가상자산|코인|블록체인"),
-    ("정치·테마", r"대선|정책|규제|법안|테마"),
 ]
-SECTOR_CACHE = {}        # 종목코드 -> 업종명 (하루 동안 변하지 않음)
-NEWS_CACHE = {}          # 종목명 -> (조회시각, 헤드라인) 자동 갱신 때 API 호출을 줄이기 위한 5분 캐시
-NEWS_TTL = 300
-
-app = Flask(__name__)
 
 
-# ---------------------------------------------------------------- KIS
+# ============================================================ KIS API
 class ApiError(Exception):
     pass
 
 
 def kis_token():
-    """토큰은 24시간 유효하고 발급 횟수 제한이 있어 파일에 저장해 재사용한다."""
-    if TOKEN_FILE.exists():
-        try:
-            t = json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
-            if t.get("expired_at", 0) > time.time() + 300 and t.get("appkey") == KIS_APP_KEY:
-                return t["token"]
-        except Exception:
-            pass
+    """토큰은 24시간 유효하고 발급 횟수 제한이 있어 서버 메모리에 저장해 재사용한다."""
+    t = STORE["token"]
+    if t.get("token") and t.get("expires", 0) > time.time() + 300 and t.get("key") == KIS_APP_KEY:
+        return t["token"]
     if not KIS_APP_KEY or not KIS_APP_SECRET:
-        raise ApiError("KIS 앱키가 없습니다. .env 파일에 KIS_APP_KEY / KIS_APP_SECRET을 입력하세요.")
+        raise ApiError("KIS 앱키가 없습니다. Secrets에 KIS_APP_KEY / KIS_APP_SECRET을 추가하세요.")
     r = requests.post(
         f"{KIS_BASE}/oauth2/tokenP",
         json={"grant_type": "client_credentials", "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET},
@@ -108,10 +129,7 @@ def kis_token():
     body = r.json() if r.content else {}
     if r.status_code != 200 or "access_token" not in body:
         raise ApiError(f"KIS 토큰 발급 실패: {body.get('error_description') or body.get('msg1') or r.status_code}")
-    exp = time.time() + 23 * 3600
-    TOKEN_FILE.write_text(
-        json.dumps({"token": body["access_token"], "expired_at": exp, "appkey": KIS_APP_KEY}), encoding="utf-8"
-    )
+    STORE["token"] = {"token": body["access_token"], "expires": time.time() + 23 * 3600, "key": KIS_APP_KEY}
     return body["access_token"]
 
 
@@ -139,7 +157,6 @@ def num(v, default=0.0):
 
 
 def signed(value, sign_code):
-    """KIS 부호코드(4·5=하락)를 반영해 부호 있는 숫자로 만든다."""
     v = num(value)
     if str(sign_code) in ("4", "5") and v > 0:
         return -v
@@ -184,12 +201,11 @@ def fetch_rank(sort_code, min_vol):
     body = kis_get("/uapi/domestic-stock/v1/ranking/fluctuation", "FHPST01700000", params)
     rows = []
     for o in body.get("output") or []:
-        name = o.get("hts_kor_isnm", "").strip()
         sign = o.get("prdy_vrss_sign", "")
         rows.append(
             {
                 "code": o.get("stck_shrn_iscd", ""),
-                "name": name,
+                "name": o.get("hts_kor_isnm", "").strip(),
                 "price": num(o.get("stck_prpr")),
                 "pct": signed(o.get("prdy_ctrt"), sign),
                 "volume": num(o.get("acml_vol")),
@@ -198,54 +214,35 @@ def fetch_rank(sort_code, min_vol):
     return rows
 
 
+def select_movers(min_vol, n, min_pct):
+    """상승률순·하락률순을 각각 받아 합친 뒤 응답의 실제 등락률 부호로 직접 분류한다."""
+    warnings = []
+    up_rows = fetch_rank("0", min_vol)
+    down_rows = fetch_rank("1", min_vol)
+    pool = {r["code"]: r for r in up_rows + down_rows if r["name"] and not EXCLUDE_NAME.search(r["name"])}
+    rows = list(pool.values())
+    gainers = sorted([r for r in rows if r["pct"] >= min_pct], key=lambda r: -r["pct"])[:n]
+    losers = sorted([r for r in rows if r["pct"] <= -min_pct], key=lambda r: r["pct"])[:n]
+    if not any(r["pct"] < 0 for r in down_rows):
+        warnings.append("하락률 순위 응답에서 하락 종목이 확인되지 않았습니다. 사이드바의 [연결 점검]을 확인하세요.")
+    if len(gainers) < n:
+        warnings.append(f"급등 기준(+{min_pct}%) 충족 종목 {len(gainers)}개")
+    if len(losers) < n:
+        warnings.append(f"급락 기준(-{min_pct}%) 충족 종목 {len(losers)}개")
+    return gainers, losers, warnings
+
+
 def fetch_sector(code):
-    if code in SECTOR_CACHE:
-        return SECTOR_CACHE[code]
+    if code in STORE["sector"]:
+        return STORE["sector"][code]
     body = kis_get(
         "/uapi/domestic-stock/v1/quotations/inquire-price",
         "FHKST01010100",
         {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code},
     )
     o = body.get("output") or {}
-    sector = (o.get("bstp_kor_isnm") or "").strip()
-    market = (o.get("rprs_mrkt_kor_name") or "").strip()
-    SECTOR_CACHE[code] = (sector, market)
-    return SECTOR_CACHE[code]
-
-
-def derive_theme(stock):
-    """헤드라인 → 종목명 → 업종명 순서로 키워드를 찾아 테마를 만든다. 못 찾으면 업종명만 쓴다."""
-    texts = [" ".join(h["title"] for h in stock.get("headlines", [])), stock["name"], stock.get("sector", "")]
-    found = []
-    for text in texts:
-        for label, pattern in THEME_RULES:
-            if label not in found and re.search(pattern, text):
-                found.append(label)
-        if found:
-            break
-    sector = stock.get("sector", "")
-    if found:
-        return " · ".join(found[:2])
-    return sector
-
-
-def fill_fallback_reasons(stocks, up):
-    """오늘자 기사가 없는 종목은 데이터로 확인되는 사실만 이유로 쓴다 (추측 금지).
-    1) 같은 업종 종목이 같은 방향으로 여러 개 움직였으면 업종 동반 흐름 (🏷️)
-    2) 아니면 거래량 사실만 표시하고 기사 미확인을 명시 (📊)"""
-    word = "강세" if up else "약세"
-    by_sector = {}
-    for st in stocks:
-        by_sector.setdefault(st.get("sector", ""), []).append(st["name"])
-    for st in stocks:
-        if st.get("headlines"):
-            continue
-        sec = st.get("sector", "")
-        peers = by_sector.get(sec, [])
-        if sec and len(peers) >= 2:
-            st["auto_reason"] = f"🏷️ {sec} 업종 동반 {word} ({len(peers)}개 종목 같은 방향)"
-        else:
-            st["auto_reason"] = f"📊 거래량 {st['volume']/10000:,.0f}만주 동반, 오늘자 개별 기사 미확인"
+    STORE["sector"][code] = ((o.get("bstp_kor_isnm") or "").strip(), (o.get("rprs_mrkt_kor_name") or "").strip())
+    return STORE["sector"][code]
 
 
 def attach_sector(stocks, status):
@@ -264,28 +261,8 @@ def attach_sector(stocks, status):
     status["sector"] = "정상" if not fails else f"일부 실패 {fails}건"
 
 
-def select_movers(min_vol, n, min_pct):
-    """상승률순·하락률순을 각각 받아 합친 뒤, 부호를 기준으로 직접 분류한다.
-    정렬 코드 해석이 문서마다 달라서, 응답의 실제 등락률로 다시 검증한다."""
-    warnings = []
-    up_rows = fetch_rank("0", min_vol)
-    down_rows = fetch_rank("1", min_vol)
-    pool = {r["code"]: r for r in up_rows + down_rows if r["name"] and not EXCLUDE_NAME.search(r["name"])}
-    rows = list(pool.values())
-    gainers = sorted([r for r in rows if r["pct"] >= min_pct], key=lambda r: -r["pct"])[:n]
-    losers = sorted([r for r in rows if r["pct"] <= -min_pct], key=lambda r: r["pct"])[:n]
-    if not any(r["pct"] < 0 for r in down_rows):
-        warnings.append("하락률 순위 응답에서 하락 종목이 확인되지 않았습니다. `--test`로 정렬 코드를 점검하세요.")
-    if len(gainers) < n:
-        warnings.append(f"급등 기준(+{min_pct}%) 충족 종목 {len(gainers)}개")
-    if len(losers) < n:
-        warnings.append(f"급락 기준(-{min_pct}%) 충족 종목 {len(losers)}개")
-    return gainers, losers, warnings
-
-
-# ---------------------------------------------------------------- 환율 (비공식)
+# ============================================================ 환율 (비공식)
 def fetch_fx():
-    """Yahoo Finance 비공식 차트 주소. 막히면 '확인 불가'로 두고 화면에서 직접 입력한다."""
     r = requests.get(
         "https://query1.finance.yahoo.com/v8/finance/chart/KRW=X",
         params={"interval": "1m", "range": "1d"},
@@ -296,16 +273,10 @@ def fetch_fx():
     price = float(meta["regularMarketPrice"])
     prev = float(meta.get("chartPreviousClose") or meta.get("previousClose") or price)
     t = datetime.fromtimestamp(meta.get("regularMarketTime", time.time()), KST)
-    return {
-        "name": "원/달러",
-        "price": price,
-        "change": price - prev,
-        "pct": (price - prev) / prev * 100 if prev else 0.0,
-        "time": t.strftime("%H:%M"),
-    }
+    return {"price": price, "pct": (price - prev) / prev * 100 if prev else 0.0, "time": t.strftime("%H:%M")}
 
 
-# ---------------------------------------------------------------- 네이버 뉴스 (이유 후보)
+# ============================================================ 네이버 뉴스 (이유 후보)
 def clean_title(s):
     s = re.sub(r"<[^>]+>", "", s)
     return (
@@ -336,29 +307,30 @@ def fetch_headlines(name, today, up=True):
             same, opposite = (UP_WORDS, DOWN_WORDS) if up else (DOWN_WORDS, UP_WORDS)
             score = (2 if same.search(title) else 0) + (1 if REASON_WORDS.search(title) else 0)
             if opposite.search(title) and not same.search(title):
-                score -= 2  # 종목 방향과 반대되는 기사는 뒤로 보낸다
+                score -= 2  # 종목 방향과 반대되는 기사는 뒤로
             out.append({"title": title, "time": d.strftime("%H:%M"), "score": score})
         if out:
             break
-    out.sort(key=lambda x: (x["score"], x["time"]), reverse=True)  # 점수 높은 순, 같으면 최신 순
+    out.sort(key=lambda x: (x["score"], x["time"]), reverse=True)
     return [{"title": o["title"], "time": o["time"]} for o in out[:4]]
 
 
 def attach_news(stocks, status):
     if not (NAVER_ID and NAVER_SECRET):
-        status["naver"] = "키 없음 (이유는 직접 입력)"
+        status["naver"] = "키 없음 (이유는 자동 분류 또는 직접 입력)"
         for s in stocks:
             s["headlines"] = []
         return
     today = datetime.now(KST).date()
 
     def work(s):
-        hit = NEWS_CACHE.get((s["name"], s["pct"] > 0))
+        k = (s["name"], s["pct"] > 0)
+        hit = STORE["news"].get(k)
         if hit and time.time() - hit[0] < NEWS_TTL:
             return hit[1], None
         try:
             h = fetch_headlines(s["name"], today, s["pct"] > 0)
-            NEWS_CACHE[(s["name"], s["pct"] > 0)] = (time.time(), h)
+            STORE["news"][k] = (time.time(), h)
             return h, None
         except Exception as e:  # noqa: BLE001
             return [], str(e)
@@ -372,450 +344,416 @@ def attach_news(stocks, status):
     status["naver"] = "정상" if not fails else f"일부 실패 {fails}건"
 
 
-# ---------------------------------------------------------------- 라우트
-@app.get("/")
-def index():
-    return Response(HTML, mimetype="text/html")
+def derive_theme(stock):
+    """헤드라인 → 종목명 → 업종명 순서로 키워드를 찾아 테마를 만든다. 못 찾으면 업종명."""
+    texts = [" ".join(h["title"] for h in stock.get("headlines", [])), stock["name"], stock.get("sector", "")]
+    found = []
+    for text in texts:
+        for label, pattern in THEME_RULES:
+            if label not in found and re.search(pattern, text):
+                found.append(label)
+        if found:
+            break
+    return " · ".join(found[:2]) if found else stock.get("sector", "")
 
 
-@app.get("/api/snapshot")
-def snapshot():
-    n = int(request.args.get("n", 10))
-    min_pct = float(request.args.get("min_pct", 3))
-    min_vol = int(request.args.get("min_vol", 100000))
-    status, warnings = {}, []
+def fill_fallback_reasons(stocks, up):
+    """오늘자 기사가 없는 종목은 데이터로 확인되는 사실만 이유로 쓴다 (추측 금지)."""
+    word = "강세" if up else "약세"
+    by_sector = {}
+    for st_ in stocks:
+        by_sector.setdefault(st_.get("sector", ""), []).append(st_["name"])
+    for st_ in stocks:
+        if st_.get("headlines"):
+            continue
+        sec = st_.get("sector", "")
+        peers = by_sector.get(sec, [])
+        if sec and len(peers) >= 2:
+            st_["auto_reason"] = f"🏷️ {sec} 업종 동반 {word} ({len(peers)}개 종목 같은 방향)"
+        else:
+            st_["auto_reason"] = f"📊 거래량 {st_['volume'] / 10000:,.0f}만주 동반, 오늘자 개별 기사 미확인"
+
+
+def fetch_snapshot(n, min_pct, min_vol):
+    status = {}
     now = datetime.now(KST)
-    data = {
+    snap = {
+        "ts": time.time(),
         "fetched_at": now.strftime("%H:%M:%S"),
-        "date": f"{now.year}년 {now.month}월 {now.day}일 ({WEEKDAYS[now.weekday()]})",
-        "kospi": None, "kosdaq": None, "fx": None, "gainers": [], "losers": [],
+        "date": f"{now.year}년 {now.month:02d}월 {now.day:02d}일 ({WEEKDAYS[now.weekday()]})",
+        "kospi": fetch_index("0001", "코스피"),
+        "kosdaq": fetch_index("1001", "코스닥"),
     }
+    gainers, losers, warnings = select_movers(min_vol, n, min_pct)
+    snap["gainers"], snap["losers"], snap["warnings"] = gainers, losers, warnings
+    status["kis"] = "정상"
     try:
-        data["kospi"] = fetch_index("0001", "코스피")
-        data["kosdaq"] = fetch_index("1001", "코스닥")
-        g, l, w = select_movers(min_vol, n, min_pct)
-        data["gainers"], data["losers"] = g, l
-        warnings += w
-        status["kis"] = "정상"
-    except ApiError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:  # noqa: BLE001
-        return jsonify({"error": f"KIS 조회 실패: {e}"}), 500
-    try:
-        data["fx"] = fetch_fx()
+        snap["fx"] = fetch_fx()
         status["fx"] = "정상 (Yahoo 비공식)"
     except Exception:  # noqa: BLE001
+        snap["fx"] = None
         status["fx"] = "실패 (직접 입력)"
-    movers = data["gainers"] + data["losers"]
+    movers = gainers + losers
     try:
         attach_sector(movers, status)
     except Exception:  # noqa: BLE001
         status["sector"] = "실패"
+        for s in movers:
+            s.setdefault("sector", "")
+            s.setdefault("market", "")
     attach_news(movers, status)
-    for st in movers:
-        st["theme"] = derive_theme(st)
-    fill_fallback_reasons(data["gainers"], True)
-    fill_fallback_reasons(data["losers"], False)
-    data["status"], data["warnings"] = status, warnings
-    return jsonify(data)
+    for s in movers:
+        s["theme"] = derive_theme(s)
+    fill_fallback_reasons(gainers, True)
+    fill_fallback_reasons(losers, False)
+    snap["status"] = status
+    return snap
 
 
-# ---------------------------------------------------------------- 화면
-HTML = r"""<!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MTNW 오후 시황</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
-<style>
-:root{
-  --bg:#f3f4f6; --panel:#ffffff; --ink:#16202e; --muted:#667085; --line:#dfe3ea;
-  --up:#d1293d; --down:#2161c4; --accent:#0f5c5c; --accent-ink:#ffffff; --field:#f8f9fb; --warn:#fff4d6; --warn-ink:#6a4b00;
-}
-@media (prefers-color-scheme: dark){
-  :root{ --bg:#10151c; --panel:#18202b; --ink:#e8ecf2; --muted:#93a0b3; --line:#2a3544;
-    --up:#ff6b7a; --down:#6ea8ff; --accent:#58c4b8; --accent-ink:#0b1a19; --field:#121a24; --warn:#3a2f10; --warn-ink:#f1d589; }
-}
-*{box-sizing:border-box}
-html,body{margin:0}
-body{background:var(--bg);color:var(--ink);font:14px/1.5 "IBM Plex Sans KR","Malgun Gothic",system-ui,sans-serif}
-.num{font-variant-numeric:tabular-nums}
-.up{color:var(--up)} .down{color:var(--down)}
-header{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:center;justify-content:space-between;padding:14px 24px;background:var(--panel);border-bottom:1px solid var(--line)}
-header h1{margin:0;font-size:17px;font-weight:700}
-header .meta{color:var(--muted);font-size:12px}
-.controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
-.controls label{font-size:12px;color:var(--muted);display:flex;gap:6px;align-items:center}
-input,select,textarea{font:inherit;color:var(--ink);background:var(--field);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
-input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
-.controls input{width:64px}
-button{font:inherit;cursor:pointer;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:7px 14px}
-button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:600}
-button:disabled{opacity:.5;cursor:wait}
-.wrap{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);gap:20px;padding:20px 24px;max-width:1500px;margin:0 auto}
-@media (max-width:1000px){.wrap{grid-template-columns:1fr}}
-section.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px 18px;margin-bottom:16px}
-section.card h2{margin:0 0 12px;font-size:14px;font-weight:700}
-.banner{padding:10px 14px;border-radius:6px;background:var(--warn);color:var(--warn-ink);margin-bottom:14px;font-size:13px;display:none}
-.banner.err{background:#fde7ea;color:#7a1624;display:block}
-.banner.show{display:block}
-.idx{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
-.idx .t{border:1px solid var(--line);border-radius:6px;padding:10px 12px}
-.idx .t .n{font-size:12px;color:var(--muted)}
-.idx .t .p{font-size:20px;font-weight:600}
-.idx .t .c{font-size:12px}
-.idx input{width:100%;margin-top:4px}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th{text-align:left;font-weight:600;color:var(--muted);font-size:12px;padding:6px 6px;border-bottom:1px solid var(--line)}
-td{padding:6px 6px;border-bottom:1px solid var(--line);vertical-align:middle}
-td input{width:100%;padding:4px 6px}
-td.r,th.r{text-align:right}
-.stk{font-weight:600}
-.sub{font-weight:400;font-size:11px;color:var(--muted)}
-.empty{color:var(--muted);padding:10px 0}
-.issue{display:grid;grid-template-columns:90px 1fr 1fr;gap:6px;margin-bottom:8px}
-.issue input,.issue select{width:100%}
-.issue .full{grid-column:1/-1}
-.row{display:grid;grid-template-columns:110px 1fr;gap:8px;align-items:center;margin-bottom:8px}
-.row label{color:var(--muted);font-size:12px}
-.preview{position:sticky;top:14px}
-.preview .box{border:1px solid var(--line);border-radius:6px;padding:14px 16px;max-height:70vh;overflow:auto;background:var(--field);font-size:13px}
-.preview .box h1,.preview .box h3{margin:12px 0 6px}
-.preview .box h1{font-size:16px;margin-top:0} .preview .box h3{font-size:14px}
-.preview .box blockquote{margin:8px 0;padding:4px 10px;border-left:3px solid var(--accent)}
-.preview .box table{margin:6px 0}
-.preview .box td,.preview .box th{border:1px solid var(--line);padding:4px 6px}
-.preview .box ul{margin:4px 0;padding-left:18px}
-.actions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
-.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:9px 16px;border-radius:6px;opacity:0;pointer-events:none;transition:opacity .15s}
-.toast.on{opacity:1}
-@media (prefers-reduced-motion: reduce){.toast{transition:none}}
-</style>
-</head>
-<body>
-<header>
-  <div>
-    <h1>MTNW 오후 시황</h1>
-    <div class="meta" id="meta">조회 전</div>
-  </div>
-  <div class="controls">
-    <label>종목 수 <input id="n" type="number" value="10" min="1" max="20"></label>
-    <label>기준 등락률 ±<input id="minPct" type="number" value="3" step="0.5" min="0"> %</label>
-    <label>최소 거래량 <input id="minVol" type="number" value="100000" step="50000" min="0"></label>
-    <label>자동 갱신 <select id="auto"><option value="0">끔</option><option value="30">30초</option><option value="60">60초</option><option value="120">2분</option></select></label>
-    <button class="primary" id="load">지금 시세 조회</button>
-  </div>
-</header>
+# ============================================================ 시황글 생성
+def fmt(v, d=2):
+    return f"{v:,.{d}f}"
 
-<div class="wrap">
-  <div>
-    <div class="banner" id="banner"></div>
 
-    <section class="card">
-      <h2>장중 지수 현황</h2>
-      <div class="idx" id="idx"><div class="empty">[지금 시세 조회]를 누르세요.</div></div>
-    </section>
+def sgn(v):
+    return f"{v:+,.2f}%"
 
-    <section class="card">
-      <h2>급등 특징주</h2>
-      <div id="up"><div class="empty">-</div></div>
-    </section>
 
-    <section class="card">
-      <h2>급락 특징주</h2>
-      <div id="down"><div class="empty">-</div></div>
-    </section>
+def em(v):
+    return "🔺" if v > 0 else "🔻" if v < 0 else "➖"
 
-    <section class="card">
-      <h2>직접 쓰는 부분 (비워 두면 시황글에서 빠집니다)</h2>
-      <div class="row"><label>한 줄 요약</label><input id="summary" placeholder="20~30자"></div>
-      <div id="issues"></div>
-      <div class="row"><label>강했던 테마</label><input id="themes" placeholder="반도체 · HBM · 2차전지 (구분은 · 로)"></div>
-      <div class="row"><label>내일 체크</label><input id="checks" placeholder="항목은 / 로 구분"></div>
-      <div class="row"><label>핵심 키워드</label><input id="keywords" placeholder="조회 후 자동 입력됩니다"></div>
-      <div class="row"><label>한 줄 주의</label><input id="caution" placeholder="급등 이후 변동성 유의"></div>
-    </section>
-  </div>
 
-  <aside class="preview">
-    <section class="card">
-      <h2>시황글 미리보기</h2>
-      <div class="actions">
-        <button class="primary" id="copyRich">복사 (서식 포함)</button>
-        <button id="copyMd">복사 (마크다운)</button>
-      </div>
-      <div class="box" id="preview">조회하면 여기에 시황글이 만들어집니다.</div>
-    </section>
-  </aside>
+def auto_reason(s):
+    h = s.get("headlines") or []
+    return "📰 " + h[0]["title"] if h else s.get("auto_reason", "")
+
+
+def build_md(snap):
+    ss = st.session_state
+    tm = snap["fetched_at"][:5]
+    L = [f"# 📅 {snap['date']} | 오후 시황", f"**조회 기준: {tm}**", ""]
+    if ss.get("summary", "").strip():
+        L += [f"> 📌 **한 줄 요약**: {ss['summary'].strip()}", ""]
+
+    L += ["### 🇰🇷 장중 지수 현황", "", "| 지수 | 현재가 | 등락 | 기준 시각 |", "|---|---:|---:|---|"]
+    for x, name in ((snap["kospi"], "코스피"), (snap["kosdaq"], "코스닥")):
+        L.append(f"| {name} | {fmt(x['price'])} | {em(x['pct'])} {sgn(x['pct'])} | {tm} |")
+    try:
+        fp = float(str(ss.get("fx_price", "")).replace(",", ""))
+        try:
+            fc = float(str(ss.get("fx_pct", "")).replace(",", ""))
+            fcs = f"{em(fc)} {sgn(fc)}"
+        except ValueError:
+            fcs = "-"
+        L.append(f"| 원/달러 | {fmt(fp)}원 | {fcs} | {ss.get('fx_time') or tm} |")
+    except ValueError:
+        L.append("| 원/달러 | 확인 불가 | 확인 불가 | - |")
+    L.append("")
+
+    for title, lst, word in (
+        (f"🔺 급등 특징주 TOP{len(snap['gainers'])}", snap["gainers"], "상승"),
+        (f"🔻 급락 특징주 TOP{len(snap['losers'])}", snap["losers"], "하락"),
+    ):
+        L += [f"### {title}", ""]
+        if not lst:
+            L += ["기준을 충족하는 종목이 없습니다.", ""]
+            continue
+        L += [f"| 종목 | 등락률 | 기준 시각 | {word} 이유 | 관련 테마 |", "|---|---:|---|---|---|"]
+        for s in lst:
+            reason = (ss.get(f"reason_{s['code']}") or "-").replace("|", "/")
+            theme = (ss.get(f"theme_{s['code']}") or "-").replace("|", "/")
+            L.append(f"| **{s['name']}** | **{sgn(s['pct'])}** | {tm} | {reason} | {theme} |")
+        L.append("")
+
+    issues = []
+    for i, no in enumerate("①②③", start=1):
+        t = ss.get(f"is{i}t", "").strip()
+        if not t:
+            continue
+        issues.append(f"**{no} {t}** {ss.get(f'is{i}m', '🔺')}")
+        if ss.get(f"is{i}c", "").strip():
+            issues.append(f"- 내용: {ss[f'is{i}c'].strip()}")
+        if ss.get(f"is{i}s", "").strip():
+            names = ", ".join(f"**{x.strip()}**" for x in re.split(r"[,，]", ss[f"is{i}s"]) if x.strip())
+            issues.append(f"- 📌 관련 종목: {names}")
+        if ss.get(f"is{i}k", "").strip():
+            issues.append(f"- ⏰ 체크: {ss[f'is{i}k'].strip()}")
+        issues.append("")
+    if issues:
+        L += ["### 🔥 오늘의 주요 경제 이슈", ""] + issues
+
+    th = ss.get("themes", "").strip()
+    if th:
+        L += ["### 🏷️ 오늘 강했던 테마", "", " · ".join(f"**{x.strip()}**" for x in re.split(r"[·,]", th) if x.strip()), ""]
+    ck = ss.get("checks", "").strip()
+    if ck:
+        L += ["### 👀 내일 체크 포인트", ""] + [f"- {x.strip()}" for x in ck.split("/") if x.strip()] + [""]
+    kw = ss.get("keywords", "").strip()
+    if kw:
+        L += ["### 🔍 핵심 키워드", "", kw, ""]
+    ca = ss.get("caution", "").strip()
+    if ca:
+        L += ["### ⚠️ 한 줄 주의", "", ca, ""]
+
+    stt = snap["status"]
+    L += [
+        "### 🔎 조회 현황",
+        "",
+        f"- 지수·종목 시세: 한국투자증권 Open API, {tm} 조회 (전 종목 같은 시각)",
+        f"- 업종·테마: KIS 업종 + 헤드라인 키워드 자동 분류 ({stt.get('sector', '-')}), 게시 전 확인 필요",
+        f"- 환율: {stt.get('fx', '-')}",
+        f"- 이유: 네이버 뉴스 오늘자 헤드라인 기반 ({stt.get('naver', '-')}), 게시 전 확인 필요",
+        "- 안내: 수치는 조회 시각 기준이며 이후 달라질 수 있습니다.",
+    ]
+    return "\n".join(L)
+
+
+def _inline(s):
+    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", htmllib.escape(s))
+
+
+def md_to_html(md):
+    """이 글에서 쓰는 마크다운 문법만 HTML로 바꾼다 (서식 포함 복사용)."""
+    out, tbl, ul = [], False, False
+    for line in md.split("\n"):
+        if line.startswith("|"):
+            if ul:
+                out.append("</ul>")
+                ul = False
+            cells = [c.strip() for c in line.split("|")[1:-1]]
+            if all(re.fullmatch(r":?-+:?", c) for c in cells):
+                continue
+            if not tbl:
+                tbl = True
+                out.append(
+                    '<table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse"><thead><tr>'
+                    + "".join(f"<th>{_inline(c)}</th>" for c in cells)
+                    + "</tr></thead><tbody>"
+                )
+            else:
+                out.append("<tr>" + "".join(f"<td>{_inline(c)}</td>" for c in cells) + "</tr>")
+            continue
+        if tbl:
+            out.append("</tbody></table>")
+            tbl = False
+        if line.startswith("- "):
+            if not ul:
+                out.append("<ul>")
+                ul = True
+            out.append(f"<li>{_inline(line[2:])}</li>")
+            continue
+        if ul:
+            out.append("</ul>")
+            ul = False
+        if line.startswith("# "):
+            out.append(f"<h1>{_inline(line[2:])}</h1>")
+        elif line.startswith("### "):
+            out.append(f"<h3>{_inline(line[4:])}</h3>")
+        elif line.startswith("> "):
+            out.append(f"<blockquote>{_inline(line[2:])}</blockquote>")
+        elif line.strip():
+            out.append(f"<p>{_inline(line)}</p>")
+    if ul:
+        out.append("</ul>")
+    if tbl:
+        out.append("</tbody></table>")
+    return "\n".join(out)
+
+
+COPY_HTML = """
+<div style="display:flex;gap:8px;align-items:center;font-family:sans-serif;font-size:13px">
+  <button id="r" style="padding:8px 14px;border-radius:6px;border:0;background:#0f5c5c;color:#fff;font-weight:600;cursor:pointer">복사 (서식 포함)</button>
+  <button id="m" style="padding:8px 14px;border-radius:6px;border:1px solid #bbb;background:#fff;cursor:pointer">복사 (마크다운)</button>
+  <span id="t" style="color:#555"></span>
 </div>
-<div class="toast" id="toast"></div>
-
 <script>
-const $ = s => document.querySelector(s);
-let snap = null;
-const edits = {};          // 종목코드 -> {reason, theme}  (재조회해도 유지)
-const fx = {price:'', pct:'', time:''};
-const ISSUE_N = 3;
-
-// ---------- 유틸
-const fmt = (v, d=2) => Number(v).toLocaleString('ko-KR', {minimumFractionDigits:d, maximumFractionDigits:d});
-const sgn = v => (v > 0 ? '+' : '') + fmt(v) + '%';
-const em = v => v > 0 ? '🔺' : v < 0 ? '🔻' : '➖';
-const cls = v => v > 0 ? 'up' : v < 0 ? 'down' : '';
-const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const hhmm = t => (t || '').slice(0, 5);
-function toast(msg){ const t = $('#toast'); t.textContent = msg; t.classList.add('on'); setTimeout(() => t.classList.remove('on'), 1800); }
-
-// ---------- 조회
-let timer = null;
-async function load(auto=false){
-  const btn = $('#load'); btn.disabled = true; btn.textContent = '조회 중…';
-  if (!auto) $('#banner').className = 'banner';
+const P = __PAYLOAD__;
+const msg = s => { document.getElementById('t').textContent = s; };
+function copyText(text){
+  const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta);
+  ta.select(); const ok = document.execCommand('copy'); ta.remove(); return ok;
+}
+function copyRichFallback(html){
+  const d = document.createElement('div'); d.innerHTML = html; d.style.position = 'fixed'; d.style.left = '-9999px';
+  document.body.appendChild(d);
+  const r = document.createRange(); r.selectNodeContents(d);
+  const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+  const ok = document.execCommand('copy'); s.removeAllRanges(); d.remove(); return ok;
+}
+document.getElementById('r').onclick = async () => {
   try {
-    const q = new URLSearchParams({n: $('#n').value, min_pct: $('#minPct').value, min_vol: $('#minVol').value});
-    const r = await fetch('/api/snapshot?' + q);
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || '조회 실패');
-    snap = d;
-    if (d.fx && !fx.touched) { fx.price = fmt(d.fx.price); fx.pct = fmt(d.fx.pct); fx.time = d.fx.time; }
-    [...d.gainers, ...d.losers].forEach(s => {
-      const h = s.headlines && s.headlines[0];
-      const auto = {reason: h ? '📰 ' + h.title : (s.auto_reason || ''), theme: s.theme || ''};
-      const e = edits[s.code] || (edits[s.code] = {reason: '', theme: '', touched: {}});
-      // 사용자가 직접 고친 칸은 유지하고, 나머지는 최신 자동값으로 갱신
-      if (!e.touched.reason) e.reason = auto.reason;
-      if (!e.touched.theme) e.theme = auto.theme;
-    });
-    if (!$('#keywords').value || $('#keywords').dataset.auto === '1') {
-      const names = [...d.gainers, ...d.losers].slice(0, 8).map(s => s.name);
-      $('#keywords').value = ['코스피', '코스닥', ...names].map(w => '#' + w.replace(/\s/g, '')).join(' ');
-      $('#keywords').dataset.auto = '1';
-    }
-    const msgs = (d.warnings || []).slice();
-    if (msgs.length) { const b = $('#banner'); b.textContent = msgs.join(' / '); b.className = 'banner show'; }
-    else if (auto) $('#banner').className = 'banner';
-    render();
-  } catch (e) {
-    const b = $('#banner'); b.textContent = e.message; b.className = 'banner err';
-  } finally { btn.disabled = false; btn.textContent = '지금 시세 조회'; }
-}
-$('#load').addEventListener('click', () => load(false));
-$('#auto').addEventListener('change', e => {
-  clearInterval(timer); timer = null;
-  const sec = parseInt(e.target.value, 10);
-  if (sec > 0) { timer = setInterval(() => load(true), sec * 1000); toast(`${sec}초마다 자동 갱신합니다`); }
-});
-
-// ---------- 화면 렌더
-function idxTile(x, label){
-  if (!x) return `<div class="t"><div class="n">${label}</div><div class="p">확인 불가</div></div>`;
-  return `<div class="t"><div class="n">${label}</div><div class="p num">${fmt(x.price)}</div>
-    <div class="c num ${cls(x.pct)}">${em(x.pct)} ${sgn(x.pct)}</div></div>`;
-}
-function render(){
-  if (!snap) return;
-  const ae = document.activeElement;
-  if (ae && ae.dataset && ae.dataset.code) { preview(); updatePrices(); return; }  // 입력 중에는 표를 다시 그리지 않는다
-  $('#meta').textContent = `${snap.date} · 조회 ${snap.fetched_at} · KIS ${snap.status.kis} · 환율 ${snap.status.fx} · 뉴스 ${snap.status.naver} · 업종 ${snap.status.sector || '-'}`;
-  $('#idx').innerHTML = idxTile(snap.kospi, '코스피') + idxTile(snap.kosdaq, '코스닥') +
-    `<div class="t"><div class="n">원/달러 (직접 수정 가능)</div>
-      <input id="fxPrice" class="num" placeholder="환율(원)" value="${esc(fx.price)}">
-      <input id="fxPct" class="num" placeholder="등락률(%)" value="${esc(fx.pct)}"></div>`;
-  $('#fxPrice').addEventListener('input', e => { fx.price = e.target.value; fx.touched = true; preview(); });
-  $('#fxPct').addEventListener('input', e => { fx.pct = e.target.value; fx.touched = true; preview(); });
-  $('#up').innerHTML = table(snap.gainers, '상승');
-  $('#down').innerHTML = table(snap.losers, '하락');
-  document.querySelectorAll('[data-code]').forEach(el => el.addEventListener('input', e => {
-    const ed = edits[el.dataset.code]; ed[el.dataset.f] = e.target.value; ed.touched[el.dataset.f] = true; preview();
-  }));
-  preview();
-}
-function updatePrices(){
-  // 입력 중일 때는 현재가·등락률 칸만 갱신
-  [...snap.gainers, ...snap.losers].forEach(s => {
-    const a = document.querySelector(`[data-p="${s.code}"]`), b = document.querySelector(`[data-c="${s.code}"]`);
-    if (a) a.textContent = fmt(s.price, 0);
-    if (b) { b.textContent = `${em(s.pct)} ${sgn(s.pct)}`; b.className = `r num ${cls(s.pct)}`; }
-  });
-}
-function table(list, word){
-  if (!list.length) return '<div class="empty">기준을 충족하는 종목이 없습니다. 기준 등락률을 낮춰 다시 조회해 보세요.</div>';
-  const rows = list.map(s => {
-    const e = edits[s.code];
-    const dl = `dl-${s.code}`;
-    const opts = (s.headlines || []).map(h => `<option value="${esc('📰 ' + h.title)}">${esc(h.time)}</option>`).join('');
-    return `<tr>
-      <td class="stk">${esc(s.name)}<div class="sub">${esc(s.market || '')} ${esc(s.sector || '')}</div></td>
-      <td class="r num" data-p="${s.code}">${fmt(s.price, 0)}</td>
-      <td class="r num ${cls(s.pct)}" data-c="${s.code}">${em(s.pct)} ${sgn(s.pct)}</td>
-      <td><input data-code="${s.code}" data-f="reason" list="${dl}" value="${esc(e.reason)}" placeholder="${word} 이유 (기사 후보는 ▼에서 선택)">
-          <datalist id="${dl}">${opts}</datalist></td>
-      <td><input data-code="${s.code}" data-f="theme" value="${esc(e.theme)}" placeholder="테마" style="min-width:120px"></td>
-    </tr>`;
-  }).join('');
-  return `<table><thead><tr><th>종목</th><th class="r">현재가</th><th class="r">등락률</th><th>${word} 이유</th><th>관련 테마</th></tr></thead><tbody>${rows}</tbody></table>`;
-}
-
-// 직접 쓰는 이슈 입력칸
-(function(){
-  let h = '';
-  for (let i = 1; i <= ISSUE_N; i++) h += `<div class="issue">
-    <select id="is${i}m"><option>🔺</option><option>🔻</option><option>➖</option></select>
-    <input id="is${i}t" placeholder="이슈 ${i} 제목 (15자 내외)">
-    <input id="is${i}s" placeholder="관련 종목 (쉼표로 구분)">
-    <input class="full" id="is${i}c" placeholder="내용 한 줄">
-    <input class="full" id="is${i}k" placeholder="체크: 향후 일정 또는 리스크 한 줄"></div>`;
-  $('#issues').innerHTML = h;
-})();
-document.querySelectorAll('.card input, .card select').forEach(el => {
-  el.addEventListener('input', () => { if (el.id === 'keywords') el.dataset.auto = '0'; preview(); });
-});
-
-// ---------- 시황글 생성 (마크다운)
-function buildMd(){
-  if (!snap) return '';
-  const L = [];
-  const tm = hhmm(snap.fetched_at);
-  L.push(`# 📅 ${snap.date.replace(/^(\d+)년 (\d+)월 (\d+)일/, (m,y,mo,d)=>`${y}년 ${String(mo).padStart(2,'0')}월 ${String(d).padStart(2,'0')}일`)} | 오후 시황`);
-  L.push(`**조회 기준: ${tm}**`, '');
-  const sm = $('#summary').value.trim();
-  if (sm) L.push(`> 📌 **한 줄 요약**: ${sm}`, '');
-
-  L.push('### 🇰🇷 장중 지수 현황', '', '| 지수 | 현재가 | 등락 | 기준 시각 |', '|---|---:|---:|---|');
-  const ir = (x, name) => x ? `| ${name} | ${fmt(x.price)} | ${em(x.pct)} ${sgn(x.pct)} | ${tm} |` : `| ${name} | 확인 불가 | 확인 불가 | - |`;
-  L.push(ir(snap.kospi, '코스피'), ir(snap.kosdaq, '코스닥'));
-  const fp = parseFloat(String(fx.price).replace(/,/g, '')), fc = parseFloat(String(fx.pct).replace(/,/g, ''));
-  L.push(isNaN(fp) ? '| 원/달러 | 확인 불가 | 확인 불가 | - |'
-    : `| 원/달러 | ${fmt(fp)}원 | ${isNaN(fc) ? '-' : em(fc) + ' ' + sgn(fc)} | ${fx.time || tm} |`, '');
-
-  const stockTable = (title, list, word) => {
-    L.push(`### ${title}`, '');
-    if (!list.length) { L.push('기준을 충족하는 종목이 없습니다.', ''); return; }
-    L.push(`| 종목 | 등락률 | 기준 시각 | ${word} 이유 | 관련 테마 |`, '|---|---:|---|---|---|');
-    list.forEach(s => {
-      const e = edits[s.code] || {};
-      L.push(`| **${s.name}** | **${sgn(s.pct)}** | ${tm} | ${(e.reason || '-').replace(/\|/g, '/')} | ${(e.theme || '-').replace(/\|/g, '/')} |`);
-    });
-    L.push('');
-  };
-  stockTable(`🔺 급등 특징주 TOP${snap.gainers.length}`, snap.gainers, '상승');
-  stockTable(`🔻 급락 특징주 TOP${snap.losers.length}`, snap.losers, '하락');
-
-  const issues = [];
-  for (let i = 1; i <= ISSUE_N; i++) {
-    const t = $(`#is${i}t`).value.trim(); if (!t) continue;
-    const c = $(`#is${i}c`).value.trim(), s = $(`#is${i}s`).value.trim(), k = $(`#is${i}k`).value.trim();
-    const m = $(`#is${i}m`).value, no = ['①','②','③'][i-1];
-    issues.push(`**${no} ${t}** ${m}`);
-    if (c) issues.push(`- 내용: ${c}`);
-    if (s) issues.push(`- 📌 관련 종목: ${s.split(/[,，]/).map(x => `**${x.trim()}**`).join(', ')}`);
-    if (k) issues.push(`- ⏰ 체크: ${k}`);
-    issues.push('');
-  }
-  if (issues.length) L.push('### 🔥 오늘의 주요 경제 이슈', '', ...issues);
-
-  const th = $('#themes').value.trim();
-  if (th) L.push('### 🏷️ 오늘 강했던 테마', '', th.split(/[·,]/).map(x => `**${x.trim()}**`).join(' · '), '');
-  const ck = $('#checks').value.trim();
-  if (ck) L.push('### 👀 내일 체크 포인트', '', ...ck.split('/').map(x => `- ${x.trim()}`), '');
-  const kw = $('#keywords').value.trim();
-  if (kw) L.push('### 🔍 핵심 키워드', '', kw, '');
-  const ca = $('#caution').value.trim();
-  if (ca) L.push('### ⚠️ 한 줄 주의', '', ca, '');
-
-  L.push('### 🔎 조회 현황', '',
-    `- 지수·종목 시세: 한국투자증권 Open API, ${tm} 조회 (전 종목 같은 시각)`,
-    `- 업종·테마: KIS 업종 + 헤드라인 키워드 자동 분류 (${snap.status.sector || '-'}), 게시 전 확인 필요`,
-    `- 환율: ${snap.status.fx}`,
-    `- 이유: 네이버 뉴스 오늘자 헤드라인 기반 (${snap.status.naver}), 게시 전 확인 필요`,
-    '- 안내: 수치는 조회 시각 기준이며 이후 달라질 수 있습니다.');
-  return L.join('\n');
-}
-
-// ---------- 마크다운 → HTML (이 글에 쓰는 문법만 지원)
-function inline(s){ return esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>'); }
-function mdToHtml(md){
-  const out = []; let tbl = null, ul = false;
-  const closeUl = () => { if (ul) { out.push('</ul>'); ul = false; } };
-  const closeTbl = () => { if (tbl) { out.push('</tbody></table>'); tbl = null; } };
-  md.split('\n').forEach(line => {
-    if (line.startsWith('|')) {
-      closeUl();
-      const cells = line.split('|').slice(1, -1).map(c => c.trim());
-      if (cells.every(c => /^:?-+:?$/.test(c))) return;
-      if (!tbl) { tbl = true; out.push('<table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse"><thead><tr>' + cells.map(c => `<th>${inline(c)}</th>`).join('') + '</tr></thead><tbody>'); return; }
-      out.push('<tr>' + cells.map(c => `<td>${inline(c)}</td>`).join('') + '</tr>'); return;
-    }
-    closeTbl();
-    if (line.startsWith('- ')) { if (!ul) { out.push('<ul>'); ul = true; } out.push(`<li>${inline(line.slice(2))}</li>`); return; }
-    closeUl();
-    if (line.startsWith('# ')) out.push(`<h1>${inline(line.slice(2))}</h1>`);
-    else if (line.startsWith('### ')) out.push(`<h3>${inline(line.slice(4))}</h3>`);
-    else if (line.startsWith('> ')) out.push(`<blockquote>${inline(line.slice(2))}</blockquote>`);
-    else if (line.trim()) out.push(`<p>${inline(line)}</p>`);
-  });
-  closeUl(); closeTbl();
-  return out.join('\n');
-}
-function preview(){
-  const md = buildMd();
-  $('#preview').innerHTML = md ? mdToHtml(md) : '조회하면 여기에 시황글이 만들어집니다.';
-}
-
-// ---------- 클립보드
-async function copy(rich){
-  const md = buildMd();
-  if (!md) { toast('먼저 시세를 조회하세요'); return; }
-  try {
-    if (rich && window.ClipboardItem) {
-      const html = mdToHtml(md);
+    if (window.ClipboardItem && navigator.clipboard && navigator.clipboard.write) {
       await navigator.clipboard.write([new ClipboardItem({
-        'text/html': new Blob([html], {type: 'text/html'}),
-        'text/plain': new Blob([md], {type: 'text/plain'})
-      })]);
-    } else {
-      await navigator.clipboard.writeText(md);
+        'text/html': new Blob([P.html], {type: 'text/html'}),
+        'text/plain': new Blob([P.md], {type: 'text/plain'})})]);
+      msg('서식 포함으로 복사했습니다'); return;
     }
-    toast(rich ? '서식 포함으로 복사했습니다' : '마크다운으로 복사했습니다');
-  } catch (e) {
-    const ta = document.createElement('textarea'); ta.value = md; document.body.appendChild(ta);
-    ta.select(); document.execCommand('copy'); ta.remove(); toast('복사했습니다 (마크다운)');
-  }
-}
-$('#copyRich').addEventListener('click', () => copy(true));
-$('#copyMd').addEventListener('click', () => copy(false));
+  } catch (e) {}
+  msg(copyRichFallback(P.html) ? '서식 포함으로 복사했습니다' : '복사 실패: 아래 코드 상자의 복사 아이콘을 사용하세요');
+};
+document.getElementById('m').onclick = async () => {
+  try { await navigator.clipboard.writeText(P.md); msg('마크다운으로 복사했습니다'); return; } catch (e) {}
+  msg(copyText(P.md) ? '마크다운으로 복사했습니다' : '복사 실패: 아래 코드 상자의 복사 아이콘을 사용하세요');
+};
 </script>
-</body>
-</html>
 """
 
 
-# ---------------------------------------------------------------- 점검 모드
-def run_test():
-    print("== KIS 지수 ==")
-    for code, name in (("0001", "코스피"), ("1001", "코스닥")):
-        print(name, fetch_index(code, name))
-    for sort_code in ("0", "1"):
-        rows = fetch_rank(sort_code, 100000)
-        print(f"\n== 등락률 순위 sort={sort_code} ({len(rows)}건) 상위 5 ==")
-        for r in rows[:5]:
-            print(r)
-    print("\n== 환율 ==")
-    try:
-        print(fetch_fx())
-    except Exception as e:  # noqa: BLE001
-        print("실패:", e)
-    if NAVER_ID and NAVER_SECRET:
-        print("\n== 네이버 뉴스 (삼성전자) ==")
-        print(fetch_headlines("삼성전자", datetime.now(KST).date()))
+def copy_buttons(md):
+    payload = json.dumps({"md": md, "html": md_to_html(md)}, ensure_ascii=False).replace("</", "<\\/")
+    page = COPY_HTML.replace("__PAYLOAD__", payload)
+    if hasattr(st, "iframe"):          # 최신 Streamlit
+        st.iframe(page, height=56)
+    else:                              # 구버전 호환
+        components.html(page, height=56)
 
 
-if __name__ == "__main__":
-    if "--test" in sys.argv:
-        run_test()
+# ============================================================ 화면
+def touch(key):
+    st.session_state.setdefault("touched", set()).add(key)
+
+
+def colored(v, text):
+    return f":red[{text}]" if v > 0 else f":blue[{text}]" if v < 0 else text
+
+
+def apply_defaults(snap):
+    """자동값을 입력칸에 채운다. 사용자가 직접 고친 칸은 건드리지 않는다."""
+    ss = st.session_state
+    touched = ss.setdefault("touched", set())
+    for s in snap["gainers"] + snap["losers"]:
+        for f, val in (("reason", auto_reason(s)), ("theme", s.get("theme", ""))):
+            key = f"{f}_{s['code']}"
+            if key not in touched:
+                ss[key] = val
+    if snap.get("fx"):
+        for key, val in (("fx_price", fmt(snap["fx"]["price"])), ("fx_pct", fmt(snap["fx"]["pct"])), ("fx_time", snap["fx"]["time"])):
+            if key not in touched:
+                ss[key] = val
     else:
-        port = int(os.getenv("PORT", "5055"))
-        print(f"\n  MTNW 오후 시황 대시보드: http://127.0.0.1:{port}\n")
-        app.run(host="127.0.0.1", port=port, debug=False)
+        for key in ("fx_price", "fx_pct", "fx_time"):
+            ss.setdefault(key, "")
+    if "keywords" not in touched:
+        names = [s["name"] for s in (snap["gainers"] + snap["losers"])[:8]]
+        ss["keywords"] = " ".join("#" + w.replace(" ", "") for w in ["코스피", "코스닥"] + names)
+
+
+def stock_table(title, stocks, word):
+    st.subheader(title)
+    if not stocks:
+        st.info("기준을 충족하는 종목이 없습니다. 사이드바에서 기준 등락률을 낮춰 다시 조회해 보세요.")
+        return
+    w = [2.2, 1.2, 1.3, 4.5, 2.2]
+    head = st.columns(w)
+    for c, label in zip(head, ["종목", "현재가", "등락률", f"{word} 이유", "관련 테마"]):
+        c.caption(label)
+    for s in stocks:
+        c = st.columns(w)
+        c[0].markdown(f"**{s['name']}**  \n:gray[{s.get('market', '')} {s.get('sector', '')}]")
+        c[1].markdown(f"{s['price']:,.0f}")
+        c[2].markdown(colored(s["pct"], f"{em(s['pct'])} {sgn(s['pct'])}"))
+        rk, tk = f"reason_{s['code']}", f"theme_{s['code']}"
+        c[3].text_input("이유", key=rk, label_visibility="collapsed", on_change=touch, args=(rk,))
+        alts = [h["title"] for h in (s.get("headlines") or [])[1:3]]
+        if alts:
+            c[3].caption("다른 기사: " + " / ".join(alts))
+        c[4].text_input("테마", key=tk, label_visibility="collapsed", on_change=touch, args=(tk,))
+
+
+def manual_inputs():
+    with st.expander("직접 쓰는 부분 (비워 두면 시황글에서 빠집니다)", expanded=False):
+        st.text_input("한 줄 요약", key="summary", placeholder="20~30자")
+        for i in (1, 2, 3):
+            st.markdown(f"**이슈 {i}**")
+            a, b, c = st.columns([1, 3, 3])
+            a.selectbox("방향", ["🔺", "🔻", "➖"], key=f"is{i}m", label_visibility="collapsed")
+            b.text_input("제목", key=f"is{i}t", placeholder="제목 (15자 내외)", label_visibility="collapsed")
+            c.text_input("관련 종목", key=f"is{i}s", placeholder="관련 종목 (쉼표로 구분)", label_visibility="collapsed")
+            st.text_input("내용", key=f"is{i}c", placeholder="내용 한 줄", label_visibility="collapsed")
+            st.text_input("체크", key=f"is{i}k", placeholder="체크: 향후 일정 또는 리스크 한 줄", label_visibility="collapsed")
+        st.text_input("강했던 테마", key="themes", placeholder="반도체 · HBM · 2차전지")
+        st.text_input("내일 체크 (/ 로 구분)", key="checks")
+        st.text_input("핵심 키워드", key="keywords", on_change=touch, args=("keywords",))
+        st.text_input("한 줄 주의", key="caution", placeholder="급등 이후 변동성 유의")
+
+
+def diagnostics():
+    """배포 환경에서 증권사 연결이 되는지 확인한다."""
+    try:
+        st.write("코스피:", fetch_index("0001", "코스피"))
+        for code in ("0", "1"):
+            rows = fetch_rank(code, 100000)
+            st.write(f"등락률 순위 sort={code} ({len(rows)}건) 상위 3:", rows[:3])
+    except Exception as e:  # noqa: BLE001
+        st.error(f"연결 실패: {e}")
+        st.caption("해외 서버(Streamlit Cloud)에서 증권사 API가 막혀 있을 수 있습니다. 내 컴퓨터에서 실행하면 되는지 확인해 보세요.")
+
+
+def main():
+    st.title("MTNW 오후 시황")
+    with st.sidebar:
+        st.header("설정")
+        n = st.number_input("종목 수 (급등·급락 각각)", 1, 20, 10)
+        min_pct = st.number_input("기준 등락률 ± (%)", 0.0, 30.0, 3.0, 0.5)
+        min_vol = st.number_input("최소 거래량 (주)", 0, 10_000_000, 100_000, 50_000)
+        auto = st.selectbox("자동 갱신", [0, 30, 60, 120], format_func=lambda x: "끔" if x == 0 else f"{x}초")
+        if st.button("연결 점검"):
+            diagnostics()
+        if st.button("로그아웃"):
+            st.session_state["pw_ok"] = False
+            st.rerun()
+
+    @st.fragment(run_every=auto if auto else None)
+    def body():
+        ss = st.session_state
+        clicked = st.button("지금 시세 조회", type="primary")
+        snap = ss.get("snap")
+        due = bool(auto) and snap is not None and time.time() - snap["ts"] >= auto - 1
+        if clicked or due:
+            try:
+                with st.spinner("시세 조회 중..."):
+                    snap = fetch_snapshot(int(n), float(min_pct), int(min_vol))
+                ss["snap"] = snap
+                apply_defaults(snap)
+            except ApiError as e:
+                st.error(str(e))
+            except Exception as e:  # noqa: BLE001
+                st.error(f"조회 실패: {e}")
+            snap = ss.get("snap")
+        if not snap:
+            st.info("[지금 시세 조회]를 누르세요.")
+            return
+
+        stt = snap["status"]
+        st.caption(
+            f"{snap['date']} · 조회 {snap['fetched_at']} · KIS {stt.get('kis')} · 환율 {stt.get('fx')} · "
+            f"뉴스 {stt.get('naver')} · 업종 {stt.get('sector', '-')}"
+        )
+        for w in snap.get("warnings", []):
+            st.warning(w)
+
+        c1, c2, c3 = st.columns(3)
+        for c, x, name in ((c1, snap["kospi"], "코스피"), (c2, snap["kosdaq"], "코스닥")):
+            c.markdown(f"**{name}**  \n### {fmt(x['price'])}")
+            c.markdown(colored(x["pct"], f"{em(x['pct'])} {sgn(x['pct'])}"))
+        c3.markdown("**원/달러** (직접 수정 가능)")
+        f1, f2 = c3.columns(2)
+        f1.text_input("환율(원)", key="fx_price", on_change=touch, args=("fx_price",))
+        f2.text_input("등락률(%)", key="fx_pct", on_change=touch, args=("fx_pct",))
+
+        stock_table(f"🔺 급등 특징주 TOP{len(snap['gainers'])}", snap["gainers"], "상승")
+        stock_table(f"🔻 급락 특징주 TOP{len(snap['losers'])}", snap["losers"], "하락")
+        manual_inputs()
+
+        st.subheader("시황글 미리보기")
+        md = build_md(snap)
+        copy_buttons(md)
+        with st.container(border=True):
+            st.markdown(md)
+        with st.expander("마크다운 원문 (복사 버튼이 안 될 때 오른쪽 위 아이콘으로 복사)"):
+            st.code(md, language="markdown")
+
+    body()
+
+
+main()
