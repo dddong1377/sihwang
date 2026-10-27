@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 st.title("📈 실시간 증시 & 특징주 분석 대시보드")
-st.caption("KRX 및 네이버 금융 데이터를 수집하여 표시합니다. (업무 리포트 추출 지원)")
+st.caption("네이버 금융 데이터를 수집하여 표시합니다. (업무 리포트 추출 지원)")
 
 
 @st.cache_data(ttl=5)
@@ -92,59 +92,62 @@ def get_naver_market_index():
   return result
 
 
-@st.cache_data(ttl=30)
-def get_krx_top20_stocks(type_mode="up"):
+@st.cache_data(ttl=15)
+def get_naver_top20_stocks(type_mode="up"):
+  url = (
+      "https://finance.naver.com/sise/sise_rise.naver?sosok=0"
+      if type_mode == "up"
+      else "https://finance.naver.com/sise/sise_fall.naver?sosok=0"
+  )
+  headers = {
+      "User-Agent": (
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      )
+  }
   try:
-    today_str = datetime.date.today().strftime("%Y%m%d")
-    # pykrx를 통해 전 종목 등락률 조회
-    df = stock.get_market_price_change_by_ticker(today_str, today_str)
-    if df.empty:
-      # 오늘 데이터가 아직 없거나 주말인 경우 가장 최근 거래일 조회
-      from pandas.tseries.offsets import BusinessDay
+    res = requests.get(url, headers=headers, timeout=5)
+    tables = pd.read_html(res.content.decode("euc-kr", "ignore"), header=0)
+    target_df = None
+    for df in tables:
+      if "종목명" in df.columns and "현재가" in df.columns:
+        target_df = df
+        break
 
-      prev_day = (datetime.date.today() - BusinessDay(1)).strftime("%Y%m%d")
-      df = stock.get_market_price_change_by_ticker(prev_day, prev_day)
-
-    if not df.empty:
+    if target_df is not None:
+      target_df = target_df.dropna(subset=["종목명"])
       data = []
-      for ticker, row in df.iterrows():
-        name = stock.get_market_ticker_name(ticker)
-        close_p = row["종가"]
-        change_r = row["등락률"]
-        volume = row["거래량"]
+      for _, row in target_df.iterrows():
+        name = str(row.get("종목명", "")).strip()
+        if not name or name == "nan":
+          continue
+        price = str(row.get("현재가", ""))
+        change_rate = str(row.get("등락률", ""))
+        volume = str(row.get("거래량", ""))
         data.append({
             "종목명": name,
-            "종목코드": str(ticker),
-            "현재가": f"{close_p:,}",
-            "등락률": f"{change_r:+.2f}%",
-            "거래량": f"{volume:,}",
+            "종목코드": "-",
+            "현재가": price,
+            "등락률": change_rate,
+            "거래량": volume,
+            "등락 이유 및 주요 뉴스": "관련 특징주 뉴스 참조",
+            "관련 테마": name + " 관련 테마주",
         })
-
-      df_result = pd.DataFrame(data)
-      if type_mode == "up":
-        df_result = df_result.sort_values(
-            by="등락률", ascending=False
-        ).head(20)
-      else:
-        df_result = df_result.sort_values(
-            by="등락률", ascending=True
-        ).head(20)
-
-      df_result["등락 이유 및 주요 뉴스"] = "관련 특징주 뉴스 참조"
-      df_result["관련 테마"] = df_result["종목명"] + " 관련 테마주"
-      return df_result
+      result_df = pd.DataFrame(data)
+      if not result_df.empty:
+        return result_df.head(20)
   except Exception as e:
     print(e)
 
-  # 실패 시 예시 데이터 반환
+  # 실패 시 안내용 예시 데이터
   sample_data = [{
-      "종목명": "삼성전자(예시)",
-      "종목코드": "005930",
-      "현재가": "70,000",
-      "등락률": "+5.00%",
-      "거래량": "10,000,000",
-      "등락 이유 및 주요 뉴스": "반도체 업황 회복 기대감",
-      "관련 테마": "반도체",
+      "종목명": "데이터 수집 대기 중",
+      "종목코드": "000000",
+      "현재가": "0",
+      "등락률": "0.00%",
+      "거래량": "0",
+      "등락 이유 및 주요 뉴스": "잠시 후 다시 시도됩니다.",
+      "관련 테마": "시장 동향 파악 중",
   }]
   return pd.DataFrame(sample_data)
 
@@ -186,8 +189,8 @@ st.divider()
 st.subheader("🔥 당일 급등 & 급락 특징주 TOP 20")
 tab1, tab2 = st.tabs(["🚀 급등 TOP 20", "📉 급락 TOP 20"])
 
-df_up = get_krx_top20_stocks("up")
-df_down = get_krx_top20_stocks("down")
+df_up = get_naver_top20_stocks("up")
+df_down = get_naver_top20_stocks("down")
 
 with tab1:
   st.dataframe(df_up, width="stretch", hide_index=True)
