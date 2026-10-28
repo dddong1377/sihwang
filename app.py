@@ -860,6 +860,17 @@ def main():
     st.title("MTNW 오후 시황")
 
     with st.sidebar:
+        if st.button("서버 IP 확인"):
+    try:
+        v4 = requests.get("https://api.ipify.org", timeout=5).text
+    except Exception as e:
+        v4 = f"실패: {e}"
+    try:
+        v6 = requests.get("https://api64.ipify.org", timeout=5).text
+    except Exception as e:
+        v6 = f"실패: {e}"
+    st.write("IPv4:", v4)
+    st.write("api64 (IPv6 우선):", v6)
         st.header("설정")
 
         auto = st.selectbox(
