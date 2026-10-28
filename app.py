@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -22,6 +23,15 @@ GLOBAL_ITEMS = (
     ("sp500", "S&P500", ""),
     ("usdkrw", "원/달러 환율", "원"),
 )
+CAP_RANK_LIMIT = 100
+CAP_SUFFIX = " (시총 100위 이내)"
+NAVER_WEB_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Referer": "https://finance.naver.com/sise/",
+}
 NOW_TOKEN = "__NOW__"  # 복사 버튼을 누르는 순간의 시각으로 치환됨
 
 DEFAULT_THEME = "주요업종"
@@ -901,7 +911,292 @@ def fetch_news(name, today):
         return []
 
 
-def fetch_snapshot(duration):
+def parse_naver_market_sum(page_html, market):
+    """
+    네이버 금융 시가총액 페이지(HTML) 한 장을 종목 목록으로 변환.
+    열 위치는 표 머리글(현재가·등락률·시가총액)로 찾으므로 열 순서가 바뀌어도 동작합니다.
+    """
+
+    table = re.search(
+        r'<table[^>]*class="type_2"[^>]*>(.*?)</table>',
+        page_html,
+        re.S
+    )
+
+    if not table:
+        raise ValueError("시가총액 표를 찾지 못했습니다.")
+
+    body = table.group(1)
+
+    def clean(text):
+        text = html.unescape(re.sub(r"<[^>]+>", "", text))
+        return re.sub(r"\s+", " ", text).strip()
+
+    headers = [
+        clean(header)
+        for header in re.findall(r"<th[^>]*>(.*?)</th>", body, re.S)
+    ]
+
+    try:
+        i_price = headers.index("현재가")
+        i_pct = headers.index("등락률")
+        i_cap = headers.index("시가총액")
+    except ValueError as error:
+        raise ValueError(f"표 머리글 형식이 달라졌습니다: {headers}") from error
+
+    needed = max(i_price, i_pct, i_cap)
+
+    rows = []
+
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", body, re.S):
+        link = re.search(
+            r'code=(\d{6})"[^>]*>\s*([^<]+?)\s*</a>',
+            tr
+        )
+
+        if not link:
+            continue
+
+        cells = [
+            clean(cell)
+            for cell in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S)
+        ]
+
+        if len(cells) <= needed:
+            continue
+
+        price = num(cells[i_price])
+        pct = num(cells[i_pct].replace("%", ""))
+        cap = num(cells[i_cap])
+
+        if price is None or pct is None or cap is None:
+            continue
+
+        rows.append({
+            "symbol": link.group(1),
+            "name": html.unescape(link.group(2)).strip(),
+            "price": price,
+            "pct": pct,
+            "cap": cap,
+            "market": market,
+        })
+
+    return rows
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_cap_rows_naver():
+    """[1순위] 코스피 상위 150개 + 코스닥 상위 100개를 네이버 금융 시가총액 기준으로 수집 (2분 캐시)."""
+
+    rows = {}
+
+    for sosok, market, pages in ((0, "KOSPI", 3), (1, "KOSDAQ", 2)):
+        for page in range(1, pages + 1):
+            response = requests.get(
+                "https://finance.naver.com/sise/sise_market_sum.naver",
+                params={"sosok": sosok, "page": page},
+                headers=NAVER_WEB_HEADERS,
+                timeout=8,
+            )
+
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"네이버 금융 HTTP {response.status_code}"
+                )
+
+            page_html = response.content.decode("cp949", errors="ignore")
+
+            parsed = parse_naver_market_sum(page_html, market)
+
+            if len(parsed) < 10:
+                raise RuntimeError(
+                    "네이버 금융 시가총액 표에서 종목을 충분히 읽지 못했습니다."
+                )
+
+            for row in parsed:
+                rows[row["symbol"]] = row
+
+    return list(rows.values())
+
+
+@st.cache_data(ttl=12 * 60 * 60, show_spinner=False)
+def fetch_share_universe():
+    """KOSPI·KOSDAQ 보통주의 이름·발행주식수 (하루 2회 정도만 갱신)."""
+
+    universe = {}
+
+    for market in ("KOSPI", "KOSDAQ"):
+        listed = api_get(
+            "/api/v1/stocks/all",
+            {
+                "market": market,
+                "status": "ACTIVE",
+                "securityType": "STOCK",
+                "commonShare": "true",
+            },
+        )
+
+        symbols = [
+            row["symbol"]
+            for row in listed
+            if isinstance(row, dict) and row.get("symbol")
+        ]
+
+        for start in range(0, len(symbols), 200):
+            batch = symbols[start:start + 200]
+
+            infos = api_get(
+                "/api/v1/stocks",
+                {"symbols": ",".join(batch)}
+            )
+
+            for info in infos:
+                shares = num(info.get("sharesOutstanding"))
+
+                if not shares:
+                    continue
+
+                universe[info["symbol"]] = {
+                    "name": info.get("name", ""),
+                    "shares": shares,
+                    "market": market,
+                }
+
+    return universe
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_cap_rows_toss():
+    """[2순위] 토스 API만으로 시총 상위 후보와 전일 대비 등락률 계산 (1분 캐시)."""
+
+    universe = fetch_share_universe()
+    symbols = list(universe)
+
+    caps = []
+
+    for start in range(0, len(symbols), 200):
+        batch = symbols[start:start + 200]
+
+        prices = api_get(
+            "/api/v1/prices",
+            {"symbols": ",".join(batch)}
+        )
+
+        for item in prices:
+            price = num(item.get("lastPrice"))
+            info = universe.get(item.get("symbol"))
+
+            if price and info:
+                caps.append({
+                    "symbol": item["symbol"],
+                    "name": info["name"],
+                    "market": info["market"],
+                    "price": price,
+                    "cap": price * info["shares"],
+                })
+
+    caps = [row for row in caps if not EXCLUDE.search(row["name"])]
+    caps.sort(key=lambda row: row["cap"], reverse=True)
+    top = caps[:CAP_RANK_LIMIT + 20]
+
+    def add_pct(row):
+        try:
+            result = api_get(
+                "/api/v1/candles",
+                {"symbol": row["symbol"], "interval": "1d", "count": 2}
+            )
+            candles = result.get("candles", [])
+
+            if len(candles) >= 2:
+                prev = num(candles[1].get("closePrice"))
+
+                if prev:
+                    row["pct"] = (row["price"] / prev - 1) * 100
+                    return row
+
+        except Exception:
+            pass
+
+        return None
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        rows = [row for row in pool.map(add_pct, top) if row]
+
+    return rows
+
+
+def fetch_cap_rows():
+    """네이버 우선, 실패하면 토스 계산 방식으로 전환. (rows, 출처)를 돌려줍니다."""
+
+    try:
+        rows = fetch_cap_rows_naver()
+        return rows, "naver"
+
+    except Exception as naver_error:
+        try:
+            rows = fetch_cap_rows_toss()
+            return rows, "toss"
+
+        except Exception as toss_error:
+            raise RuntimeError(
+                f"네이버 실패({naver_error}) / 토스 실패({toss_error})"
+            )
+
+
+def get_cap_rankings(mode="up"):
+    """시가총액 상위 100위(우선주·스팩 등 제외) 안에서 당일 급등/급락 TOP 5."""
+
+    cap_rows, source = fetch_cap_rows()
+
+    candidates = [
+        row
+        for row in cap_rows
+        if not EXCLUDE.search(row["name"])
+    ]
+
+    candidates.sort(key=lambda row: row["cap"], reverse=True)
+
+    universe = candidates[:CAP_RANK_LIMIT]
+
+    if len(universe) < 50:
+        raise RuntimeError("시가총액 상위 종목 수가 부족합니다.")
+
+    ranked_at = datetime.datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+
+    source_label = "네이버" if source == "naver" else "토스 계산"
+
+    stocks = []
+
+    for cap_rank, row in enumerate(universe, start=1):
+        pct = row["pct"]
+
+        if mode == "up" and pct <= 0:
+            continue
+
+        if mode == "down" and pct >= 0:
+            continue
+
+        stocks.append({
+            "name": row["name"],
+            "symbol": row["symbol"],
+            "price": row["price"],
+            "pct": pct,
+            "base_price": None,
+            "rank": cap_rank,
+            "theme": classify_theme(row["name"]),
+            "reason": f"시가총액 상위 100위 내 당일 등락률 기준 ({source_label})",
+            "timestamp": ranked_at,
+        })
+
+    stocks.sort(
+        key=lambda stock: stock["pct"],
+        reverse=(mode == "up")
+    )
+
+    return stocks[:5], ranked_at
+
+
+def fetch_snapshot(duration, universe="all"):
     """지수와 급등·급락 종목 데이터를 한 번에 조회."""
 
     now = datetime.datetime.now(KST)
@@ -910,15 +1205,39 @@ def fetch_snapshot(duration):
 
     global_markets = get_global_markets()
 
-    gainers, up_at = get_rankings(
-        "up",
-        duration
-    )
+    actual_universe = universe
+    note = None
 
-    losers, down_at = get_rankings(
-        "down",
-        duration
-    )
+    gainers, losers, up_at, down_at = [], [], None, None
+
+    if universe == "cap100":
+        try:
+            gainers, up_at = get_cap_rankings("up")
+            losers, down_at = get_cap_rankings("down")
+
+            if duration != "1d":
+                note = (
+                    "시총 100위 이내 모드는 당일(전일 대비) 등락률 기준으로만 "
+                    "조회됩니다. 선택한 기간은 적용되지 않았습니다."
+                )
+
+        except Exception as error:
+            actual_universe = "all"
+            note = (
+                "시총 100위 목록을 가져오지 못해 국내 전체 종목 기준으로 "
+                f"표시합니다. ({error})"
+            )
+
+    if actual_universe == "all":
+        gainers, up_at = get_rankings(
+            "up",
+            duration
+        )
+
+        losers, down_at = get_rankings(
+            "down",
+            duration
+        )
 
     for stock in gainers + losers:
         headlines = fetch_news(
@@ -944,6 +1263,8 @@ def fetch_snapshot(duration):
         "fetched_at": now.strftime("%H:%M:%S"),
         "ranking_at": up_at or down_at,
         "duration": duration,
+        "universe": actual_universe,
+        "note": note,
         "indices": indices,
         "global": global_markets,
         "gainers": gainers,
@@ -1117,7 +1438,13 @@ def build_markdown(snapshot, time_text="확인 불가"):
             f"| {time_text} |"
         )
 
-    lines += ["", "", "### 🔺 급등 특징주 TOP 5", ""]
+    suffix = (
+        CAP_SUFFIX
+        if snapshot.get("universe") == "cap100"
+        else ""
+    )
+
+    lines += ["", "", f"### 🔺 급등 특징주 TOP 5{suffix}", ""]
 
     lines += stock_table_lines(
         snapshot["gainers"],
@@ -1125,7 +1452,7 @@ def build_markdown(snapshot, time_text="확인 불가"):
         session.get("show_up_reason", True),
     )
 
-    lines += ["", "", "### 🔻 급락 특징주 TOP 5", ""]
+    lines += ["", "", f"### 🔻 급락 특징주 TOP 5{suffix}", ""]
 
     lines += stock_table_lines(
         snapshot["losers"],
@@ -1370,6 +1697,7 @@ def render_stock_section(
     reason_label,
     toggle_key,
     empty_message,
+    key_tag="all",
 ):
     """급등/급락 종목 섹션: 제목 옆에 '이유 열 포함' 체크박스를 둡니다."""
 
@@ -1417,7 +1745,7 @@ def render_stock_section(
         stock["reason"] = d.text_input(
             reason_label,
             value=stock["reason"],
-            key=f"{prefix}_reason_{stock['symbol']}",
+            key=f"{prefix}_reason_{key_tag}_{stock['symbol']}",
             label_visibility="collapsed",
             disabled=not show_reason,
         )
@@ -1425,13 +1753,25 @@ def render_stock_section(
         stock["theme"] = e.text_input(
             "테마",
             value=stock["theme"],
-            key=f"{prefix}_theme_{stock['symbol']}",
+            key=f"{prefix}_theme_{key_tag}_{stock['symbol']}",
             label_visibility="collapsed",
         )
 
 
+def pick_universe(changed):
+    """두 체크박스 중 항상 하나만 켜지도록 맞춥니다."""
+
+    other = "uni_all" if changed == "uni_cap100" else "uni_cap100"
+
+    st.session_state[other] = not st.session_state[changed]
+
+
 def main():
     st.title("MTNW 오후 시황")
+
+    # 시총 100위 모드를 기본값으로 시작합니다.
+    st.session_state.setdefault("uni_all", False)
+    st.session_state.setdefault("uni_cap100", True)
 
     with st.sidebar:
         st.header("설정")
@@ -1460,6 +1800,32 @@ def main():
         st.caption(
             "토스증권 TOP_GAINERS/TOP_LOSERS는 "
             "realtime 기간을 지원하지 않습니다."
+        )
+
+        st.markdown("**급등·급락 종목 범위**")
+
+        st.checkbox(
+            "국내 시총 100위 이내 종목만",
+            key="uni_cap100",
+            on_change=pick_universe,
+            args=("uni_cap100",),
+            help="시가총액 순위 기준 상위 100개(우선주·스팩 제외) 안에서 "
+                 "당일 등락률 TOP 5를 뽑습니다. 네이버 금융을 우선 사용하고, "
+                 "실패하면 토스 API로 시총을 직접 계산합니다.",
+        )
+
+        st.checkbox(
+            "국내 전체 종목",
+            key="uni_all",
+            on_change=pick_universe,
+            args=("uni_all",),
+            help="토스증권 등락률 순위 기준 국내 전체 종목에서 TOP 5를 뽑습니다.",
+        )
+
+        universe = (
+            "cap100"
+            if st.session_state.get("uni_cap100")
+            else "all"
         )
 
         if st.button("서버 IP 확인"):
@@ -1491,16 +1857,19 @@ def main():
             st.button("지금 시세 조회", type="primary")
             or "snapshot" not in st.session_state
             or st.session_state.get("duration") != duration
+            or st.session_state.get("universe") != universe
         )
 
         if should_fetch:
             try:
                 with st.spinner("토스증권 시세 조회 중..."):
                     st.session_state["snapshot"] = fetch_snapshot(
-                        duration
+                        duration,
+                        universe,
                     )
 
                     st.session_state["duration"] = duration
+                    st.session_state["universe"] = universe
                     st.session_state.pop("api_error", None)
 
             except Exception as error:
@@ -1520,12 +1889,21 @@ def main():
                 f"최근 조회 오류: {st.session_state['api_error']}"
             )
 
+        is_cap = snapshot.get("universe") == "cap100"
+
         st.caption(
             f"{snapshot['date']} · "
             f"화면 조회 {snapshot['fetched_at']} · "
             f"랭킹 기준 {snapshot['ranking_at'] or '확인 불가'} · "
-            "토스증권 Open API"
+            + (
+                "지수·환율: 토스증권 Open API / 시총 100위 종목: 네이버 금융 우선(실패 시 토스 계산)"
+                if is_cap
+                else "토스증권 Open API"
+            )
         )
+
+        if snapshot.get("note"):
+            st.warning(snapshot["note"])
 
         c1, c2 = st.columns(2)
 
@@ -1567,7 +1945,7 @@ def main():
             )
 
         render_stock_section(
-            "🔺 급등 특징주 TOP 5",
+            f"🔺 급등 특징주 TOP 5{CAP_SUFFIX if is_cap else ''}",
             snapshot["gainers"],
             "up",
             "🔺",
@@ -1575,10 +1953,11 @@ def main():
             "show_up_reason",
             "급등 랭킹이 비어 있습니다. "
             "선택한 기간의 랭킹 데이터가 있는지 확인하세요.",
+            snapshot.get("universe", "all"),
         )
 
         render_stock_section(
-            "🔻 급락 특징주 TOP 5",
+            f"🔻 급락 특징주 TOP 5{CAP_SUFFIX if is_cap else ''}",
             snapshot["losers"],
             "down",
             "🔻",
@@ -1586,6 +1965,7 @@ def main():
             "show_down_reason",
             "급락 랭킹이 비어 있습니다. "
             "선택한 기간의 랭킹 데이터가 있는지 확인하세요.",
+            snapshot.get("universe", "all"),
         )
 
         with st.expander(
