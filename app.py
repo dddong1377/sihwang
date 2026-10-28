@@ -1839,8 +1839,35 @@ def render_stock_section(
         )
 
         a.markdown(f"**{stock['name']}**")
-        b.write(fmt(stock["price"], 0))
-        c.markdown(f"{icon} {pct_text(stock['pct'])}")
+
+        price_text = b.text_input(
+            "현재가",
+            value=fmt(stock["price"], 0),
+            key=f"{prefix}_price_{key_tag}_{stock['symbol']}",
+            label_visibility="collapsed",
+        )
+
+        pct_input = c.text_input(
+            "등락률",
+            value=pct_text(stock["pct"]),
+            key=f"{prefix}_pct_{key_tag}_{stock['symbol']}",
+            label_visibility="collapsed",
+        )
+
+        # 수기로 고친 값을 시황글에도 반영 (숫자로 읽히지 않으면 기존 값 유지)
+        edited_price = num(
+            price_text.replace("원", "").replace(",", "").strip()
+        )
+
+        if edited_price is not None:
+            stock["price"] = edited_price
+
+        edited_pct = num(
+            pct_input.replace("%", "").replace("+", "").replace(",", "").strip()
+        )
+
+        if edited_pct is not None:
+            stock["pct"] = edited_pct
 
         stock["reason"] = d.text_input(
             reason_label,
@@ -1952,6 +1979,11 @@ def main():
 
     @st.fragment(run_every=auto if auto else None)
     def body():
+
+        if st.button("수기 입력 초기화 (현재가·등락률)"):
+            for key in list(st.session_state.keys()):
+                if "_price_" in key or "_pct_" in key:
+                    del st.session_state[key]
 
         stale = (
             bool(auto)
