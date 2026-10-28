@@ -674,24 +674,49 @@ def arrow(value):
     return "➖"
 
 
+def md_lines(text, indent=""):
+    """입력창(textarea)의 줄바꿈을 마크다운 줄바꿈으로 변환."""
+
+    rows = [row.rstrip() for row in str(text).strip().splitlines()]
+
+    if indent:
+        rows = [row.strip() for row in rows if row.strip()]
+
+    return f"  \n{indent}".join(rows)
+
+
+def one_line(text):
+    """굵게·목록 제목처럼 한 줄이어야 하는 값의 줄바꿈 제거."""
+
+    return " ".join(str(text).split())
+
+
 def build_markdown(snapshot, time_text="확인 불가"):
     """시황글 마크다운 생성."""
 
     session = st.session_state
 
-    lines = [
-        f"# 📅 {snapshot['date']} | 오후 시황",
-        "",
-        (
-            f"📌 **한 줄 요약**: "
-            f"{session.get('summary', '당일 등락률 상위 종목과 시장 흐름을 확인하세요.')}"
-        ),
-        "",
+    summary_text = md_lines(
+        session.get(
+            "summary",
+            "당일 등락률 상위 종목과 시장 흐름을 확인하세요."
+        )
+    )
+
+    intro_text = md_lines(
         session.get(
             "intro_text",
             "종목 순위는 토스증권 Open API의 기간별 등락률 기준입니다. "
             "실시간 순위와 다를 수 있으므로 기준 시각을 확인해 주세요."
-        ),
+        )
+    )
+
+    lines = [
+        f"# 📅 {snapshot['date']} | 오후 시황",
+        "",
+        f"📌 **한 줄 요약**: {summary_text}",
+        "",
+        intro_text,
         "",
         "### 🇰🇷 장중 지수 현황",
         "",
@@ -792,7 +817,7 @@ def build_markdown(snapshot, time_text="확인 불가"):
     ]
 
     for i in (1, 2, 3):
-        title = session.get(f"is{i}t", "").strip()
+        title = one_line(session.get(f"is{i}t", ""))
 
         if not title:
             continue
@@ -804,9 +829,9 @@ def build_markdown(snapshot, time_text="확인 불가"):
         content = session.get(f"is{i}c", "").strip()
 
         if content:
-            lines.append(f"- 내용: {content}")
+            lines.append(f"- 내용: {md_lines(content, '  ')}")
 
-        related = session.get(f"is{i}s", "").strip()
+        related = one_line(session.get(f"is{i}s", ""))
 
         if related:
             lines.append(f"- 📌 관련 종목: {related}")
@@ -814,7 +839,7 @@ def build_markdown(snapshot, time_text="확인 불가"):
         check = session.get(f"is{i}k", "").strip()
 
         if check:
-            lines.append(f"- ⏰ 체크: {check}")
+            lines.append(f"- ⏰ 체크: {md_lines(check, '  ')}")
 
         lines.append("")
 
@@ -845,10 +870,21 @@ def build_markdown(snapshot, time_text="확인 불가"):
         value = session.get(key, default).strip()
 
         if value:
+            if key == "checks":
+                items = [
+                    re.sub(r"^[-•·]\s*", "", part.strip())
+                    for part in re.split(r"[/\n]", value)
+                ]
+
+                body_text = "\n- ".join(item for item in items if item)
+
+            else:
+                body_text = md_lines(value.replace("/", "\n- "))
+
             lines += [
                 f"### {title}",
                 "",
-                value.replace("/", "\n- "),
+                body_text,
                 "",
             ]
 
@@ -1210,15 +1246,17 @@ def main():
             "📝 시황글 추가 내용 편집",
             expanded=True
         ):
-            st.text_input(
+            st.text_area(
                 "한 줄 요약",
                 key="summary",
-                value="당일 등락률 상위 종목과 시장 흐름을 확인하세요."
+                value="당일 등락률 상위 종목과 시장 흐름을 확인하세요.",
+                height=68,
             )
 
             st.text_area(
                 "인트로 문구",
                 key="intro_text",
+                height=110,
                 value=(
                     "종목 순위는 토스증권 Open API의 기간별 등락률 기준입니다. "
                     "실시간 순위와 다를 수 있으므로 기준 시각을 확인해 주세요."
@@ -1243,35 +1281,41 @@ def main():
                     key=f"is{i}m",
                 )
 
-                b.text_input(
+                b.text_area(
                     "제목",
                     value=title,
                     key=f"is{i}t",
+                    height=68,
                 )
 
-                c.text_input(
+                c.text_area(
                     "관련 종목",
                     key=f"is{i}s",
+                    height=68,
                 )
 
-                st.text_input(
+                st.text_area(
                     "내용",
                     key=f"is{i}c",
+                    height=110,
                 )
 
-                st.text_input(
+                st.text_area(
                     "체크",
                     key=f"is{i}k",
+                    height=68,
                 )
 
-            st.text_input(
+            st.text_area(
                 "강했던 테마",
                 key="themes",
                 value="AI 반도체 · 2차전지",
+                height=68,
             )
 
-            st.text_input(
-                "내일 체크 포인트 (/로 구분)",
+            st.text_area(
+                "내일 체크 포인트 (줄바꿈 또는 /로 구분)",
+                height=110,
                 key="checks",
                 value=(
                     "급등 종목 상승 지속 여부 / "
@@ -1280,15 +1324,17 @@ def main():
                 ),
             )
 
-            st.text_input(
+            st.text_area(
                 "핵심 키워드",
                 key="keywords",
                 value="#코스피 #코스닥 #급등주 #급락주 #주식시황",
+                height=68,
             )
 
-            st.text_input(
+            st.text_area(
                 "한 줄 주의",
                 key="caution",
+                height=68,
                 value=(
                     "등락률 순위는 선택한 기간 기준이며 "
                     "실시간 순위와 다를 수 있습니다."
