@@ -1373,25 +1373,26 @@ def fetch_snapshot(duration, universe="all"):
     }
 
 
-ISSUE_QUERIES = (
-    "증시", "코스피 코스닥", "환율 금리", "미국 증시",
-    "경제 지표", "유가", "관세 무역", "정부 경제 정책",
-)
-
-ISSUE_SKIP = re.compile(
-    r"\[인사\]|\[부음\]|\[부고\]|\[포토\]|\[표\]|\[그래픽\]|특징주|운세"
-)
-
 ISSUE_STOPWORDS = set(
     "코스피 코스닥 증시 마감 오늘 전망 상승 하락 시장 개장 장중 지수 주가 투자 경제 한국 미국 "
     "국내 올해 이번 관련 발표 대한 위한 통해 강세 약세 출발 전일 대비 억원 조원 속보 종합 "
-    "기자 뉴스 외국인 기관 개인 순매수 순매도 매수 매도 거래 거래일 종목 주식 마감시황 시황 "
-    "하루 이날 현재 오후 오전 정부 기업 업계 가운데 이어 다시 또다시 가장 최대 최고 최저 "
-    "전망치 예상 확대 감소 증가 기록 보합 혼조 약보합 약세장 강보합 코스피지수 코스닥지수".split()
+    "기자 뉴스 외국인 기관 개인 순매수 순매도 매수 매도 거래 거래일 종목 주식 시황 하루 이날 "
+    "현재 오후 오전 정부 기업 업계 가운데 이어 다시 가장 최대 최고 최저 예상 확대 감소 증가 기록".split()
 )
 
-POS_WORDS = ("상승", "급등", "강세", "반등", "돌파", "사상최고", "호조")
-NEG_WORDS = ("하락", "급락", "약세", "폭락", "우려", "충격", "부진")
+DEFAULT_ISSUE_TITLES = {
+    "당일 상승률 상위 종목 흐름",
+    "당일 하락률 상위 종목 흐름",
+    "시장 변동성 확인",
+}
+
+ARTICLE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept-Language": "ko-KR,ko;q=0.9",
+}
 
 RELATED_NAMES = sorted(
     {
@@ -1414,73 +1415,273 @@ def clean_news_text(text):
 
 def clean_title(title):
     title = re.sub(r"^\s*(\[[^\]]{1,10}\]\s*)+", "", title)
-    return title.strip()[:70].rstrip()
+    return clean_news_text(title)[:70].rstrip()
 
 
-@st.cache_data(ttl=180, show_spinner=False)
-def fetch_econ_articles(day_text):
-    """네이버 뉴스 검색 API로 오늘 올라온 경제·증시 기사를 모읍니다 (3분 캐시)."""
+def _meta_content(page, prop):
+    for pattern in (
+        rf'<meta[^>]+(?:property|name)=["\']{prop}["\'][^>]+content=["\']([^"\']*)',
+        rf'<meta[^>]+content=["\']([^"\']*)["\'][^>]+(?:property|name)=["\']{prop}["\']',
+    ):
+        found = re.search(pattern, page, re.I)
 
-    if not (NAVER_ID and NAVER_SECRET):
+        if found:
+            return html.unescape(found.group(1)).strip()
+
+    return ""
+
+
+def _html_to_lines(fragment, min_len):
+    fragment = re.sub(r"<br\s*/?>|</p>|</div>|</li>|</h\d>", "\n", fragment, flags=re.I)
+    fragment = html.unescape(re.sub(r"<[^>]+>", " ", fragment))
+
+    lines = []
+
+    for line in fragment.splitlines():
+        line = re.sub(r"\s+", " ", line).strip()
+
+        if len(line) >= min_len:
+            lines.append(line)
+
+    return lines
+
+
+def parse_article_html(page):
+    """기사 페이지 HTML에서 (제목, 본문)을 뽑습니다. 외부 라이브러리 없이 정규식으로 처리."""
+
+    title = _meta_content(page, "og:title")
+
+    if not title:
+        found = re.search(r"<title[^>]*>(.*?)</title>", page, re.S | re.I)
+        title = clean_news_text(found.group(1)) if found else ""
+
+    page = re.sub(r"<!--.*?-->", " ", page, flags=re.S)
+
+    page = re.sub(
+        r"<(script|style|noscript|iframe|header|footer|nav|aside|form)\b.*?</\1>",
+        " ",
+        page,
+        flags=re.S | re.I,
+    )
+
+    articles = re.findall(r"<article\b[^>]*>(.*?)</article>", page, re.S | re.I)
+
+    lines = []
+
+    if articles:
+        lines = _html_to_lines(max(articles, key=len), 20)
+
+    if sum(len(line) for line in lines) < 200:
+        lines = _html_to_lines(page, 40)
+
+    body = "\n".join(lines)
+
+    return title, body[:6000]
+
+
+def fetch_article(url):
+    """기사 링크에서 제목과 본문을 가져옵니다."""
+
+    response = requests.get(url, headers=ARTICLE_HEADERS, timeout=10)
+
+    if response.status_code != 200:
+        raise RuntimeError(f"HTTP {response.status_code}")
+
+    encoding = None
+
+    if "charset" in response.headers.get("content-type", "").lower():
+        encoding = response.encoding
+
+    if not encoding:
+        head = response.content[:3000].decode("ascii", errors="ignore")
+        found = re.search(r'charset=["\']?([\w-]+)', head, re.I)
+        encoding = found.group(1) if found else (response.apparent_encoding or "utf-8")
+
+    try:
+        page = response.content.decode(encoding, errors="ignore")
+    except LookupError:
+        page = response.content.decode("utf-8", errors="ignore")
+
+    title, body = parse_article_html(page)
+
+    if len(body) < 100:
         raise RuntimeError(
-            "NAVER_CLIENT_ID / NAVER_CLIENT_SECRET이 없어 뉴스를 가져올 수 없습니다."
+            "본문을 읽지 못했습니다(로그인·구독 필요 또는 동적 페이지). "
+            "기사 내용을 아래 칸에 직접 붙여넣어 주세요."
         )
 
-    seen = set()
-    articles = []
+    return title, body
 
-    for query in ISSUE_QUERIES:
-        try:
-            response = requests.get(
-                "https://openapi.naver.com/v1/search/news.json",
-                params={"query": query, "display": 100, "sort": "date"},
-                headers={
-                    "X-Naver-Client-Id": NAVER_ID,
-                    "X-Naver-Client-Secret": NAVER_SECRET,
-                },
-                timeout=6,
-            )
 
-            if response.status_code != 200:
-                continue
+def extractive_summary(text, max_sentences=3, max_chars=260):
+    """AI 키가 없을 때: 핵심 단어가 많이 들어간 문장을 골라 원문 순서대로 잇습니다."""
 
-            items = response.json().get("items", [])
+    text = re.sub(r"\s+", " ", text)
 
-        except Exception:
+    sentences = [
+        s.strip()
+        for s in re.split(r"(?<=[.!?])\s+", text)
+        if 20 <= len(s.strip()) <= 220
+    ]
+
+    if not sentences:
+        return text[:max_chars]
+
+    df = Counter()
+
+    for sentence in sentences:
+        df.update(issue_tokens(sentence))
+
+    scored = []
+
+    for index, sentence in enumerate(sentences):
+        tokens = issue_tokens(sentence)
+
+        if not tokens:
             continue
 
-        for item in items:
-            link = item.get("originallink") or item.get("link") or ""
+        score = sum(df[t] for t in tokens) / len(tokens) + (2 if index < 2 else 0)
+        scored.append((score, index, sentence))
 
-            if not link or link in seen:
-                continue
+    picked = sorted(sorted(scored, reverse=True)[:max_sentences], key=lambda x: x[1])
 
-            title = clean_news_text(item.get("title", ""))
+    result = " ".join(sentence for _, _, sentence in picked)
 
-            if not title or ISSUE_SKIP.search(title):
-                continue
+    return result[:max_chars + 40]
 
-            try:
-                published = datetime.datetime.strptime(
-                    item["pubDate"],
-                    "%a, %d %b %Y %H:%M:%S %z"
-                ).astimezone(KST)
 
-            except Exception:
-                continue
+def ai_summary(text):
+    """ANTHROPIC_API_KEY가 있으면 Claude로 핵심 요약. 실패하면 예외."""
 
-            if published.date().isoformat() != day_text:
-                continue
+    response = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": secret("ANTHROPIC_API_KEY"),
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": secret("ANTHROPIC_MODEL", "claude-haiku-5-5"),
+            "max_tokens": 500,
+            "messages": [{
+                "role": "user",
+                "content": (
+                    "다음 경제 기사에서 투자자가 알아야 할 핵심만 한국어로 2~3문장, "
+                    "180자 안팎으로 정리해 주세요. 기사 문장을 그대로 옮기지 말고 "
+                    "자신의 말로 요약하고, 제목·머리말·따옴표 없이 본문만 쓰세요.\n\n"
+                    + text[:6000]
+                ),
+            }],
+        },
+        timeout=40,
+    )
 
-            seen.add(link)
+    if response.status_code != 200:
+        raise RuntimeError(f"HTTP {response.status_code}: {response.text[:200]}")
 
-            articles.append({
-                "title": title,
-                "desc": clean_news_text(item.get("description", "")),
-                "time": published.strftime("%H:%M"),
-            })
+    parts = response.json().get("content", [])
 
-    return articles
+    result = "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+
+    if not result:
+        raise RuntimeError("빈 응답")
+
+    return result
+
+
+def summarize_text(text):
+    """(요약, 방식) 반환. AI 키가 있으면 AI, 없거나 실패하면 핵심 문장 추출."""
+
+    if secret("ANTHROPIC_API_KEY"):
+        try:
+            return ai_summary(text), "AI 요약"
+
+        except Exception as error:
+            return extractive_summary(text), f"핵심 문장 추출 (AI 실패: {error})"
+
+    return extractive_summary(text), "핵심 문장 추출"
+
+
+def _fill_related(i, text):
+    state = st.session_state
+
+    if state.get(f"is{i}s", "").strip():
+        return
+
+    names = [
+        name
+        for name, _ in Counter(RELATED_REGEX.findall(text)).most_common(4)
+    ]
+
+    if names:
+        state[f"is{i}s"] = ", ".join(names)
+
+
+def load_article(i):
+    """[기사 불러오기] 링크의 기사 본문을 기사 내용 칸에 넣습니다."""
+
+    state = st.session_state
+    url = state.get(f"is{i}link", "").strip()
+
+    if not url:
+        state[f"is{i}note"] = "기사 링크를 먼저 입력해 주세요."
+        return
+
+    if not url.lower().startswith("http"):
+        url = "https://" + url
+        state[f"is{i}link"] = url
+
+    try:
+        title, body = fetch_article(url)
+
+    except Exception as error:
+        state[f"is{i}note"] = f"기사 불러오기 실패: {error}"
+        return
+
+    state[f"is{i}src"] = body
+
+    current = state.get(f"is{i}t", "").strip()
+
+    if title and (not current or current in DEFAULT_ISSUE_TITLES):
+        state[f"is{i}t"] = clean_title(title)
+
+    _fill_related(i, f"{title} {body}")
+
+    state[f"is{i}note"] = f"기사 {len(body):,}자를 불러왔습니다. [핵심 정리]를 눌러 보세요."
+
+
+def summarize_issue(i):
+    """[핵심 정리] 기사 내용 칸을 핵심만 남겨 '내용' 칸에 넣습니다."""
+
+    state = st.session_state
+    source = state.get(f"is{i}src", "").strip()
+
+    # 기사 내용 칸에 링크만 붙여넣은 경우: 링크로 보고 먼저 불러옴
+    if re.fullmatch(r"https?://\S+", source):
+        state[f"is{i}link"] = source
+        state[f"is{i}src"] = ""
+        source = ""
+
+    if not source:
+        if state.get(f"is{i}link", "").strip():
+            load_article(i)
+            source = state.get(f"is{i}src", "").strip()
+
+        if not source:
+            state.setdefault(f"is{i}note", "")
+
+            if not state[f"is{i}note"]:
+                state[f"is{i}note"] = "링크를 넣거나 기사 내용을 붙여넣어 주세요."
+
+            return
+
+    summary, how = summarize_text(source)
+
+    state[f"is{i}c"] = summary
+
+    _fill_related(i, source)
+
+    state[f"is{i}note"] = f"핵심 정리 완료 ({how}). 내용 칸에서 자유롭게 고치세요."
 
 
 def issue_tokens(title):
@@ -1504,113 +1705,6 @@ def issue_tokens(title):
     return tokens
 
 
-def build_issue_clusters(articles):
-    """비슷한 제목끼리 묶어 '보도가 많은 주제' 순으로 정렬합니다."""
-
-    df = Counter()
-
-    for article in articles:
-        article["tokens"] = issue_tokens(article["title"])
-        df.update(article["tokens"])
-
-    def weight(article):
-        return sum(df[token] for token in article["tokens"])
-
-    clusters = []
-
-    for article in sorted(articles, key=weight, reverse=True):
-        if not article["tokens"]:
-            continue
-
-        for cluster in clusters:
-            if len(article["tokens"] & cluster["seed"]) >= 2:
-                cluster["items"].append(article)
-                break
-
-        else:
-            clusters.append({
-                "seed": set(article["tokens"]),
-                "items": [article],
-            })
-
-    for cluster in clusters:
-        cluster["lead"] = max(cluster["items"], key=weight)
-
-    clusters.sort(
-        key=lambda cluster: (len(cluster["items"]), cluster["lead"]["time"]),
-        reverse=True,
-    )
-
-    return clusters
-
-
-def autofill_issues():
-    """오늘의 주요 경제 이슈 1~3번 칸을 자동으로 채웁니다 (덮어쓰기)."""
-
-    now = datetime.datetime.now(KST)
-
-    try:
-        articles = fetch_econ_articles(now.date().isoformat())
-
-    except Exception as error:
-        st.session_state["issues_note"] = f"자동 수집 실패: {error}"
-        return
-
-    after_open = [a for a in articles if a["time"] >= "09:00"]
-
-    pool = after_open if len(after_open) >= 5 else articles
-
-    if not pool:
-        st.session_state["issues_note"] = (
-            "오늘 날짜의 경제 기사를 찾지 못했습니다. 직접 입력해 주세요."
-        )
-        return
-
-    clusters = build_issue_clusters(pool)[:3]
-
-    for i in (1, 2, 3):
-        if i > len(clusters):
-            for suffix in ("t", "s", "c", "k", "info"):
-                st.session_state[f"is{i}{suffix}"] = ""
-
-            continue
-
-        cluster = clusters[i - 1]
-        lead = cluster["lead"]
-
-        texts = " ".join(
-            f"{a['title']} {a['desc']}" for a in cluster["items"]
-        )
-
-        related = [
-            name
-            for name, _ in Counter(RELATED_REGEX.findall(texts)).most_common(4)
-        ]
-
-        titles = " ".join(a["title"] for a in cluster["items"])
-        score = (
-            sum(titles.count(word) for word in POS_WORDS)
-            - sum(titles.count(word) for word in NEG_WORDS)
-        )
-
-        st.session_state[f"is{i}m"] = (
-            "🔺" if score > 0 else "🔻" if score < 0 else "➖"
-        )
-        st.session_state[f"is{i}t"] = clean_title(lead["title"])
-        st.session_state[f"is{i}c"] = lead["desc"] or lead["title"]
-        st.session_state[f"is{i}s"] = ", ".join(related)
-        st.session_state[f"is{i}k"] = ""
-        st.session_state[f"is{i}info"] = (
-            f"자동 수집: 관련 기사 {len(cluster['items'])}건 · "
-            f"대표 기사 {lead['time']}"
-        )
-
-    scope = "장 시작 후" if pool is after_open else "오늘"
-
-    st.session_state["issues_note"] = (
-        f"{scope} 경제 기사 {len(pool)}건 분석 · "
-        f"갱신 {now.strftime('%H:%M:%S')}"
-    )
 
 
 def fmt(value, digits=2):
@@ -2348,24 +2442,19 @@ def main():
             snapshot.get("universe", "all"),
         )
 
-        # 처음 한 번만 주요 경제 이슈를 자동으로 채움 (이후 수기 수정 유지)
-        if "issues_filled" not in st.session_state:
-            st.session_state["issues_filled"] = True
-
-            with st.spinner("오늘의 주요 경제 이슈 수집 중..."):
-                autofill_issues()
-
         with st.expander(
             "📝 시황글 추가 내용 편집",
             expanded=True
         ):
-            st.button(
-                "🔄 주요 경제 이슈 자동 채우기 (수정한 내용 덮어씀)",
-                on_click=autofill_issues,
+            st.caption(
+                "이슈별로 기사 링크를 넣고 [기사 불러오기] → [핵심 정리]를 누르면 "
+                "'내용' 칸이 채워집니다. 기사 내용을 직접 붙여넣어도 됩니다. "
+                + (
+                    "요약 방식: AI"
+                    if secret("ANTHROPIC_API_KEY")
+                    else "요약 방식: 핵심 문장 자동 추출 (AI 요약은 ANTHROPIC_API_KEY 설정 시)"
+                )
             )
-
-            if st.session_state.get("issues_note"):
-                st.caption(st.session_state["issues_note"])
 
             st.text_area(
                 "한 줄 요약",
@@ -2416,8 +2505,38 @@ def main():
                     height=68,
                 )
 
-                if st.session_state.get(f"is{i}info"):
-                    st.caption(st.session_state[f"is{i}info"])
+                l1, l2 = st.columns([5, 1.4], vertical_alignment="bottom")
+
+                l1.text_input(
+                    "기사 링크",
+                    key=f"is{i}link",
+                    placeholder="https://...",
+                )
+
+                l2.button(
+                    "기사 불러오기",
+                    key=f"is{i}fetch",
+                    on_click=load_article,
+                    args=(i,),
+                )
+
+                st.text_area(
+                    "기사 내용 (링크로 불러오거나 직접 붙여넣기)",
+                    key=f"is{i}src",
+                    height=110,
+                )
+
+                s1, s2 = st.columns([1.4, 5], vertical_alignment="center")
+
+                s1.button(
+                    "✨ 핵심 정리",
+                    key=f"is{i}sum",
+                    on_click=summarize_issue,
+                    args=(i,),
+                )
+
+                if st.session_state.get(f"is{i}note"):
+                    s2.caption(st.session_state[f"is{i}note"])
 
                 st.text_area(
                     "내용",
