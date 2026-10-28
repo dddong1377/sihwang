@@ -984,9 +984,9 @@ def parse_naver_market_sum(page_html, market):
     return rows
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def fetch_cap_rows_naver():
-    """[1순위] 코스피 상위 150개 + 코스닥 상위 100개를 네이버 금융 시가총액 기준으로 수집 (2분 캐시)."""
+    """[1순위] 코스피 상위 150개 + 코스닥 상위 100개를 네이버 금융 시가총액 기준으로 수집 (30초 캐시)."""
 
     rows = {}
 
@@ -1099,20 +1099,29 @@ def fetch_cap_rows_toss():
     caps.sort(key=lambda row: row["cap"], reverse=True)
     top = caps[:CAP_RANK_LIMIT + 20]
 
+    today_text = datetime.datetime.now(KST).date().isoformat()
+
     def add_pct(row):
         try:
             result = api_get(
                 "/api/v1/candles",
-                {"symbol": row["symbol"], "interval": "1d", "count": 2}
+                {"symbol": row["symbol"], "interval": "1d", "count": 3}
             )
             candles = result.get("candles", [])
 
-            if len(candles) >= 2:
-                prev = num(candles[1].get("closePrice"))
+            # 오늘보다 앞선 가장 최근 봉의 종가 = 전일 종가
+            prev = None
 
-                if prev:
-                    row["pct"] = (row["price"] / prev - 1) * 100
-                    return row
+            for candle in candles:
+                day = str(candle.get("timestamp", ""))[:10]
+
+                if day and day < today_text:
+                    prev = num(candle.get("closePrice"))
+                    break
+
+            if prev:
+                row["pct"] = (row["price"] / prev - 1) * 100
+                return row
 
         except Exception:
             pass
@@ -1853,11 +1862,17 @@ def main():
     @st.fragment(run_every=auto if auto else None)
     def body():
 
+        stale = (
+            bool(auto)
+            and time.time() - st.session_state.get("fetched_ts", 0) >= auto
+        )
+
         should_fetch = (
             st.button("지금 시세 조회", type="primary")
             or "snapshot" not in st.session_state
             or st.session_state.get("duration") != duration
             or st.session_state.get("universe") != universe
+            or stale
         )
 
         if should_fetch:
@@ -1870,6 +1885,7 @@ def main():
 
                     st.session_state["duration"] = duration
                     st.session_state["universe"] = universe
+                    st.session_state["fetched_ts"] = time.time()
                     st.session_state.pop("api_error", None)
 
             except Exception as error:
