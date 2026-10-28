@@ -876,7 +876,9 @@ def build_markdown(snapshot, time_text="확인 불가"):
                     for part in re.split(r"[/\n]", value)
                 ]
 
-                body_text = "\n- ".join(item for item in items if item)
+                body_text = "\n".join(
+                    f"- {item}" for item in items if item
+                )
 
             else:
                 body_text = md_lines(value.replace("/", "\n- "))
