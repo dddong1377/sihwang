@@ -805,7 +805,6 @@ def build_markdown(snapshot, time_text="확인 불가"):
                 "| 데이터 없음 | 확인 불가 | 확인 불가 | - |"
             )
 
- ```python
     show_down_reason = session.get("show_down_reason", True)
 
     lines += ["", "", "### 🔻 급락 특징주 TOP 5", ""]
