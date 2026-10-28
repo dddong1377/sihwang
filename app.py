@@ -1,6 +1,4 @@
-from pathlib import Path
-
-code = r'''import datetime
+import datetime
 import hmac
 import html
 import json
@@ -294,9 +292,7 @@ def get_indices():
     return output
 
 
-YAHOO_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; MTNW-Market/1.0)"
-}
+YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MTNW-Market/1.0)"}
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -767,101 +763,51 @@ def build_markdown(snapshot, time_text="확인 불가"):
             f"| {time_text} |"
         )
 
-    # 상승 이유 열 표시 여부에 따라 급등 표의 열 구성을 변경합니다.
-    show_up_reason = session.get("show_up_reason", True)
-
     lines += [
         "",
         "",
         "### 🔺 급등 특징주 TOP 5",
         "",
+        "| 종목 | 현재가 | 등락률 | 상승 이유 | 관련 테마 |",
+        "|---|---:|---:|---|---|",
     ]
 
-    if show_up_reason:
-        lines += [
-            "| 종목 | 현재가 | 등락률 | 상승 이유 | 관련 테마 |",
-            "|---|---:|---:|---|---|",
-        ]
-    else:
-        lines += [
-            "| 종목 | 현재가 | 등락률 | 관련 테마 |",
-            "|---|---:|---:|---|",
-        ]
-
     for stock in snapshot["gainers"]:
-        if show_up_reason:
-            lines.append(
-                f"| **{stock['name']}** "
-                f"| {fmt(stock['price'], 0)}원 "
-                f"| **{pct_text(stock['pct'])}** "
-                f"| {stock['reason']} "
-                f"| {stock['theme']} |"
-            )
-        else:
-            lines.append(
-                f"| **{stock['name']}** "
-                f"| {fmt(stock['price'], 0)}원 "
-                f"| **{pct_text(stock['pct'])}** "
-                f"| {stock['theme']} |"
-            )
+        lines.append(
+            f"| **{stock['name']}** "
+            f"| {fmt(stock['price'], 0)}원 "
+            f"| **{pct_text(stock['pct'])}** "
+            f"| {stock['reason']} "
+            f"| {stock['theme']} |"
+        )
 
     if not snapshot["gainers"]:
-        if show_up_reason:
-            lines.append(
-                "| 데이터 없음 | 확인 불가 | 확인 불가 | API 응답 확인 필요 | - |"
-            )
-        else:
-            lines.append(
-                "| 데이터 없음 | 확인 불가 | 확인 불가 | - |"
-            )
-
-    # 하락 이유 열 표시 여부에 따라 급락 표의 열 구성을 변경합니다.
-    show_down_reason = session.get("show_down_reason", True)
+        lines.append(
+            "| 데이터 없음 | 확인 불가 | 확인 불가 | API 응답 확인 필요 | - |"
+        )
 
     lines += [
         "",
         "",
         "### 🔻 급락 특징주 TOP 5",
         "",
+        "| 종목 | 현재가 | 등락률 | 하락 이유 | 관련 테마 |",
+        "|---|---:|---:|---|---|",
     ]
 
-    if show_down_reason:
-        lines += [
-            "| 종목 | 현재가 | 등락률 | 하락 이유 | 관련 테마 |",
-            "|---|---:|---:|---|---|",
-        ]
-    else:
-        lines += [
-            "| 종목 | 현재가 | 등락률 | 관련 테마 |",
-            "|---|---:|---:|---|",
-        ]
-
     for stock in snapshot["losers"]:
-        if show_down_reason:
-            lines.append(
-                f"| **{stock['name']}** "
-                f"| {fmt(stock['price'], 0)}원 "
-                f"| **{pct_text(stock['pct'])}** "
-                f"| {stock['reason']} "
-                f"| {stock['theme']} |"
-            )
-        else:
-            lines.append(
-                f"| **{stock['name']}** "
-                f"| {fmt(stock['price'], 0)}원 "
-                f"| **{pct_text(stock['pct'])}** "
-                f"| {stock['theme']} |"
-            )
+        lines.append(
+            f"| **{stock['name']}** "
+            f"| {fmt(stock['price'], 0)}원 "
+            f"| **{pct_text(stock['pct'])}** "
+            f"| {stock['reason']} "
+            f"| {stock['theme']} |"
+        )
 
     if not snapshot["losers"]:
-        if show_down_reason:
-            lines.append(
-                "| 데이터 없음 | 확인 불가 | 확인 불가 | API 응답 확인 필요 | - |"
-            )
-        else:
-            lines.append(
-                "| 데이터 없음 | 확인 불가 | 확인 불가 | - |"
-            )
+        lines.append(
+            "| 데이터 없음 | 확인 불가 | 확인 불가 | API 응답 확인 필요 | - |"
+        )
 
     lines += [
         "",
@@ -1228,13 +1174,6 @@ def main():
                 f"{pct_text(data.get('pct'))}"
             )
 
-        # 추가: 급등 이유 표시 체크박스
-        st.checkbox(
-            "시황글에 상승 이유 표시",
-            value=True,
-            key="show_up_reason",
-        )
-
         st.subheader("🔺 급등 특징주 TOP 5")
 
         if not snapshot["gainers"]:
@@ -1269,13 +1208,6 @@ def main():
                     key=f"up_theme_{stock['symbol']}",
                     label_visibility="collapsed",
                 )
-
-        # 추가: 급락 이유 표시 체크박스
-        st.checkbox(
-            "시황글에 하락 이유 표시",
-            value=True,
-            key="show_down_reason",
-        )
 
         st.subheader("🔻 급락 특징주 TOP 5")
 
@@ -1417,7 +1349,6 @@ def main():
 
         markdown = build_markdown(snapshot, now_text)
 
-        # 미리보기와 동일한 마크다운을 복사 버튼에 전달합니다.
         copy_buttons(build_markdown(snapshot, NOW_TOKEN))
 
         with st.container(border=True):
@@ -1430,8 +1361,3 @@ def main():
 
 
 main()
-'''
-
-path = Path("/mnt/data/app.py")
-path.write_text(code, encoding="utf-8")
-text(f"전체 수정 코드를 {path}에 저장했습니다. 코드 길이: {len(code.splitlines())}줄")
