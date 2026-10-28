@@ -1173,7 +1173,11 @@ def main():
                 f"{arrow(data.get('pct'))} "
                 f"{pct_text(data.get('pct'))}"
             )
-
+        st.checkbox(
+            "시황글에 상승 이유 표시",
+            value=True,
+            key="show_up_reason",
+        )
         st.subheader("🔺 급등 특징주 TOP 5")
 
         if not snapshot["gainers"]:
@@ -1208,7 +1212,11 @@ def main():
                     key=f"up_theme_{stock['symbol']}",
                     label_visibility="collapsed",
                 )
-
+        st.checkbox(
+            "시황글에 하락 이유 표시",
+            value=True,
+            key="show_down_reason",
+        )
         st.subheader("🔻 급락 특징주 TOP 5")
 
         if not snapshot["losers"]:
