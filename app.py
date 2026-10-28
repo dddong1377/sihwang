@@ -805,10 +805,13 @@ def build_markdown(snapshot, time_text="확인 불가"):
                 "| 데이터 없음 | 확인 불가 | 확인 불가 | - |"
             )
 
+ ```python
     show_down_reason = session.get("show_down_reason", True)
 
     lines += ["", "", "### 🔻 급락 특징주 TOP 5", ""]
 
+    # 하락 이유 표시 여부에 따라 열만 변경하고,
+    # 급락 특징주 표 자체는 항상 표시합니다.
     if show_down_reason:
         lines += [
             "| 종목 | 현재가 | 등락률 | 하락 이유 | 관련 테마 |",
@@ -817,7 +820,7 @@ def build_markdown(snapshot, time_text="확인 불가"):
     else:
         lines += [
             "| 종목 | 현재가 | 등락률 | 관련 테마 |",
-            "|---|---:|---:|---|---|",
+            "|---|---:|---:|---|",
         ]
 
     for stock in snapshot["losers"]:
@@ -846,12 +849,14 @@ def build_markdown(snapshot, time_text="확인 불가"):
             lines.append(
                 "| 데이터 없음 | 확인 불가 | 확인 불가 | - |"
             )
+
     lines += [
         "",
         "",
         "### 🔥 오늘의 주요 경제 이슈",
         "",
     ]
+```
 
     for i in (1, 2, 3):
         title = one_line(session.get(f"is{i}t", ""))
