@@ -860,17 +860,6 @@ def main():
     st.title("MTNW 오후 시황")
 
     with st.sidebar:
-        if st.button("서버 IP 확인"):
-    try:
-        v4 = requests.get("https://api.ipify.org", timeout=5).text
-    except Exception as e:
-        v4 = f"실패: {e}"
-    try:
-        v6 = requests.get("https://api64.ipify.org", timeout=5).text
-    except Exception as e:
-        v6 = f"실패: {e}"
-    st.write("IPv4:", v4)
-    st.write("api64 (IPv6 우선):", v6)
         st.header("설정")
 
         auto = st.selectbox(
@@ -898,10 +887,6 @@ def main():
             "토스증권 TOP_GAINERS/TOP_LOSERS는 "
             "realtime 기간을 지원하지 않습니다."
         )
-    with st.sidebar:
-        st.header("설정")
-
-        # ... (기존 auto, duration 선택박스 코드) ...
 
         if st.button("서버 IP 확인"):
             try:
@@ -921,9 +906,6 @@ def main():
             st.write("IPv4:", v4)
             st.write("api64 (IPv6 우선):", v6)
 
-        if st.button("로그아웃"):
-            st.session_state["pw_ok"] = False
-            st.rerun()
         if st.button("로그아웃"):
             st.session_state["pw_ok"] = False
             st.rerun()
