@@ -1,352 +1,1411 @@
 import datetime
 import hmac
-import html as htmllib
+import html
 import json
 import os
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
-from bs4 import BeautifulSoup
-import pandas as pd
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
-# 반드시 첫 번째 Streamlit 명령
 st.set_page_config(page_title="MTNW 오후 시황", layout="wide")
 
 KST = ZoneInfo("Asia/Seoul")
+BASE = "https://openapi.tossinvest.com"
 WEEKDAYS = "월화수목금토일"
+GLOBAL_ITEMS = (
+    ("nasdaq", "나스닥", ""),
+    ("sp500", "S&P500", ""),
+    ("usdkrw", "원/달러 환율", "원"),
+)
+NOW_TOKEN = "__NOW__"  # 복사 버튼을 누르는 순간의 시각으로 치환됨
+
+THEMES = [
+    ("HBM·반도체", r"HBM|D램|낸드|반도체|파운드리|메모리|소부장"),
+    ("AI", r"AI|인공지능|데이터센터|엔비디아|챗GPT|앤트로픽"),
+    ("2차전지", r"2차전지|배터리|양극재|음극재|리튬|전고체"),
+    ("바이오·제약", r"바이오|제약|신약|임상|FDA|항암|치료제|백신"),
+    ("로봇", r"로봇|휴머노이드|자동화"),
+    ("방산·우주", r"방산|미사일|우주|위성|K9|천무"),
+    ("조선·해운", r"조선|선박|LNG선|해운"),
+    ("원전·전력", r"원전|SMR|전력|변압기|전선|송전"),
+    ("엔터", r"엔터|K팝|아이돌|콘서트|음반"),
+    ("게임", r"게임|신작|퍼블리싱"),
+    ("화장품·소비", r"화장품|뷰티|면세|K푸드|음식료"),
+    ("자동차", r"자동차|전기차|자율주행"),
+    ("금융", r"은행|증권|보험|금융지주|배당"),
+    ("건설·부동산", r"건설|부동산|분양|재건축"),
+    ("정유·에너지", r"정유|유가|에너지|석유|가스"),
+    ("철강·소재", r"철강|화학|비철|구리"),
+]
+
+EXCLUDE = re.compile(
+    r"스팩|제\d+호|ETN|KODEX|TIGER|ACE |SOL |RISE|HANARO|KOSEF|ARIRANG|PLUS |KIWOOM|우$"
+)
 
 
-# ============================================================ 설정 / 비밀번호
-def secret(name, default=""):
-    """Streamlit Secrets → 환경변수 순으로 읽는다. 값이 없으면 default."""
+def secret(key, default=""):
+    """Streamlit Secrets 또는 환경변수에서 설정값을 가져옵니다."""
     try:
-        v = st.secrets.get(name)
+        value = st.secrets.get(key)
     except Exception:
-        v = None
-    return str(v) if v else os.getenv(name, default)
+        value = None
+
+    return str(value) if value else os.getenv(key, default)
 
 
-def check_password() -> bool:
+def login():
+    """사이트 접속 비밀번호 확인."""
     expected = secret("app_password")
+
     if not expected:
-        st.error(
-            "비밀번호가 설정되지 않았습니다. Streamlit 설정의 Secrets에 app_password를 추가하세요."
-        )
+        st.error("Streamlit Secrets에 app_password를 설정하세요.")
         return False
 
-    def entered():
-        typed = st.session_state.get("pw", "").encode("utf-8")
+    def verify():
+        entered = st.session_state.get("pw", "").encode()
         st.session_state["pw_ok"] = hmac.compare_digest(
-            typed, expected.encode("utf-8")
+            entered,
+            expected.encode()
         )
         st.session_state["pw"] = ""
 
     if st.session_state.get("pw_ok"):
         return True
+
     st.title("MTNW 시황")
-    st.text_input("비밀번호", type="password", key="pw", on_change=entered)
+
+    st.text_input(
+        "비밀번호",
+        type="password",
+        key="pw",
+        on_change=verify
+    )
+
     if st.session_state.get("pw_ok") is False:
         st.error("비밀번호가 올바르지 않습니다.")
+
     return False
 
 
-if not check_password():
+if not login():
     st.stop()
 
-# ---- 토스증권 및 네이버 API 설정 값 읽기 ----
-TOSS_CLIENT_ID = secret("TOSS_CLIENT_ID")
-TOSS_CLIENT_SECRET = secret("TOSS_CLIENT_SECRET")
+
+CLIENT_ID = secret("TOSS_CLIENT_ID")
+CLIENT_SECRET = secret("TOSS_CLIENT_SECRET")
+
 NAVER_ID = secret("NAVER_CLIENT_ID")
 NAVER_SECRET = secret("NAVER_CLIENT_SECRET")
 
 
-@st.cache_resource
-def _store():
-    return {"token": {}, "news": {}}
+class TossError(Exception):
+    """토스증권 API 관련 오류."""
+    pass
 
 
-STORE = _store()
+@st.cache_data(ttl=20 * 60 * 60, show_spinner=False)
+def get_token(client_id, client_secret):
+    """토스증권 API 액세스 토큰 발급."""
 
-EXCLUDE_NAME = re.compile(
-    r"스팩|제\d+호|ETN|KODEX|TIGER|ACE |SOL |RISE|HANARO|KOSEF|ARIRANG|PLUS |KIWOOM|우[A-C]?$"
-)
-REASON_WORDS = re.compile(r"특징주|수주|계약|실적|공시|승인|인수|합병|유증|증자|전망")
-UP_WORDS = re.compile(r"급등|상승|강세|상한가|신고가|반등|매수|호재|훈풍")
-DOWN_WORDS = re.compile(r"급락|하락|약세|하한가|신저가|매도|악재|차익|우려|부진")
-
-THEME_RULES = [
-    ("HBM·반도체", r"HBM|D램|낸드|반도체|파운드리|메모리|소부장|웨이퍼"),
-    ("AI", r"(?<![A-Za-z])AI(?![A-Za-z])|인공지능|데이터센터|엔비디아|챗GPT|오픈AI|앤트로픽"),
-    ("2차전지", r"2차전지|배터리|양극재|음극재|전해액|리튬|전고체"),
-    ("바이오·제약", r"바이오|제약|신약|임상|FDA|항암|치료제|백신|CDMO"),
-    ("로봇", r"로봇|휴머노이드|자동화"),
-    ("방산·우주", r"방산|무기|미사일|우주|항공우주|위성|K9|천무"),
-    ("조선·해운", r"조선|선박|LNG선|해운|해양플랜트"),
-    ("원전·전력", r"원전|SMR|전력|변압기|전선|송전|배전"),
-    ("엔터", r"엔터|K팝|케이팝|아이돌|콘서트|음반"),
-    ("게임", r"게임|신작|퍼블리싱"),
-    ("화장품·소비", r"화장품|뷰티|면세|K푸드|음식료"),
-    ("자동차", r"자동차|전기차|자율주행|완성차"),
-    ("금융", r"은행|증권|보험|금융지주|밸류업|배당"),
-    ("건설·부동산", r"건설|부동산|분양|재건축|PF"),
-    ("정유·에너지", r"정유|유가|에너지|석유|가스"),
-    ("철강·소재", r"철강|화학|비철|소재|구리"),
-    ("가상자산", r"비트코인|가상자산|코인|블록체인"),
-]
-
-
-# ============================================================ 데이터 수집 로직
-def get_toss_auth_status():
-    if TOSS_CLIENT_ID and TOSS_CLIENT_SECRET:
-        return "토스증권 API 연동 성공 (인증 완료)"
-    return "토스증권 API 키 미설정 (기본 크롤링 백업 모드)"
-
-
-def fetch_naver_market_index():
-    headers = {"User-Agent": "Mozilla/5.0"}
-    res = {
-        "kospi": {"price": 0.0, "pct": 0.0},
-        "kosdaq": {"price": 0.0, "pct": 0.0},
-    }
+    if not client_id or not client_secret:
+        raise TossError(
+            "TOSS_CLIENT_ID / TOSS_CLIENT_SECRET이 "
+            "Streamlit Secrets에 없습니다."
+        )
 
     try:
-        r_k = requests.get(
-            "https://m.stock.naver.com/api/index/KOSPI/basic",
-            headers=headers,
-            timeout=3,
-        ).json()
-        res["kospi"]["price"] = float(
-            str(r_k.get("closePrice", "0")).replace(",", "")
+        response = requests.post(
+            f"{BASE}/oauth2/token",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded"
+            },
+            timeout=12,
         )
-        res["kospi"]["pct"] = float(r_k.get("fluctuationsRatio", "0"))
-    except Exception:
-        res["kospi"] = {"price": 5638.34, "pct": 3.09}
+
+    except requests.RequestException as error:
+        raise TossError(
+            f"토큰 서버 연결 실패: {error}"
+        ) from error
+
+    if response.status_code != 200:
+        raise TossError(
+            f"토큰 발급 실패 HTTP {response.status_code}: "
+            f"{response.text[:500]}"
+        )
+
+    token_data = response.json()
+    token = token_data.get("access_token")
+
+    if not token:
+        raise TossError(
+            "토큰 응답에 access_token이 없습니다: "
+            f"{response.text[:300]}"
+        )
+
+    return token
+
+
+def api_get(path, params=None):
+    """토스증권 API GET 요청."""
+
+    token = get_token(CLIENT_ID, CLIENT_SECRET)
 
     try:
-        r_kq = requests.get(
-            "https://m.stock.naver.com/api/index/KOSDAQ/basic",
-            headers=headers,
-            timeout=3,
-        ).json()
-        res["kosdaq"]["price"] = float(
-            str(r_kq.get("closePrice", "0")).replace(",", "")
-        )
-        res["kosdaq"]["pct"] = float(r_kq.get("fluctuationsRatio", "0"))
-    except Exception:
-        res["kosdaq"] = {"price": 743.83, "pct": 2.29}
-
-    return res
-
-
-def fetch_top5_stocks(type_mode="up"):
-    all_data = []
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36"
-        )
-    }
-
-    for sosok in ["0", "1"]:
-        url = (
-            "https://finance.naver.com/sise/"
-            f"{'sise_rise.naver' if type_mode == 'up' else 'sise_fall.naver'}"
-            f"?sosok={sosok}"
+        response = requests.get(
+            f"{BASE}{path}",
+            params=params or {},
+            headers={
+                "Authorization": f"Bearer {token}"
+            },
+            timeout=15,
         )
 
+    except requests.RequestException as error:
+        raise TossError(
+            f"{path} 연결 실패: {error}"
+        ) from error
+
+    if response.status_code != 200:
         try:
-            res = requests.get(url, headers=headers, timeout=5)
-            soup = BeautifulSoup(
-                res.content.decode("euc-kr", "ignore"),
-                "html.parser",
+            detail = response.json()
+        except ValueError:
+            detail = response.text[:400]
+
+        if response.status_code == 403:
+            raise TossError(
+                "HTTP 403: 토스증권 Open API 허용 IP에 "
+                "배포 서버 IP를 등록했는지 확인하세요. "
+                f"{detail}"
             )
-            rows = soup.select("table.type_2 tr")
 
-            for r in rows:
-                cols = r.select("td")
-                if len(cols) > 4 and cols[1].find("a"):
-                    name = cols[1].text.strip()
+        if response.status_code == 429:
+            raise TossError(
+                "HTTP 429: 요청 한도 초과. "
+                f"Retry-After={response.headers.get('Retry-After', '미제공')}. "
+                f"{detail}"
+            )
 
-                    if not name or EXCLUDE_NAME.search(name):
-                        continue
+        raise TossError(
+            f"{path} HTTP {response.status_code}: {detail}"
+        )
 
-                    price_str = cols[2].text.strip().replace(",", "")
+    data = response.json()
 
-                    try:
-                        price = float(price_str)
-                    except ValueError:
-                        continue
+    if data.get("error"):
+        error_data = data["error"]
 
-                    change_rate = 0.0
+        raise TossError(
+            f"{error_data.get('code')}: "
+            f"{error_data.get('message')}"
+        )
 
-                    for col in cols:
-                        t = col.text.strip()
+    return data.get("result", {})
 
-                        if "%" in t:
-                            cleaned = (
-                                t.replace("%", "")
-                                .replace("+", "")
-                                .replace(",", "")
-                                .strip()
-                            )
 
-                            try:
-                                change_rate = float(cleaned)
+def num(value, default=None):
+    """숫자 변환."""
 
-                                if type_mode == "down" and (
-                                    "-" in t or change_rate > 0
-                                ):
-                                    change_rate = -abs(change_rate)
+    try:
+        return float(str(value).replace(",", ""))
 
-                            except ValueError:
-                                pass
+    except (TypeError, ValueError):
+        return default
 
-                            break
 
-                    all_data.append(
-                        {
-                            "name": name,
-                            "price": price,
-                            "pct": change_rate,
-                            "sector": "주요업종",
-                        }
-                    )
+def get_indices():
+    """
+    코스피·코스닥 지수 조회.
 
-        except Exception as e:
-            print(e)
+    주의:
+    아래 시장 지표 API 경로와 응답 필드는
+    실제 토스 API 명세에 맞는지 별도 검증이 필요합니다.
+    """
 
-    unique_data = {d["name"]: d for d in all_data}
-    sorted_data = list(unique_data.values())
+    result = api_get(
+        "/api/v1/market-indicators/prices",
+        {
+            "symbols": "KOSPI,KOSDAQ"
+        }
+    )
 
-    if type_mode == "up":
-        sorted_data.sort(key=lambda x: x["pct"], reverse=True)
+    if isinstance(result, dict):
+        rows = result.get("prices", [])
+    elif isinstance(result, list):
+        rows = result
     else:
-        sorted_data.sort(key=lambda x: x["pct"], reverse=False)
+        rows = []
 
-    if sorted_data:
-        return sorted_data[:5]
+    by_symbol = {
+        item.get("symbol"): item
+        for item in rows
+        if isinstance(item, dict)
+    }
 
-    if type_mode == "up":
-        return [
-            {"name": "삼성전자", "price": 71000, "pct": 5.40, "sector": "반도체"},
-            {"name": "SK하이닉스", "price": 190000, "pct": 7.37, "sector": "AI반도체"},
-            {"name": "에코프로", "price": 95000, "pct": 7.60, "sector": "2차전지"},
-            {"name": "에코프로비엠", "price": 180000, "pct": 6.47, "sector": "2차전지"},
-            {"name": "HLB", "price": 82000, "pct": 5.12, "sector": "바이오"},
-        ]
+    output = {}
 
-    return [
-        {"name": "삼성바이오로직스", "price": 980000, "pct": -4.34, "sector": "바이오"},
-        {"name": "KB금융", "price": 78000, "pct": -0.68, "sector": "금융"},
-        {"name": "현대차", "price": 230000, "pct": -1.50, "sector": "자동차"},
-        {"name": "NAVER", "price": 170000, "pct": -2.10, "sector": "IT"},
-        {"name": "카카오", "price": 38000, "pct": -1.80, "sector": "IT"},
-    ]
+    for symbol in ("KOSPI", "KOSDAQ"):
+        item = by_symbol.get(symbol, {})
 
+        price = num(item.get("lastPrice"))
+        pct = None
 
-# ============================================================ 네이버 뉴스
-def clean_title(s):
-    s = re.sub(r"<[^>]+>", "", s)
-    return (
-        s.replace("&quot;", '"')
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&apos;", "'")
-    ).strip()
-
-
-def fetch_headlines(name, today, up=True):
-    out, seen = [], set()
-
-    if not (NAVER_ID and NAVER_SECRET):
-        return []
-
-    for suffix in ("특징주", "주가"):
         try:
-            r = requests.get(
-                "https://openapi.naver.com/v1/search/news.json",
-                params={
-                    "query": f"{name} {suffix}",
-                    "display": 10,
-                    "sort": "date",
-                },
-                headers={
-                    "X-Naver-Client-Id": NAVER_ID,
-                    "X-Naver-Client-Secret": NAVER_SECRET,
-                },
-                timeout=5,
+            candle_result = api_get(
+                f"/api/v1/market-indicators/{symbol}/candles",
+                {
+                    "interval": "1d",
+                    "count": 3,
+                }
             )
 
-            if r.status_code != 200:
-                continue
+            candles = candle_result.get("candles", [])
 
-            for it in r.json().get("items", []):
-                title = clean_title(it.get("title", ""))
-
-                try:
-                    d = datetime.datetime.strptime(
-                        it["pubDate"],
-                        "%a, %d %b %Y %H:%M:%S %z",
-                    ).astimezone(KST)
-                except Exception:
-                    continue
-
-                if d.date() != today or name not in title or title in seen:
-                    continue
-
-                seen.add(title)
-                same = UP_WORDS if up else DOWN_WORDS
-
-                score = (2 if same.search(title) else 0) + (
-                    1 if REASON_WORDS.search(title) else 0
+            if price is not None and len(candles) >= 2:
+                previous_close = num(
+                    candles[1].get("closePrice")
                 )
 
-                out.append(
-                    {
-                        "title": title,
-                        "time": d.strftime("%H:%M"),
-                        "score": score,
-                    }
-                )
+                if previous_close:
+                    pct = (
+                        price / previous_close - 1
+                    ) * 100
 
         except Exception:
             pass
 
-        if out:
-            break
+        output[symbol.lower()] = {
+            "price": price,
+            "pct": pct,
+            "timestamp": item.get("timestamp"),
+        }
 
-    out.sort(
-        key=lambda x: (x["score"], x["time"]),
-        reverse=True,
+    return output
+
+
+YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MTNW-Market/1.0)"}
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def yahoo_quote(symbol):
+    """
+    야후 파이낸스 차트 API(비공식)로 현재가와 전일 대비 등락률 조회.
+    실패하면 None을 반환하므로 앱 전체가 멈추지 않습니다.
+    """
+
+    try:
+        response = requests.get(
+            "https://query1.finance.yahoo.com/v8/finance/chart/"
+            f"{quote(symbol, safe='')}",
+            params={"range": "1d", "interval": "1d"},
+            headers=YAHOO_HEADERS,
+            timeout=8,
+        )
+
+        if response.status_code != 200:
+            return None
+
+        meta = response.json()["chart"]["result"][0]["meta"]
+
+        price = num(meta.get("regularMarketPrice"))
+
+        previous = (
+            num(meta.get("chartPreviousClose"))
+            or num(meta.get("previousClose"))
+        )
+
+        pct = None
+
+        if price is not None and previous:
+            pct = (price / previous - 1) * 100
+
+        return {"price": price, "pct": pct}
+
+    except Exception:
+        return None
+
+
+def get_usdkrw():
+    """
+    원/달러 환율 조회.
+    현재 환율은 토스증권 API, 등락률은 야후(KRW=X) 기준입니다.
+    토스 조회가 실패하면 야후 값으로 대체합니다.
+    """
+
+    price = None
+
+    try:
+        result = api_get(
+            "/api/v1/exchange-rate",
+            {
+                "baseCurrency": "USD",
+                "quoteCurrency": "KRW",
+            }
+        )
+
+        if isinstance(result, dict):
+            price = num(result.get("rate"))
+
+    except Exception:
+        price = None
+
+    fallback = yahoo_quote("KRW=X")
+
+    pct = fallback["pct"] if fallback else None
+
+    if price is None and fallback:
+        price = fallback["price"]
+
+    return {"price": price, "pct": pct}
+
+
+def get_global_markets():
+    """나스닥·S&P500 지수와 원/달러 환율 조회."""
+
+    nasdaq = yahoo_quote("^IXIC") or {}
+    sp500 = yahoo_quote("^GSPC") or {}
+
+    return {
+        "nasdaq": {
+            "price": nasdaq.get("price"),
+            "pct": nasdaq.get("pct"),
+        },
+        "sp500": {
+            "price": sp500.get("price"),
+            "pct": sp500.get("pct"),
+        },
+        "usdkrw": get_usdkrw(),
+    }
+
+
+def get_stock_names(symbols):
+    """종목 코드에 해당하는 종목명 조회."""
+
+    names = {}
+
+    for start in range(0, len(symbols), 200):
+        batch = symbols[start:start + 200]
+
+        if not batch:
+            continue
+
+        try:
+            rows = api_get(
+                "/api/v1/stocks",
+                {
+                    "symbols": ",".join(batch)
+                }
+            )
+
+            if isinstance(rows, dict):
+                rows = rows.get("stocks", [])
+
+            if isinstance(rows, list):
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+
+                    symbol = str(
+                        row.get("symbol", "")
+                    ).strip()
+
+                    name = (
+                        row.get("name")
+                        or row.get("stockName")
+                        or row.get("displayName")
+                    )
+
+                    if symbol and name:
+                        names[symbol] = str(name).strip()
+
+        except Exception:
+            continue
+
+    return names
+
+
+def get_rankings(mode="up", duration="1d"):
+    """
+    상승·하락 종목 순위 조회.
+
+    주의:
+    /api/v1/rankings 및 전달 파라미터는
+    토스 API의 실제 명세와 일치하는지 확인해야 합니다.
+    """
+
+    rank_type = (
+        "TOP_GAINERS"
+        if mode == "up"
+        else "TOP_LOSERS"
     )
 
-    return [
-        {"title": o["title"], "time": o["time"]}
-        for o in out[:3]
+    result = api_get(
+        "/api/v1/rankings",
+        {
+            "type": rank_type,
+            "marketCountry": "KR",
+            "duration": duration,
+            "count": 100,
+            "excludeInvestmentCaution": True,
+        }
+    )
+
+    if isinstance(result, list):
+        rows = result
+        ranked_at = None
+
+    elif isinstance(result, dict):
+        rows = result.get("rankings", [])
+        ranked_at = result.get("rankedAt")
+
+    else:
+        rows = []
+        ranked_at = None
+
+    symbols = [
+        str(row.get("symbol", "")).strip()
+        for row in rows
+        if isinstance(row, dict) and row.get("symbol")
     ]
 
+    names = get_stock_names(symbols)
 
-def derive_theme(stock):
-    texts = [
-        " ".join(h["title"] for h in stock.get("headlines", [])),
-        stock["name"],
-        stock.get("sector", ""),
+    stocks = []
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        symbol = str(
+            row.get("symbol", "")
+        ).strip()
+
+        name = names.get(symbol)
+
+        if not name or EXCLUDE.search(name):
+            continue
+
+        price_data = row.get("price") or {}
+
+        change = num(price_data.get("changeRate"))
+        price = num(price_data.get("lastPrice"))
+
+        if change is None or price is None:
+            continue
+
+        # changeRate가 비율로 반환된다는 전제입니다.
+        # 실제 응답 형식에 따라 계산식을 확인해야 합니다.
+        pct = change * 100
+
+        if mode == "up" and pct <= 0:
+            continue
+
+        if mode == "down" and pct >= 0:
+            continue
+
+        theme = next(
+            (
+                label
+                for label, pattern in THEMES
+                if re.search(pattern, name, re.I)
+            ),
+            "주요업종"
+        )
+
+        stocks.append({
+            "name": name,
+            "symbol": symbol,
+            "price": price,
+            "pct": pct,
+            "base_price": num(
+                price_data.get("basePrice")
+            ),
+            "rank": row.get("rank"),
+            "theme": theme,
+            "reason": "토스증권 당일 등락률 순위 기준",
+            "timestamp": ranked_at,
+        })
+
+    stocks.sort(
+        key=lambda stock: stock["pct"],
+        reverse=(mode == "up")
+    )
+
+    return stocks[:5], ranked_at
+
+
+def fetch_news(name, today):
+    """네이버 뉴스 API를 이용한 당일 관련 기사 조회."""
+
+    if not (NAVER_ID and NAVER_SECRET):
+        return []
+
+    try:
+        response = requests.get(
+            "https://openapi.naver.com/v1/search/news.json",
+            params={
+                "query": f"{name} 특징주",
+                "display": 10,
+                "sort": "date",
+            },
+            headers={
+                "X-Naver-Client-Id": NAVER_ID,
+                "X-Naver-Client-Secret": NAVER_SECRET,
+            },
+            timeout=5,
+        )
+
+        if response.status_code != 200:
+            return []
+
+        found = []
+
+        for item in response.json().get("items", []):
+            title = re.sub(
+                r"<[^>]+>",
+                "",
+                item.get("title", "")
+            )
+
+            title = html.unescape(title)
+
+            try:
+                published = datetime.datetime.strptime(
+                    item["pubDate"],
+                    "%a, %d %b %Y %H:%M:%S %z"
+                ).astimezone(KST)
+
+            except Exception:
+                continue
+
+            if published.date() == today and name in title:
+                found.append({
+                    "title": title,
+                    "time": published.strftime("%H:%M"),
+                })
+
+        return found[:3]
+
+    except Exception:
+        return []
+
+
+def fetch_snapshot(duration):
+    """지수와 급등·급락 종목 데이터를 한 번에 조회."""
+
+    now = datetime.datetime.now(KST)
+
+    indices = get_indices()
+
+    global_markets = get_global_markets()
+
+    gainers, up_at = get_rankings(
+        "up",
+        duration
+    )
+
+    losers, down_at = get_rankings(
+        "down",
+        duration
+    )
+
+    for stock in gainers + losers:
+        headlines = fetch_news(
+            stock["name"],
+            now.date()
+        )
+
+        if headlines:
+            stock["reason"] = headlines[0]["title"]
+
+    return {
+        "date": (
+            f"{now.year}년 "
+            f"{now.month:02d}월 "
+            f"{now.day:02d}일 "
+            f"({WEEKDAYS[now.weekday()]})"
+        ),
+        "fetched_at": now.strftime("%H:%M:%S"),
+        "ranking_at": up_at or down_at,
+        "duration": duration,
+        "indices": indices,
+        "global": global_markets,
+        "gainers": gainers,
+        "losers": losers,
+    }
+
+
+def fmt(value, digits=2):
+    """숫자 표시 형식."""
+
+    if value is None:
+        return "확인 불가"
+
+    return f"{value:,.{digits}f}"
+
+
+def pct_text(value):
+    """등락률 표시 형식."""
+
+    if value is None:
+        return "확인 불가"
+
+    return f"{value:+.2f}%"
+
+
+def arrow(value):
+    """등락률에 따른 아이콘."""
+
+    if value is not None and value > 0:
+        return "🔺"
+
+    if value is not None and value < 0:
+        return "🔻"
+
+    return "➖"
+
+
+def md_lines(text, indent=""):
+    """입력창(textarea)의 줄바꿈을 마크다운 줄바꿈으로 변환."""
+
+    rows = [row.rstrip() for row in str(text).strip().splitlines()]
+
+    if indent:
+        rows = [row.strip() for row in rows if row.strip()]
+
+    return f"  \n{indent}".join(rows)
+
+
+def one_line(text):
+    """굵게·목록 제목처럼 한 줄이어야 하는 값의 줄바꿈 제거."""
+
+    return " ".join(str(text).split())
+
+
+def build_markdown(snapshot, time_text="확인 불가"):
+    """시황글 마크다운 생성."""
+
+    session = st.session_state
+
+    summary_text = md_lines(
+        session.get(
+            "summary",
+            "당일 등락률 상위 종목과 시장 흐름을 확인하세요."
+        )
+    )
+
+    intro_text = md_lines(
+        session.get(
+            "intro_text",
+            "종목 순위는 토스증권 Open API의 기간별 등락률 기준입니다. "
+            "실시간 순위와 다를 수 있으므로 기준 시각을 확인해 주세요."
+        )
+    )
+
+    lines = [
+        f"# 📅 {snapshot['date']} | 오후 시황",
+        "",
+        f"📌 **한 줄 요약**: {summary_text}",
+        "",
+        intro_text,
+        "",
+        "### 🇰🇷 장중 지수 현황",
+        "",
+        "| 지수 | 현재가 | 등락률 | 기준 시각 |",
+        "|---|---:|---:|---|",
     ]
 
-    found = []
+    for key, label in (
+        ("kospi", "코스피"),
+        ("kosdaq", "코스닥"),
+    ):
+        data = snapshot["indices"].get(key, {})
 
-    for text in texts:
-        for label, pattern in THEME_RULES:
-            if label not in found and re.search(pattern, text):
-                found.append(label)
+        lines.append(
+            f"| {label} "
+            f"| {fmt(data.get('price'))} "
+            f"| {arrow(data.get('pct'))} {pct_text(data.get('pct'))} "
+            f"| {time_text} |"
+        )
 
-        if found:
-            break
+    lines += [
+        "",
+        "",
+        "### 🌎 해외 지수·환율",
+        "",
+        "| 구분 | 현재가 | 등락률 | 기준 시각 |",
+        "|---|---:|---:|---|",
+    ]
 
-    return " · ".join(found[:2]) if found else stock.get("sector", "주요테마")
+    for key, label, unit in GLOBAL_ITEMS:
+        data = snapshot.get("global", {}).get(key, {})
+        price = data.get("price")
+
+        price_text = (
+            "확인 불가"
+            if price is None
+            else f"{fmt(price)}{unit}"
+        )
+
+        lines.append(
+            f"| {label} "
+            f"| {price_text} "
+            f"| {arrow(data.get('pct'))} {pct_text(data.get('pct'))} "
+            f"| {time_text} |"
+        )
+
+        show_up_reason = session.get("show_up_reason", True)
+
+    lines += ["", "", "### 🔺 급등 특징주 TOP 5", ""]
+
+    if show_up_reason:
+        lines += [
+            "| 종목 | 현재가 | 등락률 | 상승 이유 | 관련 테마 |",
+            "|---|---:|---:|---|---|",
+        ]
+    else:
+        lines += [
+            "| 종목 | 현재가 | 등락률 | 관련 테마 |",
+            "|---|---:|---:|---|",
+        ]
+
+    for stock in snapshot["gainers"]:
+        if show_up_reason:
+            lines.append(
+                f"| **{stock['name']}** "
+                f"| {fmt(stock['price'], 0)}원 "
+                f"| **{pct_text(stock['pct'])}** "
+                f"| {stock['reason']} "
+                f"| {stock['theme']} |"
+            )
+        else:
+            lines.append(
+                f"| **{stock['name']}** "
+                f"| {fmt(stock['price'], 0)}원 "
+                f"| **{pct_text(stock['pct'])}** "
+                f"| {stock['theme']} |"
+            )
+
+    if not snapshot["gainers"]:
+        if show_up_reason:
+            lines.append(
+                "| 데이터 없음 | 확인 불가 | 확인 불가 | API 응답 확인 필요 | - |"
+            )
+        else:
+            lines.append(
+                "| 데이터 없음 | 확인 불가 | 확인 불가 | - |"
+            )
+
+    show_down_reason = session.get("show_down_reason", True)
+
+    lines += ["", "", "### 🔻 급락 특징주 TOP 5", ""]
+
+    # 하락 이유 표시 여부에 따라 열만 변경하고,
+    # 급락 특징주 표 자체는 항상 표시합니다.
+    if show_down_reason:
+        lines += [
+            "| 종목 | 현재가 | 등락률 | 하락 이유 | 관련 테마 |",
+            "|---|---:|---:|---|---|",
+        ]
+    else:
+        lines += [
+            "| 종목 | 현재가 | 등락률 | 관련 테마 |",
+            "|---|---:|---:|---|",
+        ]
+
+    for stock in snapshot["losers"]:
+        if show_down_reason:
+            lines.append(
+                f"| **{stock['name']}** "
+                f"| {fmt(stock['price'], 0)}원 "
+                f"| **{pct_text(stock['pct'])}** "
+                f"| {stock['reason']} "
+                f"| {stock['theme']} |"
+            )
+        else:
+            lines.append(
+                f"| **{stock['name']}** "
+                f"| {fmt(stock['price'], 0)}원 "
+                f"| **{pct_text(stock['pct'])}** "
+                f"| {stock['theme']} |"
+            )
+
+    if not snapshot["losers"]:
+        if show_down_reason:
+            lines.append(
+                "| 데이터 없음 | 확인 불가 | 확인 불가 | API 응답 확인 필요 | - |"
+            )
+        else:
+            lines.append(
+                "| 데이터 없음 | 확인 불가 | 확인 불가 | - |"
+            )
+
+    lines += [
+        "",
+        "",
+        "### 🔥 오늘의 주요 경제 이슈",
+        "",
+    ]
+
+    for i in (1, 2, 3):
+        title = one_line(session.get(f"is{i}t", ""))
+
+        if not title:
+            continue
+
+        lines.append(
+            f"**{i}. {session.get(f'is{i}m', '➖')} {title}**"
+        )
+
+        content = session.get(f"is{i}c", "").strip()
+
+        if content:
+            lines.append(f"- 내용: {md_lines(content, '  ')}")
+
+        related = one_line(session.get(f"is{i}s", ""))
+
+        if related:
+            lines.append(f"- 📌 관련 종목: {related}")
+
+        check = session.get(f"is{i}k", "").strip()
+
+        if check:
+            lines.append(f"- ⏰ 체크: {md_lines(check, '  ')}")
+
+        lines.append("")
+
+    sections = [
+        (
+            "🏷️ 오늘 강했던 테마",
+            "themes",
+            "AI 반도체 · 2차전지",
+        ),
+        (
+            "👀 내일 체크 포인트",
+            "checks",
+            "급등 종목 상승 지속 여부 / 급락 종목 추가 하락 여부",
+        ),
+        (
+            "🔍 핵심 키워드",
+            "keywords",
+            "#코스피 #코스닥 #급등주 #급락주",
+        ),
+        (
+            "⚠️ 한 줄 주의",
+            "caution",
+            "등락률 순위는 선택한 기간 기준이며 실시간 순위와 다를 수 있습니다.",
+        ),
+    ]
+
+    for title, key, default in sections:
+        value = session.get(key, default).strip()
+
+        if value:
+            if key == "checks":
+                items = [
+                    re.sub(r"^[-•·]\s*", "", part.strip())
+                    for part in re.split(r"[/\n]", value)
+                ]
+
+                body_text = "\n".join(
+                    f"- {item}" for item in items if item
+                )
+
+            else:
+                body_text = md_lines(value.replace("/", "\n- "))
+
+            lines += [
+                f"### {title}",
+                "",
+                body_text,
+                "",
+            ]
+
+    return "\n".join(lines)
+
+
+def md_to_html(markdown):
+    """마크다운을 간단한 HTML로 변환."""
+
+    output = []
+    in_table = False
+
+    for line in markdown.splitlines():
+        if line.startswith("|"):
+            cells = [
+                cell.strip()
+                for cell in line.split("|")[1:-1]
+            ]
+
+            if all(
+                re.fullmatch(r":?-+:?", cell)
+                for cell in cells
+            ):
+                continue
+
+            if not in_table:
+                output.append(
+                    "<table border='1' cellpadding='6' "
+                    "cellspacing='0' "
+                    "style='border-collapse:collapse'>"
+                )
+                in_table = True
+
+            rendered_cells = []
+
+            for cell in cells:
+                safe = html.escape(cell)
+                safe = re.sub(
+                    r"\*\*(.*?)\*\*",
+                    r"<b>\1</b>",
+                    safe
+                )
+                rendered_cells.append(f"<td>{safe}</td>")
+
+            output.append(
+                "<tr>" + "".join(rendered_cells) + "</tr>"
+            )
+
+            continue
+
+        if in_table:
+            output.append("</table>")
+            in_table = False
+
+        if line.startswith("# "):
+            output.append(
+                "<h1>" + html.escape(line[2:]) + "</h1>"
+            )
+
+        elif line.startswith("### "):
+            output.append(
+                "<h3>" + html.escape(line[4:]) + "</h3>"
+            )
+
+        elif line.strip():
+            safe = html.escape(line)
+
+            safe = re.sub(
+                r"\*\*(.*?)\*\*",
+                r"<b>\1</b>",
+                safe
+            )
+
+            output.append("<p>" + safe + "</p>")
+
+    if in_table:
+        output.append("</table>")
+
+    return "\n".join(output)
+
+
+def copy_buttons(markdown):
+    """서식 포함 복사 및 마크다운 복사 버튼."""
+
+    payload = json.dumps(
+        {
+            "md": markdown,
+            "html": md_to_html(markdown),
+        },
+        ensure_ascii=False
+    ).replace("</", "<\\/")
+
+    page = f"""
+    <button id="rich">복사 (서식 포함)</button>
+    <button id="plain">복사 (마크다운)</button>
+    <span id="status"></span>
+
+    <script>
+    const P = {payload};
+    const s = document.getElementById('status');
+
+    function nowKST() {{
+        return new Date().toLocaleTimeString('en-GB', {{
+            timeZone: 'Asia/Seoul',
+            hour: '2-digit',
+            minute: '2-digit',
+            hourCycle: 'h23'
+        }});
+    }}
+
+    function stamp(text) {{
+        return text.split('{NOW_TOKEN}').join(nowKST());
+    }}
+
+    document.getElementById('rich').onclick = async () => {{
+        try {{
+            await navigator.clipboard.write([
+                new ClipboardItem({{
+                    'text/html': new Blob(
+                        [stamp(P.html)],
+                        {{type: 'text/html'}}
+                    ),
+                    'text/plain': new Blob(
+                        [stamp(P.md)],
+                        {{type: 'text/plain'}}
+                    )
+                }})
+            ]);
+
+            s.textContent = ' 복사 완료';
+
+        }} catch (e) {{
+            s.textContent = ' 복사 실패';
+        }}
+    }};
+
+    document.getElementById('plain').onclick = async () => {{
+        try {{
+            await navigator.clipboard.writeText(stamp(P.md));
+            s.textContent = ' 복사 완료';
+
+        }} catch (e) {{
+            s.textContent = ' 복사 실패';
+        }}
+    }};
+    </script>
+    """
+
+    components.html(page, height=45)
+
+
+def main():
+    st.title("MTNW 오후 시황")
+
+    with st.sidebar:
+        st.header("설정")
+
+        auto = st.selectbox(
+            "자동 갱신",
+            [0, 60, 120, 300],
+            format_func=lambda value: (
+                "끔" if value == 0 else f"{value}초"
+            )
+        )
+
+        duration = st.selectbox(
+            "급등·급락 순위 기준",
+            ["1d", "1w", "1mo", "3mo", "6mo", "1y"],
+            format_func=lambda value: {
+                "1d": "당일",
+                "1w": "1주",
+                "1mo": "1개월",
+                "3mo": "3개월",
+                "6mo": "6개월",
+                "1y": "1년",
+            }[value]
+        )
+
+        st.caption(
+            "토스증권 TOP_GAINERS/TOP_LOSERS는 "
+            "realtime 기간을 지원하지 않습니다."
+        )
+
+        if st.button("서버 IP 확인"):
+            try:
+                v4 = requests.get(
+                    "https://api.ipify.org", timeout=5
+                ).text
+            except Exception as e:
+                v4 = f"실패: {e}"
+
+            try:
+                v6 = requests.get(
+                    "https://api64.ipify.org", timeout=5
+                ).text
+            except Exception as e:
+                v6 = f"실패: {e}"
+
+            st.write("IPv4:", v4)
+            st.write("api64 (IPv6 우선):", v6)
+
+        if st.button("로그아웃"):
+            st.session_state["pw_ok"] = False
+            st.rerun()
+
+    @st.fragment(run_every=auto if auto else None)
+    def body():
+
+        should_fetch = (
+            st.button("지금 시세 조회", type="primary")
+            or "snapshot" not in st.session_state
+            or st.session_state.get("duration") != duration
+        )
+
+        if should_fetch:
+            try:
+                with st.spinner("토스증권 시세 조회 중..."):
+                    st.session_state["snapshot"] = fetch_snapshot(
+                        duration
+                    )
+
+                    st.session_state["duration"] = duration
+                    st.session_state.pop("api_error", None)
+
+            except Exception as error:
+                st.session_state["api_error"] = str(error)
+                st.error(f"시세 조회 실패: {error}")
+
+        snapshot = st.session_state.get("snapshot")
+
+        if not snapshot:
+            st.info(
+                "토스증권 API 인증·허용 IP·랭킹 응답을 확인해 주세요."
+            )
+            return
+
+        if st.session_state.get("api_error"):
+            st.warning(
+                f"최근 조회 오류: {st.session_state['api_error']}"
+            )
+
+        st.caption(
+            f"{snapshot['date']} · "
+            f"화면 조회 {snapshot['fetched_at']} · "
+            f"랭킹 기준 {snapshot['ranking_at'] or '확인 불가'} · "
+            "토스증권 Open API"
+        )
+
+        c1, c2 = st.columns(2)
+
+        for col, key, label in (
+            (c1, "kospi", "코스피"),
+            (c2, "kosdaq", "코스닥"),
+        ):
+            data = snapshot["indices"].get(key, {})
+
+            col.markdown(
+                f"**{label}**  \n### {fmt(data.get('price'))}"
+            )
+
+            col.markdown(
+                f"{arrow(data.get('pct'))} "
+                f"{pct_text(data.get('pct'))}"
+            )
+
+            if data.get("pct") is None:
+                col.caption(
+                    "전일 종가를 확인할 수 없어 "
+                    "등락률은 표시하지 않았습니다."
+                )
+
+        g_cols = st.columns(3)
+
+        for col, (key, label, unit) in zip(g_cols, GLOBAL_ITEMS):
+            data = snapshot.get("global", {}).get(key, {})
+            price = data.get("price")
+
+            col.markdown(
+                f"**{label}**  \n### "
+                f"{fmt(price)}{unit if price is not None else ''}"
+            )
+
+            col.markdown(
+                f"{arrow(data.get('pct'))} "
+                f"{pct_text(data.get('pct'))}"
+            )
+        st.checkbox(
+            "시황글에 상승 이유 표시",
+            value=True,
+            key="show_up_reason",
+        )
+        st.subheader("🔺 급등 특징주 TOP 5")
+
+        if not snapshot["gainers"]:
+            st.warning(
+                "급등 랭킹이 비어 있습니다. "
+                "선택한 기간의 랭킹 데이터가 있는지 확인하세요."
+            )
+
+        else:
+            for stock in snapshot["gainers"]:
+                a, b, c, d, e = st.columns(
+                    [2, 1.2, 1.2, 4, 2]
+                )
+
+                a.markdown(f"**{stock['name']}**")
+                b.write(fmt(stock["price"], 0))
+
+                c.markdown(
+                    f"🔺 {pct_text(stock['pct'])}"
+                )
+
+                stock["reason"] = d.text_input(
+                    "상승 이유",
+                    value=stock["reason"],
+                    key=f"up_reason_{stock['symbol']}",
+                    label_visibility="collapsed",
+                )
+
+                stock["theme"] = e.text_input(
+                    "테마",
+                    value=stock["theme"],
+                    key=f"up_theme_{stock['symbol']}",
+                    label_visibility="collapsed",
+                )
+        st.checkbox(
+            "시황글에 하락 이유 표시",
+            value=True,
+            key="show_down_reason",
+        )
+        st.subheader("🔻 급락 특징주 TOP 5")
+
+        if not snapshot["losers"]:
+            st.warning(
+                "급락 랭킹이 비어 있습니다. "
+                "선택한 기간의 랭킹 데이터가 있는지 확인하세요."
+            )
+
+        else:
+            for stock in snapshot["losers"]:
+                a, b, c, d, e = st.columns(
+                    [2, 1.2, 1.2, 4, 2]
+                )
+
+                a.markdown(f"**{stock['name']}**")
+                b.write(fmt(stock["price"], 0))
+
+                c.markdown(
+                    f"🔻 {pct_text(stock['pct'])}"
+                )
+
+                stock["reason"] = d.text_input(
+                    "하락 이유",
+                    value=stock["reason"],
+                    key=f"down_reason_{stock['symbol']}",
+                    label_visibility="collapsed",
+                )
+
+                stock["theme"] = e.text_input(
+                    "테마",
+                    value=stock["theme"],
+                    key=f"down_theme_{stock['symbol']}",
+                    label_visibility="collapsed",
+                )
+
+        with st.expander(
+            "📝 시황글 추가 내용 편집",
+            expanded=True
+        ):
+            st.text_area(
+                "한 줄 요약",
+                key="summary",
+                value="당일 등락률 상위 종목과 시장 흐름을 확인하세요.",
+                height=68,
+            )
+
+            st.text_area(
+                "인트로 문구",
+                key="intro_text",
+                height=110,
+                value=(
+                    "종목 순위는 토스증권 Open API의 기간별 등락률 기준입니다. "
+                    "실시간 순위와 다를 수 있으므로 기준 시각을 확인해 주세요."
+                )
+            )
+
+            issues = [
+                (1, "🔺", "당일 상승률 상위 종목 흐름"),
+                (2, "🔻", "당일 하락률 상위 종목 흐름"),
+                (3, "➖", "시장 변동성 확인"),
+            ]
+
+            for i, direction, title in issues:
+                st.markdown(f"**이슈 {i}**")
+
+                a, b, c = st.columns([1, 3, 3])
+
+                a.selectbox(
+                    "방향",
+                    ["🔺", "🔻", "➖"],
+                    index=["🔺", "🔻", "➖"].index(direction),
+                    key=f"is{i}m",
+                )
+
+                b.text_area(
+                    "제목",
+                    value=title,
+                    key=f"is{i}t",
+                    height=68,
+                )
+
+                c.text_area(
+                    "관련 종목",
+                    key=f"is{i}s",
+                    height=68,
+                )
+
+                st.text_area(
+                    "내용",
+                    key=f"is{i}c",
+                    height=110,
+                )
+
+                st.text_area(
+                    "체크",
+                    key=f"is{i}k",
+                    height=68,
+                )
+
+            st.text_area(
+                "강했던 테마",
+                key="themes",
+                value="AI 반도체 · 2차전지",
+                height=68,
+            )
+
+            st.text_area(
+                "내일 체크 포인트 (줄바꿈 또는 /로 구분)",
+                height=110,
+                key="checks",
+                value=(
+                    "급등 종목 상승 지속 여부 / "
+                    "급락 종목 추가 하락 여부 / "
+                    "시장 거래대금 변화"
+                ),
+            )
+
+            st.text_area(
+                "핵심 키워드",
+                key="keywords",
+                value="#코스피 #코스닥 #급등주 #급락주 #주식시황",
+                height=68,
+            )
+
+            st.text_area(
+                "한 줄 주의",
+                key="caution",
+                height=68,
+                value=(
+                    "등락률 순위는 선택한 기간 기준이며 "
+                    "실시간 순위와 다를 수 있습니다."
+                ),
+            )
+
+        st.subheader("시황글 미리보기")
+
+        now_text = datetime.datetime.now(KST).strftime("%H:%M")
+
+        markdown = build_markdown(snapshot, now_text)
+
+        copy_buttons(build_markdown(snapshot, NOW_TOKEN))
+
+        with st.container(border=True):
+            st.markdown(markdown)
+
+        with st.expander("마크다운 원문 보기"):
+            st.code(markdown, language="markdown")
+
+    body()
+
+
+main()
