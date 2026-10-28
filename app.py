@@ -16,6 +16,7 @@ st.set_page_config(page_title="MTNW 오후 시황", layout="wide")
 KST = ZoneInfo("Asia/Seoul")
 BASE = "https://openapi.tossinvest.com"
 WEEKDAYS = "월화수목금토일"
+NOW_TOKEN = "__NOW__"  # 복사 버튼을 누르는 순간의 시각으로 치환됨
 
 THEMES = [
     ("HBM·반도체", r"HBM|D램|낸드|반도체|파운드리|메모리|소부장"),
@@ -569,7 +570,7 @@ def arrow(value):
     return "➖"
 
 
-def build_markdown(snapshot):
+def build_markdown(snapshot, time_text="확인 불가"):
     """시황글 마크다운 생성."""
 
     session = st.session_state
@@ -604,7 +605,7 @@ def build_markdown(snapshot):
             f"| {label} "
             f"| {fmt(data.get('price'))} "
             f"| {arrow(data.get('pct'))} {pct_text(data.get('pct'))} "
-            f"| {data.get('timestamp') or '확인 불가'} |"
+            f"| {time_text} |"
         )
 
     lines += [
@@ -819,16 +820,29 @@ def copy_buttons(markdown):
     const P = {payload};
     const s = document.getElementById('status');
 
+    function nowKST() {{
+        return new Date().toLocaleTimeString('en-GB', {{
+            timeZone: 'Asia/Seoul',
+            hour: '2-digit',
+            minute: '2-digit',
+            hourCycle: 'h23'
+        }});
+    }}
+
+    function stamp(text) {{
+        return text.split('{NOW_TOKEN}').join(nowKST());
+    }}
+
     document.getElementById('rich').onclick = async () => {{
         try {{
             await navigator.clipboard.write([
                 new ClipboardItem({{
                     'text/html': new Blob(
-                        [P.html],
+                        [stamp(P.html)],
                         {{type: 'text/html'}}
                     ),
                     'text/plain': new Blob(
-                        [P.md],
+                        [stamp(P.md)],
                         {{type: 'text/plain'}}
                     )
                 }})
@@ -843,7 +857,7 @@ def copy_buttons(markdown):
 
     document.getElementById('plain').onclick = async () => {{
         try {{
-            await navigator.clipboard.writeText(P.md);
+            await navigator.clipboard.writeText(stamp(P.md));
             s.textContent = ' 복사 완료';
 
         }} catch (e) {{
@@ -1137,9 +1151,11 @@ def main():
 
         st.subheader("시황글 미리보기")
 
-        markdown = build_markdown(snapshot)
+        now_text = datetime.datetime.now(KST).strftime("%H:%M")
 
-        copy_buttons(markdown)
+        markdown = build_markdown(snapshot, now_text)
+
+        copy_buttons(build_markdown(snapshot, NOW_TOKEN))
 
         with st.container(border=True):
             st.markdown(markdown)
