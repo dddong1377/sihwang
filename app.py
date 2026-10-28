@@ -1152,8 +1152,97 @@ def fetch_cap_rows():
             )
 
 
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def fetch_prev_closes(symbols, day_text):
+    """종목별 전일 종가 (하루 단위로 캐시). day_text가 바뀌면 새로 조회합니다."""
+
+    def one(symbol):
+        try:
+            result = api_get(
+                "/api/v1/candles",
+                {"symbol": symbol, "interval": "1d", "count": 3}
+            )
+
+            for candle in result.get("candles", []):
+                day = str(candle.get("timestamp", ""))[:10]
+
+                if day and day < day_text:
+                    return symbol, num(candle.get("closePrice"))
+
+        except Exception:
+            pass
+
+        return symbol, None
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        return {
+            symbol: prev
+            for symbol, prev in pool.map(one, symbols)
+            if prev
+        }
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_toss_prices(symbols):
+    """토스 현재가 일괄 조회 (30초 캐시)."""
+
+    last = {}
+
+    for start in range(0, len(symbols), 200):
+        batch = symbols[start:start + 200]
+
+        prices = api_get(
+            "/api/v1/prices",
+            {"symbols": ",".join(batch)}
+        )
+
+        for item in prices:
+            if isinstance(item, dict):
+                price = num(item.get("lastPrice"))
+
+                if price:
+                    last[item.get("symbol")] = price
+
+    return last
+
+
+def refresh_with_toss(stocks):
+    """
+    시총 100위 전체를 토스 현재가 + 전일 종가로 등락률 재계산합니다.
+    전일 종가는 하루 단위로 캐시하므로 평소에는 /prices 1회만 호출됩니다.
+    실패한 종목은 기존(네이버) 값을 그대로 둡니다.
+    """
+
+    if not stocks:
+        return stocks
+
+    symbols = tuple(stock["symbol"] for stock in stocks)
+
+    try:
+        last = fetch_toss_prices(symbols)
+
+        prev = fetch_prev_closes(
+            symbols,
+            datetime.datetime.now(KST).date().isoformat()
+        )
+
+    except Exception:
+        return stocks
+
+    for stock in stocks:
+        price = last.get(stock["symbol"])
+        base = prev.get(stock["symbol"])
+
+        if price and base:
+            stock["price"] = price
+            stock["pct"] = (price / base - 1) * 100
+
+    return stocks
+
+
 def get_cap_rankings(mode="up"):
-    """시가총액 상위 100위(우선주·스팩 등 제외) 안에서 당일 급등/급락 TOP 5."""
+    """시가총액 상위 100위(우선주·스팩 등 제외) 전체를 토스 기준으로 재계산한 뒤,
+    등락률 순으로 급등/급락 TOP 5를 뽑습니다."""
 
     cap_rows, source = fetch_cap_rows()
 
@@ -1177,32 +1266,34 @@ def get_cap_rankings(mode="up"):
     stocks = []
 
     for cap_rank, row in enumerate(universe, start=1):
-        pct = row["pct"]
-
-        if mode == "up" and pct <= 0:
-            continue
-
-        if mode == "down" and pct >= 0:
-            continue
-
         stocks.append({
             "name": row["name"],
             "symbol": row["symbol"],
             "price": row["price"],
-            "pct": pct,
+            "pct": row["pct"],
             "base_price": None,
             "rank": cap_rank,
             "theme": classify_theme(row["name"]),
-            "reason": f"시가총액 상위 100위 내 당일 등락률 기준 ({source_label})",
+            "reason": (
+                f"시가총액 상위 100위 내 당일 등락률 기준 ({source_label}, 토스 시세 재계산)"
+            ),
             "timestamp": ranked_at,
         })
 
-    stocks.sort(
+    # 100개 전체를 토스 기준으로 재계산 → 이후부터는 시총 순이 아닌 등락률 순
+    stocks = refresh_with_toss(stocks)
+
+    if mode == "up":
+        picked = [stock for stock in stocks if stock["pct"] > 0]
+    else:
+        picked = [stock for stock in stocks if stock["pct"] < 0]
+
+    picked.sort(
         key=lambda stock: stock["pct"],
         reverse=(mode == "up")
     )
 
-    return stocks[:5], ranked_at
+    return picked[:5], ranked_at
 
 
 def fetch_snapshot(duration, universe="all"):
