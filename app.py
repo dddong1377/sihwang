@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -1372,6 +1373,246 @@ def fetch_snapshot(duration, universe="all"):
     }
 
 
+ISSUE_QUERIES = (
+    "증시", "코스피 코스닥", "환율 금리", "미국 증시",
+    "경제 지표", "유가", "관세 무역", "정부 경제 정책",
+)
+
+ISSUE_SKIP = re.compile(
+    r"\[인사\]|\[부음\]|\[부고\]|\[포토\]|\[표\]|\[그래픽\]|특징주|운세"
+)
+
+ISSUE_STOPWORDS = set(
+    "코스피 코스닥 증시 마감 오늘 전망 상승 하락 시장 개장 장중 지수 주가 투자 경제 한국 미국 "
+    "국내 올해 이번 관련 발표 대한 위한 통해 강세 약세 출발 전일 대비 억원 조원 속보 종합 "
+    "기자 뉴스 외국인 기관 개인 순매수 순매도 매수 매도 거래 거래일 종목 주식 마감시황 시황 "
+    "하루 이날 현재 오후 오전 정부 기업 업계 가운데 이어 다시 또다시 가장 최대 최고 최저 "
+    "전망치 예상 확대 감소 증가 기록 보합 혼조 약보합 약세장 강보합 코스피지수 코스닥지수".split()
+)
+
+POS_WORDS = ("상승", "급등", "강세", "반등", "돌파", "사상최고", "호조")
+NEG_WORDS = ("하락", "급락", "약세", "폭락", "우려", "충격", "부진")
+
+RELATED_NAMES = sorted(
+    {
+        name
+        for names in STOCK_THEMES.values()
+        for name in _split_words(names)
+        if len(name) >= 3 or name == "기아"
+    },
+    key=len,
+    reverse=True,
+)
+
+RELATED_REGEX = _keyword_regex(RELATED_NAMES)
+
+
+def clean_news_text(text):
+    text = html.unescape(re.sub(r"<[^>]+>", "", str(text)))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def clean_title(title):
+    title = re.sub(r"^\s*(\[[^\]]{1,10}\]\s*)+", "", title)
+    return title.strip()[:70].rstrip()
+
+
+@st.cache_data(ttl=180, show_spinner=False)
+def fetch_econ_articles(day_text):
+    """네이버 뉴스 검색 API로 오늘 올라온 경제·증시 기사를 모읍니다 (3분 캐시)."""
+
+    if not (NAVER_ID and NAVER_SECRET):
+        raise RuntimeError(
+            "NAVER_CLIENT_ID / NAVER_CLIENT_SECRET이 없어 뉴스를 가져올 수 없습니다."
+        )
+
+    seen = set()
+    articles = []
+
+    for query in ISSUE_QUERIES:
+        try:
+            response = requests.get(
+                "https://openapi.naver.com/v1/search/news.json",
+                params={"query": query, "display": 100, "sort": "date"},
+                headers={
+                    "X-Naver-Client-Id": NAVER_ID,
+                    "X-Naver-Client-Secret": NAVER_SECRET,
+                },
+                timeout=6,
+            )
+
+            if response.status_code != 200:
+                continue
+
+            items = response.json().get("items", [])
+
+        except Exception:
+            continue
+
+        for item in items:
+            link = item.get("originallink") or item.get("link") or ""
+
+            if not link or link in seen:
+                continue
+
+            title = clean_news_text(item.get("title", ""))
+
+            if not title or ISSUE_SKIP.search(title):
+                continue
+
+            try:
+                published = datetime.datetime.strptime(
+                    item["pubDate"],
+                    "%a, %d %b %Y %H:%M:%S %z"
+                ).astimezone(KST)
+
+            except Exception:
+                continue
+
+            if published.date().isoformat() != day_text:
+                continue
+
+            seen.add(link)
+
+            articles.append({
+                "title": title,
+                "desc": clean_news_text(item.get("description", "")),
+                "time": published.strftime("%H:%M"),
+            })
+
+    return articles
+
+
+def issue_tokens(title):
+    """기사 제목에서 주제 판별용 핵심 단어를 뽑습니다."""
+
+    tokens = set()
+
+    for word in re.findall(r"[가-힣A-Za-z0-9]{2,}", title):
+        if (
+            re.fullmatch(r"[가-힣]+", word)
+            and len(word) >= 3
+            and word[-1] in "은는이가을를의에도로과와"
+        ):
+            word = word[:-1]
+
+        if word in ISSUE_STOPWORDS or word.isdigit():
+            continue
+
+        tokens.add(word.upper() if word.isascii() else word)
+
+    return tokens
+
+
+def build_issue_clusters(articles):
+    """비슷한 제목끼리 묶어 '보도가 많은 주제' 순으로 정렬합니다."""
+
+    df = Counter()
+
+    for article in articles:
+        article["tokens"] = issue_tokens(article["title"])
+        df.update(article["tokens"])
+
+    def weight(article):
+        return sum(df[token] for token in article["tokens"])
+
+    clusters = []
+
+    for article in sorted(articles, key=weight, reverse=True):
+        if not article["tokens"]:
+            continue
+
+        for cluster in clusters:
+            if len(article["tokens"] & cluster["seed"]) >= 2:
+                cluster["items"].append(article)
+                break
+
+        else:
+            clusters.append({
+                "seed": set(article["tokens"]),
+                "items": [article],
+            })
+
+    for cluster in clusters:
+        cluster["lead"] = max(cluster["items"], key=weight)
+
+    clusters.sort(
+        key=lambda cluster: (len(cluster["items"]), cluster["lead"]["time"]),
+        reverse=True,
+    )
+
+    return clusters
+
+
+def autofill_issues():
+    """오늘의 주요 경제 이슈 1~3번 칸을 자동으로 채웁니다 (덮어쓰기)."""
+
+    now = datetime.datetime.now(KST)
+
+    try:
+        articles = fetch_econ_articles(now.date().isoformat())
+
+    except Exception as error:
+        st.session_state["issues_note"] = f"자동 수집 실패: {error}"
+        return
+
+    after_open = [a for a in articles if a["time"] >= "09:00"]
+
+    pool = after_open if len(after_open) >= 5 else articles
+
+    if not pool:
+        st.session_state["issues_note"] = (
+            "오늘 날짜의 경제 기사를 찾지 못했습니다. 직접 입력해 주세요."
+        )
+        return
+
+    clusters = build_issue_clusters(pool)[:3]
+
+    for i in (1, 2, 3):
+        if i > len(clusters):
+            for suffix in ("t", "s", "c", "k", "info"):
+                st.session_state[f"is{i}{suffix}"] = ""
+
+            continue
+
+        cluster = clusters[i - 1]
+        lead = cluster["lead"]
+
+        texts = " ".join(
+            f"{a['title']} {a['desc']}" for a in cluster["items"]
+        )
+
+        related = [
+            name
+            for name, _ in Counter(RELATED_REGEX.findall(texts)).most_common(4)
+        ]
+
+        titles = " ".join(a["title"] for a in cluster["items"])
+        score = (
+            sum(titles.count(word) for word in POS_WORDS)
+            - sum(titles.count(word) for word in NEG_WORDS)
+        )
+
+        st.session_state[f"is{i}m"] = (
+            "🔺" if score > 0 else "🔻" if score < 0 else "➖"
+        )
+        st.session_state[f"is{i}t"] = clean_title(lead["title"])
+        st.session_state[f"is{i}c"] = lead["desc"] or lead["title"]
+        st.session_state[f"is{i}s"] = ", ".join(related)
+        st.session_state[f"is{i}k"] = ""
+        st.session_state[f"is{i}info"] = (
+            f"자동 수집: 관련 기사 {len(cluster['items'])}건 · "
+            f"대표 기사 {lead['time']}"
+        )
+
+    scope = "장 시작 후" if pool is after_open else "오늘"
+
+    st.session_state["issues_note"] = (
+        f"{scope} 경제 기사 {len(pool)}건 분석 · "
+        f"갱신 {now.strftime('%H:%M:%S')}"
+    )
+
+
 def fmt(value, digits=2):
     """숫자 표시 형식."""
 
@@ -2107,10 +2348,25 @@ def main():
             snapshot.get("universe", "all"),
         )
 
+        # 처음 한 번만 주요 경제 이슈를 자동으로 채움 (이후 수기 수정 유지)
+        if "issues_filled" not in st.session_state:
+            st.session_state["issues_filled"] = True
+
+            with st.spinner("오늘의 주요 경제 이슈 수집 중..."):
+                autofill_issues()
+
         with st.expander(
             "📝 시황글 추가 내용 편집",
             expanded=True
         ):
+            st.button(
+                "🔄 주요 경제 이슈 자동 채우기 (수정한 내용 덮어씀)",
+                on_click=autofill_issues,
+            )
+
+            if st.session_state.get("issues_note"):
+                st.caption(st.session_state["issues_note"])
+
             st.text_area(
                 "한 줄 요약",
                 key="summary",
@@ -2135,6 +2391,9 @@ def main():
             ]
 
             for i, direction, title in issues:
+                st.session_state.setdefault(f"is{i}m", direction)
+                st.session_state.setdefault(f"is{i}t", title)
+
                 st.markdown(f"**이슈 {i}**")
 
                 a, b, c = st.columns([1, 3, 3])
@@ -2142,13 +2401,11 @@ def main():
                 a.selectbox(
                     "방향",
                     ["🔺", "🔻", "➖"],
-                    index=["🔺", "🔻", "➖"].index(direction),
                     key=f"is{i}m",
                 )
 
                 b.text_area(
                     "제목",
-                    value=title,
                     key=f"is{i}t",
                     height=68,
                 )
@@ -2158,6 +2415,9 @@ def main():
                     key=f"is{i}s",
                     height=68,
                 )
+
+                if st.session_state.get(f"is{i}info"):
+                    st.caption(st.session_state[f"is{i}info"])
 
                 st.text_area(
                     "내용",
