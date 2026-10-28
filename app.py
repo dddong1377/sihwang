@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import requests
@@ -16,6 +17,11 @@ st.set_page_config(page_title="MTNW 오후 시황", layout="wide")
 KST = ZoneInfo("Asia/Seoul")
 BASE = "https://openapi.tossinvest.com"
 WEEKDAYS = "월화수목금토일"
+GLOBAL_ITEMS = (
+    ("nasdaq", "나스닥", ""),
+    ("sp500", "S&P500", ""),
+    ("usdkrw", "원/달러 환율", "원"),
+)
 NOW_TOKEN = "__NOW__"  # 복사 버튼을 누르는 순간의 시각으로 치환됨
 
 THEMES = [
@@ -286,6 +292,101 @@ def get_indices():
     return output
 
 
+YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MTNW-Market/1.0)"}
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def yahoo_quote(symbol):
+    """
+    야후 파이낸스 차트 API(비공식)로 현재가와 전일 대비 등락률 조회.
+    실패하면 None을 반환하므로 앱 전체가 멈추지 않습니다.
+    """
+
+    try:
+        response = requests.get(
+            "https://query1.finance.yahoo.com/v8/finance/chart/"
+            f"{quote(symbol, safe='')}",
+            params={"range": "1d", "interval": "1d"},
+            headers=YAHOO_HEADERS,
+            timeout=8,
+        )
+
+        if response.status_code != 200:
+            return None
+
+        meta = response.json()["chart"]["result"][0]["meta"]
+
+        price = num(meta.get("regularMarketPrice"))
+
+        previous = (
+            num(meta.get("chartPreviousClose"))
+            or num(meta.get("previousClose"))
+        )
+
+        pct = None
+
+        if price is not None and previous:
+            pct = (price / previous - 1) * 100
+
+        return {"price": price, "pct": pct}
+
+    except Exception:
+        return None
+
+
+def get_usdkrw():
+    """
+    원/달러 환율 조회.
+    현재 환율은 토스증권 API, 등락률은 야후(KRW=X) 기준입니다.
+    토스 조회가 실패하면 야후 값으로 대체합니다.
+    """
+
+    price = None
+
+    try:
+        result = api_get(
+            "/api/v1/exchange-rate",
+            {
+                "baseCurrency": "USD",
+                "quoteCurrency": "KRW",
+            }
+        )
+
+        if isinstance(result, dict):
+            price = num(result.get("rate"))
+
+    except Exception:
+        price = None
+
+    fallback = yahoo_quote("KRW=X")
+
+    pct = fallback["pct"] if fallback else None
+
+    if price is None and fallback:
+        price = fallback["price"]
+
+    return {"price": price, "pct": pct}
+
+
+def get_global_markets():
+    """나스닥·S&P500 지수와 원/달러 환율 조회."""
+
+    nasdaq = yahoo_quote("^IXIC") or {}
+    sp500 = yahoo_quote("^GSPC") or {}
+
+    return {
+        "nasdaq": {
+            "price": nasdaq.get("price"),
+            "pct": nasdaq.get("pct"),
+        },
+        "sp500": {
+            "price": sp500.get("price"),
+            "pct": sp500.get("pct"),
+        },
+        "usdkrw": get_usdkrw(),
+    }
+
+
 def get_stock_names(symbols):
     """종목 코드에 해당하는 종목명 조회."""
 
@@ -505,6 +606,8 @@ def fetch_snapshot(duration):
 
     indices = get_indices()
 
+    global_markets = get_global_markets()
+
     gainers, up_at = get_rankings(
         "up",
         duration
@@ -535,6 +638,7 @@ def fetch_snapshot(duration):
         "ranking_at": up_at or down_at,
         "duration": duration,
         "indices": indices,
+        "global": global_markets,
         "gainers": gainers,
         "losers": losers,
     }
@@ -604,6 +708,32 @@ def build_markdown(snapshot, time_text="확인 불가"):
         lines.append(
             f"| {label} "
             f"| {fmt(data.get('price'))} "
+            f"| {arrow(data.get('pct'))} {pct_text(data.get('pct'))} "
+            f"| {time_text} |"
+        )
+
+    lines += [
+        "",
+        "",
+        "### 🌎 해외 지수·환율",
+        "",
+        "| 구분 | 현재가 | 등락률 | 기준 시각 |",
+        "|---|---:|---:|---|",
+    ]
+
+    for key, label, unit in GLOBAL_ITEMS:
+        data = snapshot.get("global", {}).get(key, {})
+        price = data.get("price")
+
+        price_text = (
+            "확인 불가"
+            if price is None
+            else f"{fmt(price)}{unit}"
+        )
+
+        lines.append(
+            f"| {label} "
+            f"| {price_text} "
             f"| {arrow(data.get('pct'))} {pct_text(data.get('pct'))} "
             f"| {time_text} |"
         )
@@ -989,6 +1119,22 @@ def main():
                     "전일 종가를 확인할 수 없어 "
                     "등락률은 표시하지 않았습니다."
                 )
+
+        g_cols = st.columns(3)
+
+        for col, (key, label, unit) in zip(g_cols, GLOBAL_ITEMS):
+            data = snapshot.get("global", {}).get(key, {})
+            price = data.get("price")
+
+            col.markdown(
+                f"**{label}**  \n### "
+                f"{fmt(price)}{unit if price is not None else ''}"
+            )
+
+            col.markdown(
+                f"{arrow(data.get('pct'))} "
+                f"{pct_text(data.get('pct'))}"
+            )
 
         st.subheader("🔺 급등 특징주 TOP 5")
 
