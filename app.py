@@ -855,7 +855,6 @@ def build_markdown(snapshot, time_text="확인 불가"):
         "### 🔥 오늘의 주요 경제 이슈",
         "",
     ]
-```
 
     for i in (1, 2, 3):
         title = one_line(session.get(f"is{i}t", ""))
