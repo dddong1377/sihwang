@@ -763,52 +763,89 @@ def build_markdown(snapshot, time_text="확인 불가"):
             f"| {time_text} |"
         )
 
-    lines += [
-        "",
-        "",
-        "### 🔺 급등 특징주 TOP 5",
-        "",
-        "| 종목 | 현재가 | 등락률 | 상승 이유 | 관련 테마 |",
-        "|---|---:|---:|---|---|",
-    ]
+        show_up_reason = session.get("show_up_reason", True)
+
+    lines += ["", "", "### 🔺 급등 특징주 TOP 5", ""]
+
+    if show_up_reason:
+        lines += [
+            "| 종목 | 현재가 | 등락률 | 상승 이유 | 관련 테마 |",
+            "|---|---:|---:|---|---|",
+        ]
+    else:
+        lines += [
+            "| 종목 | 현재가 | 등락률 | 관련 테마 |",
+            "|---|---:|---:|---|",
+        ]
 
     for stock in snapshot["gainers"]:
-        lines.append(
-            f"| **{stock['name']}** "
-            f"| {fmt(stock['price'], 0)}원 "
-            f"| **{pct_text(stock['pct'])}** "
-            f"| {stock['reason']} "
-            f"| {stock['theme']} |"
-        )
+        if show_up_reason:
+            lines.append(
+                f"| **{stock['name']}** "
+                f"| {fmt(stock['price'], 0)}원 "
+                f"| **{pct_text(stock['pct'])}** "
+                f"| {stock['reason']} "
+                f"| {stock['theme']} |"
+            )
+        else:
+            lines.append(
+                f"| **{stock['name']}** "
+                f"| {fmt(stock['price'], 0)}원 "
+                f"| **{pct_text(stock['pct'])}** "
+                f"| {stock['theme']} |"
+            )
 
     if not snapshot["gainers"]:
-        lines.append(
-            "| 데이터 없음 | 확인 불가 | 확인 불가 | API 응답 확인 필요 | - |"
-        )
+        if show_up_reason:
+            lines.append(
+                "| 데이터 없음 | 확인 불가 | 확인 불가 | API 응답 확인 필요 | - |"
+            )
+        else:
+            lines.append(
+                "| 데이터 없음 | 확인 불가 | 확인 불가 | - |"
+            )
 
-    lines += [
-        "",
-        "",
-        "### 🔻 급락 특징주 TOP 5",
-        "",
-        "| 종목 | 현재가 | 등락률 | 하락 이유 | 관련 테마 |",
-        "|---|---:|---:|---|---|",
-    ]
+    show_down_reason = session.get("show_down_reason", True)
+
+    lines += ["", "", "### 🔻 급락 특징주 TOP 5", ""]
+
+    if show_down_reason:
+        lines += [
+            "| 종목 | 현재가 | 등락률 | 하락 이유 | 관련 테마 |",
+            "|---|---:|---:|---|---|",
+        ]
+    else:
+        lines += [
+            "| 종목 | 현재가 | 등락률 | 관련 테마 |",
+            "|---|---:|---:|---|---|",
+        ]
 
     for stock in snapshot["losers"]:
-        lines.append(
-            f"| **{stock['name']}** "
-            f"| {fmt(stock['price'], 0)}원 "
-            f"| **{pct_text(stock['pct'])}** "
-            f"| {stock['reason']} "
-            f"| {stock['theme']} |"
-        )
+        if show_down_reason:
+            lines.append(
+                f"| **{stock['name']}** "
+                f"| {fmt(stock['price'], 0)}원 "
+                f"| **{pct_text(stock['pct'])}** "
+                f"| {stock['reason']} "
+                f"| {stock['theme']} |"
+            )
+        else:
+            lines.append(
+                f"| **{stock['name']}** "
+                f"| {fmt(stock['price'], 0)}원 "
+                f"| **{pct_text(stock['pct'])}** "
+                f"| {stock['theme']} |"
+            )
 
     if not snapshot["losers"]:
-        lines.append(
-            "| 데이터 없음 | 확인 불가 | 확인 불가 | API 응답 확인 필요 | - |"
-        )
-
+        if show_down_reason:
+            lines.append(
+                "| 데이터 없음 | 확인 불가 | 확인 불가 | API 응답 확인 필요 | - |"
+            )
+        else:
+            lines.append(
+                "| 데이터 없음 | 확인 불가 | 확인 불가 | - |"
+            )
     lines += [
         "",
         "",
