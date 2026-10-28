@@ -476,24 +476,37 @@ def get_token(client_id, client_secret):
 
 
 def api_get(path, params=None):
-    """토스증권 API GET 요청."""
+    """토스증권 API GET 요청 (연결 오류·5xx는 최대 3회 재시도)."""
 
     token = get_token(CLIENT_ID, CLIENT_SECRET)
 
-    try:
-        response = requests.get(
-            f"{BASE}{path}",
-            params=params or {},
-            headers={
-                "Authorization": f"Bearer {token}"
-            },
-            timeout=15,
-        )
+    response = None
+    last_error = None
 
-    except requests.RequestException as error:
+    for attempt in range(3):
+        try:
+            response = requests.get(
+                f"{BASE}{path}",
+                params=params or {},
+                headers={
+                    "Authorization": f"Bearer {token}"
+                },
+                timeout=(6, 15),
+            )
+
+            if response.status_code < 500:
+                break
+
+        except requests.RequestException as error:
+            last_error = error
+
+        time.sleep(1.5 * (attempt + 1))
+
+    if response is None:
         raise TossError(
-            f"{path} 연결 실패: {error}"
-        ) from error
+            f"{path} 연결 실패({type(last_error).__name__}): "
+            f"{str(last_error)[-120:]}"
+        )
 
     if response.status_code != 200:
         try:
@@ -918,16 +931,24 @@ def parse_naver_market_sum(page_html, market):
     열 위치는 표 머리글(현재가·등락률·시가총액)로 찾으므로 열 순서가 바뀌어도 동작합니다.
     """
 
-    table = re.search(
-        r'<table[^>]*class="type_2"[^>]*>(.*?)</table>',
-        page_html,
-        re.S
-    )
+    body = None
 
-    if not table:
-        raise ValueError("시가총액 표를 찾지 못했습니다.")
+    for found in re.finditer(r"<table[^>]*>(.*?)</table>", page_html, re.S):
+        if "시가총액" in found.group(1) and "현재가" in found.group(1):
+            body = found.group(1)
+            break
 
-    body = table.group(1)
+    if body is None:
+        title = re.search(r"<title[^>]*>(.*?)</title>", page_html, re.S)
+        title_text = re.sub(r"\s+", " ", title.group(1)).strip() if title else "없음"
+        snippet = re.sub(
+            r"\s+", " ", re.sub(r"<[^>]+>", " ", page_html)
+        ).strip()[:120]
+
+        raise ValueError(
+            f"시가총액 표를 찾지 못했습니다. (응답 {len(page_html)}자, "
+            f"제목: {title_text[:60]}, 내용: {snippet})"
+        )
 
     def clean(text):
         text = html.unescape(re.sub(r"<[^>]+>", "", text))
@@ -1066,9 +1087,9 @@ def fetch_share_universe():
     return universe
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_cap_rows_toss():
-    """[2순위] 토스 API만으로 시총 상위 후보와 전일 대비 등락률 계산 (1분 캐시)."""
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def fetch_cap_candidates(day_text):
+    """토스 API로 전체 종목 시총(현재가 × 발행주식수)을 계산해 상위 300개 후보를 고릅니다 (6시간 캐시)."""
 
     universe = fetch_share_universe()
     symbols = list(universe)
@@ -1087,50 +1108,42 @@ def fetch_cap_rows_toss():
             price = num(item.get("lastPrice"))
             info = universe.get(item.get("symbol"))
 
-            if price and info:
-                caps.append({
-                    "symbol": item["symbol"],
-                    "name": info["name"],
-                    "market": info["market"],
-                    "price": price,
-                    "cap": price * info["shares"],
-                })
+            if price and info and not EXCLUDE.search(info["name"]):
+                caps.append((price * info["shares"], item["symbol"]))
 
-    caps = [row for row in caps if not EXCLUDE.search(row["name"])]
-    caps.sort(key=lambda row: row["cap"], reverse=True)
-    top = caps[:CAP_RANK_LIMIT + 20]
+    caps.sort(reverse=True)
 
-    today_text = datetime.datetime.now(KST).date().isoformat()
+    return [symbol for _, symbol in caps[:300]]
 
-    def add_pct(row):
-        try:
-            result = api_get(
-                "/api/v1/candles",
-                {"symbol": row["symbol"], "interval": "1d", "count": 3}
-            )
-            candles = result.get("candles", [])
 
-            # 오늘보다 앞선 가장 최근 봉의 종가 = 전일 종가
-            prev = None
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_cap_rows_toss():
+    """[2순위] 토스 API만으로 시총 상위 종목 목록 (평소에는 후보 300개 시세만 조회).
+    등락률은 get_cap_rankings의 refresh_with_toss에서 다시 계산합니다."""
 
-            for candle in candles:
-                day = str(candle.get("timestamp", ""))[:10]
+    universe = fetch_share_universe()
 
-                if day and day < today_text:
-                    prev = num(candle.get("closePrice"))
-                    break
+    candidates = fetch_cap_candidates(
+        datetime.datetime.now(KST).date().isoformat()
+    )
 
-            if prev:
-                row["pct"] = (row["price"] / prev - 1) * 100
-                return row
+    last = fetch_toss_prices(tuple(candidates))
 
-        except Exception:
-            pass
+    rows = []
 
-        return None
+    for symbol in candidates:
+        price = last.get(symbol)
+        info = universe.get(symbol)
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        rows = [row for row in pool.map(add_pct, top) if row]
+        if price and info:
+            rows.append({
+                "symbol": symbol,
+                "name": info["name"],
+                "market": info["market"],
+                "price": price,
+                "pct": 0.0,
+                "cap": price * info["shares"],
+            })
 
     return rows
 
