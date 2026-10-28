@@ -1844,6 +1844,89 @@ def autofill_themes():
     )
 
 
+NEXT_DAY_LINE = re.compile(
+    r"^(다음 영업일은 |\d{1,2}월 \d{1,2}일\([월화수목금토일]\) 정규장)"
+)
+
+
+def kr_date_text(day):
+    """'10월 30일(금)' 형태. 슬래시(/)는 체크 포인트 구분자와 겹쳐서 쓰지 않습니다."""
+
+    return f"{day.month}월 {day.day}일({WEEKDAYS[day.weekday()]})"
+
+
+def next_business_info():
+    """(다음 영업일, 개장 시각, 캘린더 조회 성공 여부)"""
+
+    try:
+        result = api_get("/api/v1/market-calendar/KR")
+
+        nxt = result.get("nextBusinessDay") or {}
+        day = nxt.get("date")
+
+        regular = (
+            (nxt.get("integrated") or {}).get("regularMarket") or {}
+        ).get("startTime")
+
+        open_time = str(regular)[11:16] if regular else "09:00"
+
+        if day:
+            return datetime.date.fromisoformat(day), open_time, True
+
+    except Exception:
+        pass
+
+    day = datetime.datetime.now(KST).date() + datetime.timedelta(days=1)
+
+    while day.weekday() >= 5:
+        day += datetime.timedelta(days=1)
+
+    return day, "09:00", False
+
+
+def build_next_day_line():
+    """내일 체크 포인트의 첫 줄: 다음 영업일 안내(휴장 포함)."""
+
+    today = datetime.datetime.now(KST).date()
+
+    nxt, open_time, ok = next_business_info()
+
+    # 오늘과 다음 영업일 사이의 평일 = 휴장일
+    closed = [
+        today + datetime.timedelta(days=d)
+        for d in range(1, max((nxt - today).days, 1))
+        if (today + datetime.timedelta(days=d)).weekday() < 5
+    ]
+
+    if closed:
+        names = ", ".join(kr_date_text(day) for day in closed)
+        return f"다음 영업일은 {kr_date_text(nxt)}, {names} 휴장", ok
+
+    return f"{kr_date_text(nxt)} 정규장 {open_time} 개장", ok
+
+
+def autofill_checks():
+    """'내일 체크 포인트' 맨 위에 다음 영업일 안내 한 줄을 넣습니다 (기존 내용은 유지)."""
+
+    state = st.session_state
+
+    line, ok = build_next_day_line()
+
+    rest = [
+        row
+        for row in state.get("checks", "").splitlines()
+        if row.strip() and not NEXT_DAY_LINE.match(row.strip())
+    ]
+
+    state["checks"] = "\n".join([line] + rest)
+
+    state["checks_note"] = (
+        "토스 장 캘린더 기준으로 첫 줄에 넣었습니다. 나머지 일정은 직접 이어서 적어 주세요."
+        if ok
+        else "캘린더 조회에 실패해 평일 기준으로 계산했습니다. 공휴일 여부는 직접 확인해 주세요."
+    )
+
+
 def fmt(value, digits=2):
     """숫자 표시 형식."""
 
@@ -2711,15 +2794,28 @@ def main():
                 height=68,
             )
 
+            st.session_state.setdefault(
+                "checks",
+                "급등 종목 상승 지속 여부 / "
+                "급락 종목 추가 하락 여부 / "
+                "시장 거래대금 변화",
+            )
+
+            c1, c2 = st.columns([1.6, 5], vertical_alignment="center")
+
+            c1.button(
+                "🔄 다음 영업일 정보 넣기",
+                key="checks_btn",
+                on_click=autofill_checks,
+            )
+
+            if st.session_state.get("checks_note"):
+                c2.caption(st.session_state["checks_note"])
+
             st.text_area(
                 "내일 체크 포인트 (줄바꿈 또는 /로 구분)",
                 height=110,
                 key="checks",
-                value=(
-                    "급등 종목 상승 지속 여부 / "
-                    "급락 종목 추가 하락 여부 / "
-                    "시장 거래대금 변화"
-                ),
             )
 
             st.text_area(
