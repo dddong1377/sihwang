@@ -1707,6 +1707,130 @@ def issue_tokens(title):
 
 
 
+@st.cache_data(ttl=12 * 60 * 60, show_spinner=False)
+def fetch_sector_depths():
+    """섹터 ID → 계층 깊이(0 대분류, 1 중분류, 2 소분류). 하루 2회만 갱신."""
+
+    result = api_get("/api/v1/sectors")
+
+    rows = result.get("sectors", []) if isinstance(result, dict) else result
+
+    return {
+        str(row.get("sectorId")): row.get("depth")
+        for row in rows
+        if isinstance(row, dict)
+    }
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_strong_themes(limit=5):
+    """
+    오늘(조회 시점까지) 강했던 섹터.
+    중분류 섹터 중 '거래대금 상위'이면서 '상승률이 높은' 순서로 고릅니다.
+    반환: [{"name", "pct", "amount"}, ...]
+    """
+
+    try:
+        depths = fetch_sector_depths()
+    except Exception:
+        depths = {}
+
+    def ranking(rank_type):
+        result = api_get(
+            "/api/v1/sectors/rankings",
+            {"type": rank_type, "marketCountry": "KR", "duration": "1d"}
+        )
+
+        rows = result.get("rankings", []) if isinstance(result, dict) else result
+
+        return [row for row in rows if isinstance(row, dict)]
+
+    gain_rows = ranking("TOP_GAINERS")
+    amount_rows = ranking("MARKET_TRADING_AMOUNT")
+
+    def at_depth(rows, depth):
+        if not depths:
+            return rows
+
+        return [
+            row for row in rows
+            if depths.get(str(row.get("sectorId"))) == depth
+        ]
+
+    def pick(depth, use_activity):
+        rows = [
+            row for row in at_depth(gain_rows, depth)
+            if (num(row.get("changeRate")) or 0) > 0
+        ]
+
+        if use_activity:
+            active = {
+                str(row.get("sectorId"))
+                for row in at_depth(amount_rows, depth)[:25]
+            }
+
+            rows = [row for row in rows if str(row.get("sectorId")) in active]
+
+        rows.sort(key=lambda row: num(row.get("changeRate")) or 0, reverse=True)
+
+        return rows
+
+    # 1) 중분류 + 거래대금 상위 → 2) 중분류 전체 → 3) 대분류까지 확대
+    rows = pick(1, True)
+
+    if len(rows) < 3:
+        rows += [row for row in pick(1, False) if row not in rows]
+
+    if len(rows) < 3:
+        rows += [row for row in pick(0, False) if row not in rows]
+
+    themes = []
+
+    for row in rows[:limit]:
+        themes.append({
+            "name": str(row.get("name", "")).strip(),
+            "pct": (num(row.get("changeRate")) or 0) * 100,
+            "amount": num(row.get("tradingAmount")),
+        })
+
+    return themes
+
+
+def theme_hashtag(name):
+    """섹터명을 해시태그로. 공백·슬래시는 제거합니다."""
+
+    return "#" + re.sub(r"[\s/#]+", "", name)
+
+
+def autofill_themes():
+    """'오늘 강했던 테마' 칸을 토스 섹터 랭킹으로 채웁니다 (덮어쓰기)."""
+
+    state = st.session_state
+
+    try:
+        themes = fetch_strong_themes()
+
+    except Exception as error:
+        state["themes_note"] = f"테마 자동 불러오기 실패: {error}"
+        return
+
+    themes = [theme for theme in themes if theme["name"]]
+
+    if not themes:
+        state["themes_note"] = (
+            "상승한 섹터를 찾지 못했습니다(장 시작 전이거나 데이터 없음). 직접 입력해 주세요."
+        )
+        return
+
+    state["themes"] = " ".join(theme_hashtag(theme["name"]) for theme in themes)
+
+    state["themes_note"] = (
+        "토스 섹터 랭킹 기준(조회 시점까지, 거래대금 상위 중 상승률 순) · "
+        + " · ".join(f"{t['name']} {t['pct']:+.2f}%" for t in themes)
+        + f" · 갱신 {datetime.datetime.now(KST).strftime('%H:%M:%S')}"
+    )
+
+
 def fmt(value, digits=2):
     """숫자 표시 형식."""
 
@@ -2442,6 +2566,11 @@ def main():
             snapshot.get("universe", "all"),
         )
 
+        # 처음 한 번만 오늘 강했던 테마를 자동으로 채움 (이후 수기 수정 유지)
+        if "themes_filled" not in st.session_state:
+            st.session_state["themes_filled"] = True
+            autofill_themes()
+
         with st.expander(
             "📝 시황글 추가 내용 편집",
             expanded=True
@@ -2550,10 +2679,22 @@ def main():
                     height=68,
                 )
 
+            st.session_state.setdefault("themes", "AI 반도체 · 2차전지")
+
+            t1, t2 = st.columns([1.6, 5], vertical_alignment="center")
+
+            t1.button(
+                "🔄 강했던 테마 자동 불러오기",
+                key="themes_btn",
+                on_click=autofill_themes,
+            )
+
+            if st.session_state.get("themes_note"):
+                t2.caption(st.session_state["themes_note"])
+
             st.text_area(
-                "강했던 테마",
+                "강했던 테마 (#태그를 띄어쓰기로 구분)",
                 key="themes",
-                value="AI 반도체 · 2차전지",
                 height=68,
             )
 
