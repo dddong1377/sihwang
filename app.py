@@ -2929,12 +2929,18 @@ def main():
             st.session_state["pw_ok"] = False
             st.rerun()
 
-    # 시총 100위 + 실시간 갱신이 켜져 있으면 짧은 주기로, 아니면 기존 자동 갱신 주기로 다시 그립니다.
-    refresh_every = (
-        live_every
-        if (universe == "cap100" and live_every)
-        else auto
-    )
+    # 시총 100위 + 실시간 갱신이 켜져 있으면 그 주기로, 자동 갱신(전체)도 켜져 있으면
+    # 둘 중 짧은 주기로 다시 그립니다. (실시간 주기가 더 길어도 전체 갱신이 늦어지지 않게)
+    timers = [
+        seconds
+        for seconds in (
+            live_every if universe == "cap100" else 0,
+            auto,
+        )
+        if seconds
+    ]
+
+    refresh_every = min(timers) if timers else 0
 
     @st.fragment(run_every=refresh_every if refresh_every else None)
     def body():
