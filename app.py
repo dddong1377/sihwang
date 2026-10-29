@@ -2034,22 +2034,12 @@ def build_markdown(snapshot, time_text="확인 불가"):
         )
     )
 
-    intro_text = md_lines(
-        session.get(
-            "intro_text",
-            "종목 순위는 토스증권 Open API의 기간별 등락률 기준입니다. "
-            "실시간 순위와 다를 수 있으므로 기준 시각을 확인해 주세요."
-        )
-    )
-
     lines = [
         f"# 📅 {snapshot['date']} | 오후 시황",
         "",
         f"📌 **한 줄 요약**: {summary_text}",
         "",
-        intro_text,
-        "",
-        "### 🇰🇷 장중 지수 현황",
+        "### 장중 지수 현황",
         "",
         "| 지수 | 현재가 | 등락률 | 기준 시각 |",
         "|---|---:|---:|---|",
@@ -2155,7 +2145,7 @@ def build_markdown(snapshot, time_text="확인 불가"):
 
     sections = [
         (
-            "🏷️ 오늘 강했던 테마",
+            "🏷️ 오늘 강한 테마",
             "themes",
             "AI 반도체 · 2차전지",
         ),
@@ -2168,11 +2158,6 @@ def build_markdown(snapshot, time_text="확인 불가"):
             "🔍 핵심 키워드",
             "keywords",
             "#코스피 #코스닥 #급등주 #급락주",
-        ),
-        (
-            "⚠️ 한 줄 주의",
-            "caution",
-            "등락률 순위는 선택한 기간 기준이며 실시간 순위와 다를 수 있습니다.",
         ),
     ]
 
@@ -2754,16 +2739,6 @@ def main():
                 height=68,
             )
 
-            st.text_area(
-                "인트로 문구",
-                key="intro_text",
-                height=110,
-                value=(
-                    "종목 순위는 토스증권 Open API의 기간별 등락률 기준입니다. "
-                    "실시간 순위와 다를 수 있으므로 기준 시각을 확인해 주세요."
-                )
-            )
-
             issues = [
                 (1, "🔺", "당일 상승률 상위 종목 흐름"),
                 (2, "🔻", "당일 하락률 상위 종목 흐름"),
@@ -2846,7 +2821,7 @@ def main():
             t1, t2 = st.columns([1.6, 5], vertical_alignment="center")
 
             t1.button(
-                "🔄 강했던 테마 자동 불러오기",
+                "🔄 강한 테마 자동 불러오기",
                 key="themes_btn",
                 on_click=autofill_themes,
             )
@@ -2855,7 +2830,7 @@ def main():
                 t2.caption(st.session_state["themes_note"])
 
             st.text_area(
-                "강했던 테마 (#태그를 띄어쓰기로 구분)",
+                "강한 테마 (#태그를 띄어쓰기로 구분)",
                 key="themes",
                 height=68,
             )
@@ -2889,16 +2864,6 @@ def main():
                 key="keywords",
                 value="#코스피 #코스닥 #급등주 #급락주 #주식시황",
                 height=68,
-            )
-
-            st.text_area(
-                "한 줄 주의",
-                key="caution",
-                height=68,
-                value=(
-                    "등락률 순위는 선택한 기간 기준이며 "
-                    "실시간 순위와 다를 수 있습니다."
-                ),
             )
 
         st.subheader("시황글 미리보기")
