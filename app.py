@@ -36,6 +36,7 @@ NAVER_WEB_HEADERS = {
 NOW_TOKEN = "__NOW__"  # 복사 버튼을 누르는 순간의 시각으로 치환됨
 
 DEFAULT_THEME = "주요업종"
+POST_NOTE = " ※ 현재가·등락률 확인 필수"
 
 # ---------------------------------------------------------------
 # 테마별 키워드 (종목명·기사 제목에서 찾습니다)
@@ -2099,7 +2100,10 @@ def build_markdown(snapshot, time_text="확인 불가"):
         else ""
     )
 
-    lines += ["", "", f"### 🔺 급등 특징주 TOP 5{suffix}", ""]
+    up_note = POST_NOTE if session.get("show_up_reason_note") else ""
+    down_note = POST_NOTE if session.get("show_down_reason_note") else ""
+
+    lines += ["", "", f"### 🔺 급등 특징주 TOP 5{suffix}{up_note}", ""]
 
     lines += stock_table_lines(
         snapshot["gainers"],
@@ -2107,7 +2111,7 @@ def build_markdown(snapshot, time_text="확인 불가"):
         session.get("show_up_reason", True),
     )
 
-    lines += ["", "", f"### 🔻 급락 특징주 TOP 5{suffix}", ""]
+    lines += ["", "", f"### 🔻 급락 특징주 TOP 5{suffix}{down_note}", ""]
 
     lines += stock_table_lines(
         snapshot["losers"],
@@ -2360,11 +2364,25 @@ def render_stock_section(
 
     head.subheader(title)
 
+    head.markdown(
+        "<span style='color:#D93025;font-weight:700;font-size:1.05rem'>"
+        "⚠️ 종목은 정확하지만 현재가·등락률은 실시간과 다를 수 있어 "
+        "확인 필수 (칸을 눌러 직접 수정 가능)</span>",
+        unsafe_allow_html=True,
+    )
+
     show_reason = toggle.checkbox(
         f"시황글에 {reason_label} 열 포함",
         value=True,
         key=toggle_key,
         help=f"끄면 시황글 표에서 {reason_label} 열이 빠집니다.",
+    )
+
+    toggle.checkbox(
+        "시황글 제목 옆에 '확인 필수' 문구 포함",
+        value=False,
+        key=f"{toggle_key}_note",
+        help="켜면 시황글의 급등·급락 제목 옆에 '※ 현재가·등락률 확인 필수'가 붙습니다.",
     )
 
     if not stocks:
