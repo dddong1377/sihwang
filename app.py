@@ -2448,8 +2448,56 @@ def pick_universe(changed):
     st.session_state[other] = not st.session_state[changed]
 
 
+def apply_label_style():
+    """입력칸 이름(라벨)과 표 머리글(캡션)을 더 크고 진하게 보이게 합니다."""
+
+    theme = "light"
+
+    try:
+        theme = st.context.theme.type or "light"
+    except Exception:
+        try:
+            theme = st.get_option("theme.base") or "light"
+        except Exception:
+            pass
+
+    strong, soft = (
+        ("#FFFFFF", "#E6E6E6") if theme == "dark" else ("#000000", "#1A1A1A")
+    )
+
+    st.markdown(
+        f"""
+        <style>
+        [data-testid="stWidgetLabel"] p,
+        [data-testid="stWidgetLabel"] span,
+        [data-testid="stCheckbox"] label p {{
+            font-size: 1.1rem !important;
+            font-weight: 700 !important;
+            color: {strong} !important;
+            opacity: 1 !important;
+        }}
+        [data-testid="stCaptionContainer"],
+        [data-testid="stCaptionContainer"] p {{
+            font-size: 1rem !important;
+            font-weight: 600 !important;
+            color: {soft} !important;
+            opacity: 1 !important;
+        }}
+        [data-testid="stExpander"] summary p {{
+            font-size: 1.15rem !important;
+            font-weight: 700 !important;
+            color: {strong} !important;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def main():
     st.title("MTNW 오후 시황")
+
+    apply_label_style()
 
     # 시총 100위 모드를 기본값으로 시작합니다.
     st.session_state.setdefault("uni_all", False)
