@@ -2850,12 +2850,14 @@ def main():
 
         live_every = st.selectbox(
             "실시간 갱신 (시총 100위 TOP5)",
-            [0, 2, 3, 5],
-            index=2,
+            [0, 10, 30, 60, 300],
+            index=1,
             format_func=lambda value: (
-                "끔" if value == 0 else f"{value}초"
+                "끔" if value == 0
+                else f"{value}초" if value < 60
+                else f"{value // 60}분"
             ),
-            help="웹소켓 체결가로 급등·급락 TOP5를 이 주기로 다시 계산합니다. "
+            help="급등·급락 TOP5를 이 주기로 다시 계산합니다. "
                  "긴 글을 입력할 때 간섭이 느껴지면 '끔'으로 두세요.",
         )
 
@@ -2927,7 +2929,7 @@ def main():
             st.session_state["pw_ok"] = False
             st.rerun()
 
-    # 시총 100위 + 실시간 갱신이 켜져 있으면 짧은 주기로, 아니면 기존 자동 갱신 주기로 다시 그립니다.
+    # 시총 100위 + 실시간 갱신이 켜져 있으면 그 주기로, 아니면 기존 자동 갱신 주기로 다시 그립니다.
     refresh_every = (
         live_every
         if (universe == "cap100" and live_every)
