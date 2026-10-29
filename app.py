@@ -14,6 +14,8 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
+from realtime_feed import TossFeed
+
 st.set_page_config(page_title="MTNW 오후 시황", layout="wide")
 
 KST = ZoneInfo("Asia/Seoul")
@@ -476,6 +478,13 @@ def get_token(client_id, client_secret):
     return token
 
 
+@st.cache_resource(show_spinner=False)
+def get_feed():
+    """웹소켓 연결은 서버(프로세스)당 1개만 만듭니다. (계정당 동시 연결 2개 한도)"""
+
+    return TossFeed(lambda: get_token(CLIENT_ID, CLIENT_SECRET))
+
+
 def api_get(path, params=None):
     """토스증권 API GET 요청 (연결 오류·5xx는 최대 3회 재시도)."""
 
@@ -926,6 +935,27 @@ def fetch_news(name, today):
         return []
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def cached_news(name, day_text):
+    """실시간 갱신 때마다 뉴스 API를 두드리지 않도록 종목별 10분 캐시."""
+
+    return fetch_news(name, datetime.date.fromisoformat(day_text))
+
+
+def enrich_stock(stock, day):
+    """종목별 당일 기사로 상승/하락 이유와 테마를 채웁니다."""
+
+    headlines = cached_news(stock["name"], day.isoformat())
+
+    if headlines:
+        stock["reason"] = headlines[0]["title"]
+
+        stock["theme"] = classify_theme(
+            stock["name"],
+            [headline["title"] for headline in headlines]
+        )
+
+
 def parse_naver_market_sum(page_html, market):
     """
     네이버 금융 시가총액 페이지(HTML) 한 장을 종목 목록으로 변환.
@@ -1007,9 +1037,10 @@ def parse_naver_market_sum(page_html, market):
     return rows
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_cap_rows_naver():
-    """[1순위] 코스피 상위 150개 + 코스닥 상위 100개를 네이버 금융 시가총액 기준으로 수집 (30초 캐시)."""
+    """[1순위] 코스피 상위 150개 + 코스닥 상위 100개를 네이버 금융 시가총액 기준으로 수집 (10분 캐시).
+    이제 시총 '순위'용이며, 현재가·등락률은 토스 실시간 체결가로 다시 계산합니다."""
 
     rows = {}
 
@@ -1169,13 +1200,19 @@ def fetch_cap_rows():
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def fetch_prev_closes(symbols, day_text):
-    """종목별 전일 종가 (하루 단위로 캐시). day_text가 바뀌면 새로 조회합니다."""
+    """종목별 전일 종가 (하루 단위로 캐시). day_text가 바뀌면 새로 조회합니다.
+    수정주가가 아닌 실제 종가(adjusted=false)를 씁니다."""
 
     def one(symbol):
         try:
             result = api_get(
                 "/api/v1/candles",
-                {"symbol": symbol, "interval": "1d", "count": 3}
+                {
+                    "symbol": symbol,
+                    "interval": "1d",
+                    "count": 3,
+                    "adjusted": "false",
+                }
             )
 
             for candle in result.get("candles", []):
@@ -1221,17 +1258,18 @@ def fetch_toss_prices(symbols):
     return last
 
 
-def refresh_with_toss(stocks):
+def refresh_with_toss(stocks, source="naver"):
     """
-    시총 100위 전체를 토스 현재가 + 전일 종가로 등락률 재계산합니다.
-    전일 종가는 하루 단위로 캐시하므로 평소에는 /prices 1회만 호출됩니다.
+    토스 현재가(REST) + 전일 종가로 등락률을 계산하고, 실시간 계산용 기준가(base_price)를 저장합니다.
+    전일 종가를 못 구한 종목은 네이버 현재가·등락률로 기준가를 역산합니다.
     실패한 종목은 기존(네이버) 값을 그대로 둡니다.
     """
 
     if not stocks:
         return stocks
 
-    symbols = tuple(stock["symbol"] for stock in stocks)
+    # 순서만 바뀌어도 캐시가 깨지지 않게 정렬해서 키로 씁니다
+    symbols = tuple(sorted(stock["symbol"] for stock in stocks))
 
     try:
         last = fetch_toss_prices(symbols)
@@ -1248,6 +1286,12 @@ def refresh_with_toss(stocks):
         price = last.get(stock["symbol"])
         base = prev.get(stock["symbol"])
 
+        if not base and source == "naver" and stock["pct"] > -100:
+            base = stock["price"] / (1 + stock["pct"] / 100)
+
+        if base:
+            stock["base_price"] = base
+
         if price and base:
             stock["price"] = price
             stock["pct"] = (price / base - 1) * 100
@@ -1255,8 +1299,67 @@ def refresh_with_toss(stocks):
     return stocks
 
 
+def apply_realtime(stocks):
+    """웹소켓 체결가가 정상 수신 중이면 현재가·등락률을 실시간 값으로 덮어씁니다."""
+
+    feed = get_feed()
+
+    symbols = tuple(stock["symbol"] for stock in stocks)
+    feed.set_symbols(symbols)
+
+    status = feed.status()
+
+    live_ok = (
+        status["connected"]
+        and status["age"] is not None
+        and status["age"] < 30
+    )
+
+    if not live_ok:
+        return stocks  # REST 값 유지
+
+    prices = feed.get_prices(symbols)
+
+    for stock in stocks:
+        price = prices.get(stock["symbol"])
+        base = stock.get("base_price")
+
+        if price and base:
+            stock["price"] = price
+            stock["pct"] = (price / base - 1) * 100
+            stock["live"] = True
+
+    return stocks
+
+
+def render_feed_status():
+    """웹소켓 연결 상태 한 줄 표시."""
+
+    s = get_feed().status()
+
+    if s["connected"] and s["age"] is not None and s["age"] < 30:
+        st.caption(
+            f"🟢 실시간 체결 수신 중 · 시세 수신 {s['priced']}/{s['wanted']}종목 "
+            f"· 마지막 수신 {s['age']:.1f}초 전"
+        )
+
+    elif s["connected"]:
+        st.caption(
+            "🟠 웹소켓 연결됨 · 최근 30초간 체결 없음(장외·휴장이면 정상) → 토스 REST 시세로 표시"
+        )
+
+    else:
+        st.caption(
+            "🔴 웹소켓 끊김 → 토스 REST 시세(최대 30초 지연)로 표시 · "
+            f"{s['error'] or '재연결 중'}"
+        )
+
+    if s["rejected"]:
+        st.warning(f"구독 거부된 종목: {s['rejected'][:3]}")
+
+
 def get_cap_rankings(mode="up"):
-    """시가총액 상위 100위(우선주·스팩 등 제외) 전체를 토스 기준으로 재계산한 뒤,
+    """시가총액 상위 100위(우선주·스팩 등 제외)를 토스 실시간 체결가 기준으로 재계산한 뒤,
     등락률 순으로 급등/급락 TOP 5를 뽑습니다."""
 
     cap_rows, source = fetch_cap_rows()
@@ -1274,9 +1377,7 @@ def get_cap_rankings(mode="up"):
     if len(universe) < 50:
         raise RuntimeError("시가총액 상위 종목 수가 부족합니다.")
 
-    ranked_at = datetime.datetime.now(KST).strftime("%Y-%m-%d %H:%M")
-
-    source_label = "네이버" if source == "naver" else "토스 계산"
+    ranked_at = datetime.datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 
     stocks = []
 
@@ -1289,14 +1390,14 @@ def get_cap_rankings(mode="up"):
             "base_price": None,
             "rank": cap_rank,
             "theme": classify_theme(row["name"]),
-            "reason": (
-                f"시가총액 상위 100위 내 당일 등락률 기준 ({source_label}, 토스 시세 재계산)"
-            ),
+            "reason": "시가총액 상위 100위 내 당일 등락률 기준 (토스 실시간 체결가)",
             "timestamp": ranked_at,
         })
 
-    # 100개 전체를 토스 기준으로 재계산 → 이후부터는 시총 순이 아닌 등락률 순
-    stocks = refresh_with_toss(stocks)
+    # 1) REST 현재가 + 전일 종가로 기준가·등락률 계산
+    # 2) 웹소켓 체결가가 정상 수신 중이면 실시간 값으로 덮어쓰기
+    stocks = refresh_with_toss(stocks, source)
+    stocks = apply_realtime(stocks)
 
     if mode == "up":
         picked = [stock for stock in stocks if stock["pct"] > 0]
@@ -1309,6 +1410,23 @@ def get_cap_rankings(mode="up"):
     )
 
     return picked[:5], ranked_at
+
+
+def refresh_live(snapshot):
+    """시총 100위 모드에서 TOP5를 실시간 체결가로 다시 계산해 snapshot에 반영."""
+
+    gainers, up_at = get_cap_rankings("up")
+    losers, down_at = get_cap_rankings("down")
+
+    today = datetime.datetime.now(KST).date()
+
+    for stock in gainers + losers:
+        enrich_stock(stock, today)
+
+    snapshot["gainers"] = gainers
+    snapshot["losers"] = losers
+    snapshot["ranking_at"] = up_at or down_at
+    snapshot["fetched_at"] = datetime.datetime.now(KST).strftime("%H:%M:%S")
 
 
 def fetch_snapshot(duration, universe="all"):
@@ -1355,18 +1473,7 @@ def fetch_snapshot(duration, universe="all"):
         )
 
     for stock in gainers + losers:
-        headlines = fetch_news(
-            stock["name"],
-            now.date()
-        )
-
-        if headlines:
-            stock["reason"] = headlines[0]["title"]
-
-            stock["theme"] = classify_theme(
-                stock["name"],
-                [headline["title"] for headline in headlines]
-            )
+        enrich_stock(stock, now.date())
 
     return {
         "date": (
@@ -1852,7 +1959,6 @@ NEXT_DAY_LINE = re.compile(
 
 def kr_date_text(day):
     """'10월 30일(금)' 형태. 슬래시(/)는 체크 포인트 구분자와 겹쳐서 쓰지 않습니다."""
-
     return f"{day.month}월 {day.day}일({WEEKDAYS[day.weekday()]})"
 
 
@@ -2333,6 +2439,23 @@ def copy_buttons(markdown):
     components.html(page, height=45)
 
 
+def live_input(container, label, key, auto_text):
+    """
+    실시간 값을 입력칸에 자동으로 넣습니다.
+    사용자가 직접 고친 칸은 그대로 두고(수기 값 우선), '수기 입력 초기화'를 누르면 다시 자동값으로 돌아갑니다.
+    """
+
+    state = st.session_state
+    auto_key = f"{key}__auto"
+
+    if key not in state or state[key] == state.get(auto_key):
+        state[key] = auto_text
+
+    state[auto_key] = auto_text
+
+    return container.text_input(label, key=key, label_visibility="collapsed")
+
+
 def render_stock_section(
     title,
     stocks,
@@ -2398,18 +2521,18 @@ def render_stock_section(
 
         a.markdown(f"**{stock['name']}**")
 
-        price_text = b.text_input(
+        price_text = live_input(
+            b,
             "현재가",
-            value=fmt(stock["price"], 0),
-            key=f"{prefix}_price_{key_tag}_{stock['symbol']}",
-            label_visibility="collapsed",
+            f"{prefix}_price_{key_tag}_{stock['symbol']}",
+            fmt(stock["price"], 0),
         )
 
-        pct_input = c.text_input(
+        pct_input = live_input(
+            c,
             "등락률",
-            value=pct_text(stock["pct"]),
-            key=f"{prefix}_pct_{key_tag}_{stock['symbol']}",
-            label_visibility="collapsed",
+            f"{prefix}_pct_{key_tag}_{stock['symbol']}",
+            pct_text(stock["pct"]),
         )
 
         # 수기로 고친 값을 시황글에도 반영 (숫자로 읽히지 않으면 기존 값 유지)
@@ -2510,11 +2633,22 @@ def main():
         st.header("설정")
 
         auto = st.selectbox(
-            "자동 갱신",
+            "자동 갱신 (지수·환율 등 전체)",
             [0, 60, 120, 300],
             format_func=lambda value: (
                 "끔" if value == 0 else f"{value}초"
             )
+        )
+
+        live_every = st.selectbox(
+            "실시간 갱신 (시총 100위 TOP5)",
+            [0, 2, 3, 5],
+            index=2,
+            format_func=lambda value: (
+                "끔" if value == 0 else f"{value}초"
+            ),
+            help="웹소켓 체결가로 급등·급락 TOP5를 이 주기로 다시 계산합니다. "
+                 "긴 글을 입력할 때 간섭이 느껴지면 '끔'으로 두세요.",
         )
 
         duration = st.selectbox(
@@ -2543,8 +2677,8 @@ def main():
             on_change=pick_universe,
             args=("uni_cap100",),
             help="시가총액 순위 기준 상위 100개(우선주·스팩 제외) 안에서 "
-                 "당일 등락률 TOP 5를 뽑습니다. 네이버 금융을 우선 사용하고, "
-                 "실패하면 토스 API로 시총을 직접 계산합니다.",
+                 "당일 등락률 TOP 5를 뽑습니다. 시총 순위는 네이버 금융(실패 시 토스 계산)으로, "
+                 "현재가·등락률은 토스 실시간 체결가로 계산합니다.",
         )
 
         st.checkbox(
@@ -2583,7 +2717,14 @@ def main():
             st.session_state["pw_ok"] = False
             st.rerun()
 
-    @st.fragment(run_every=auto if auto else None)
+    # 시총 100위 + 실시간 갱신이 켜져 있으면 짧은 주기로, 아니면 기존 자동 갱신 주기로 다시 그립니다.
+    refresh_every = (
+        live_every
+        if (universe == "cap100" and live_every)
+        else auto
+    )
+
+    @st.fragment(run_every=refresh_every if refresh_every else None)
     def body():
 
         if st.button("수기 입력 초기화 (현재가·등락률)"):
@@ -2636,12 +2777,23 @@ def main():
 
         is_cap = snapshot.get("universe") == "cap100"
 
+        # 실시간 모드: 방금 전체 조회를 했다면 이미 최신이므로 건너뜁니다.
+        if is_cap and live_every and not should_fetch:
+            try:
+                refresh_live(snapshot)
+
+            except Exception as error:
+                st.warning(f"실시간 갱신 실패: {error}")
+
+        if is_cap:
+            render_feed_status()
+
         st.caption(
             f"{snapshot['date']} · "
             f"화면 조회 {snapshot['fetched_at']} · "
             f"랭킹 기준 {snapshot['ranking_at'] or '확인 불가'} · "
             + (
-                "지수·환율: 토스증권 Open API / 시총 100위 종목: 네이버 금융 우선(실패 시 토스 계산)"
+                "지수·환율: 토스증권 Open API / 시총 100위 종목: 시총 순위 네이버 금융(실패 시 토스 계산) + 토스 실시간 체결가"
                 if is_cap
                 else "토스증권 Open API"
             )
