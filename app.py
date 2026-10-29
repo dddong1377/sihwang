@@ -47,8 +47,8 @@ KRX_CLOSE = datetime.time(15, 30)
 
 # 기준가 출처 표시용
 BASE_SOURCE_LABELS = {
-    "krx": "네이버 KRX 전일 기준가(전일비)",
-    "krx_close": "KRX 전일 종가(일별 시세)",
+    "krx": "네이버 시가총액 표 기준가(보조값·오차 가능)",
+    "krx_close": "전일 KRX 정규장 종가(일별 시세)",
     "krx_calc": "네이버 등락률 역산(오차 가능)",
     "toss": "토스 일봉(KRX와 다를 수 있음)",
 }
@@ -1390,95 +1390,92 @@ def fetch_toss_prices(symbols):
 
 def refresh_with_toss(stocks, source="naver"):
     """
-    등락률 = (현재가 ÷ 전일 기준가 - 1) × 100
+    등락률 = (현재가 ÷ 전일 KRX 정규장 종가 - 1) × 100
 
     기준가(base_price) 우선순위
-      1) 네이버 시총 표의 전일비로 구한 기준가 (네이버 증권 화면과 같은 기준) → 'krx'
-      2) 전일 KRX 정규장 종가 (네이버 일별 시세)                              → 'krx_close'
-      3) 네이버 현재가·등락률로 역산한 기준가 (반올림 오차 가능)              → 'krx_calc'
-      4) 토스 일봉 전일 종가 (KRX와 다를 수 있음)                             → 'toss'
+      1) 네이버 금융 일별 시세에서 조회한 전일 KRX 정규장 종가
+      2) KRX 정규장 중 일별 종가 조회에 실패했을 때만 네이버 기준가 사용
+      3) 그 외에는 기준가를 비워 두고 임의의 등락률을 만들지 않음
 
-    현재가
-      - KRX 정규장 중: 토스 현재가(REST)
-      - 정규장 밖: 네이버(KRX) 현재가 그대로 (대체거래소 체결이 섞이지 않도록)
+    중요:
+      - 기존 시가총액 표의 base_price가 있어도 전일 KRX 종가를 먼저 조회해 덮어씁니다.
+      - 토스 일봉 종가는 NXT/통합 시세가 섞일 수 있어 전일 기준가로 사용하지 않습니다.
+      - 현재가는 KRX 정규장 중 토스 REST 시세를 사용하고, 장외에는 기존 시세를 유지합니다.
     """
 
     if not stocks:
         return stocks
 
     today_text = datetime.datetime.now(KST).date().isoformat()
+    symbols = tuple(sorted({stock["symbol"] for stock in stocks if stock.get("symbol")}))
 
-    # 순서만 바뀌어도 캐시가 깨지지 않게 정렬해서 키로 씁니다
-    symbols = tuple(sorted(stock["symbol"] for stock in stocks))
-
-    # 1) 네이버 전일비 기준가가 이미 있는 종목은 그대로 두고,
-    # 2) 없는 종목만 일별 시세의 전일 종가를 조회합니다.
-    missing = tuple(sorted(
-        stock["symbol"] for stock in stocks if not stock.get("base_price")
-    ))
-
+    # 모든 종목의 전일 KRX 종가를 조회합니다.
+    # 기존 네이버 시가총액 표의 base_price가 있더라도 그대로 신뢰하지 않습니다.
     try:
-        krx_close = fetch_krx_prev_closes(missing, today_text) if missing else {}
+        krx_close = fetch_krx_prev_closes(symbols, today_text)
     except Exception:
         krx_close = {}
 
+    regular_open = krx_regular_open()
+
     for stock in stocks:
-        if stock.get("base_price"):
-            stock["base_source"] = "krx"
-            continue
+        symbol = stock.get("symbol")
+        close = krx_close.get(symbol)
 
-        close = krx_close.get(stock["symbol"])
-
-        if close:
+        if close and close > 0:
             stock["base_price"] = close
             stock["base_source"] = "krx_close"
-            continue
+            stock.pop("base_unavailable", None)
 
-        # 3) 네이버 현재가·등락률로 역산
-        if source == "naver" and stock["pct"] > -100 and stock["price"]:
-            stock["base_price"] = stock["price"] / (1 + stock["pct"] / 100)
-            stock["base_source"] = "krx_calc"
+        # KRX 정규장 중에만, 일별 종가 조회가 실패한 경우 기존 네이버 기준가를 보조로 사용합니다.
+        # 장외에는 전일 KRX 종가를 확인하지 못한 종목의 기준가를 임의로 추정하지 않습니다.
+        elif regular_open and source == "naver" and stock.get("base_price"):
+            stock["base_source"] = "krx"
+            stock.pop("base_unavailable", None)
 
-    # 4) 그래도 없는 종목만 토스 일봉 전일 종가
-    need_prev = tuple(sorted(
-        stock["symbol"] for stock in stocks if not stock.get("base_price")
-    ))
+        elif regular_open and source == "naver" and stock.get("price") and stock.get("pct", -100) > -100:
+            pct = stock.get("pct", 0.0)
+            denominator = 1 + pct / 100
 
-    if need_prev:
-        try:
-            prev = fetch_prev_closes(need_prev, today_text)
-        except Exception:
-            prev = {}
+            if denominator > 0:
+                stock["base_price"] = stock["price"] / denominator
+                stock["base_source"] = "krx_calc"
+                stock.pop("base_unavailable", None)
+            else:
+                stock["base_price"] = None
+                stock["base_source"] = None
+                stock["base_unavailable"] = True
 
-        for stock in stocks:
-            if not stock.get("base_price"):
-                fallback = prev.get(stock["symbol"])
+        else:
+            stock["base_price"] = None
+            stock["base_source"] = None
+            stock["base_unavailable"] = True
 
-                if fallback:
-                    stock["base_price"] = fallback
-
-                stock["base_source"] = "toss"
-
-    # 현재가: 정규장 중에는 토스 현재가, 장외에는 네이버(KRX) 현재가 유지
-    # (네이버를 못 써서 토스 목록으로 대체된 경우에는 토스 현재가가 이미 들어 있습니다)
+    # 현재가: KRX 정규장 중에만 토스 REST 현재가로 갱신합니다.
+    # 장외에는 기존에 수집된 현재가를 유지하되, 기준가는 위에서 확인한 전일 KRX 종가를 사용합니다.
     last = {}
 
-    if krx_regular_open():
+    if regular_open and symbols:
         try:
             last = fetch_toss_prices(symbols)
         except Exception:
             last = {}
 
     for stock in stocks:
-        price = last.get(stock["symbol"])
+        price = last.get(stock.get("symbol"))
 
-        if price:
+        if price and price > 0:
             stock["price"] = price
 
         base = stock.get("base_price")
+        current = stock.get("price")
 
-        if base and stock.get("price"):
-            stock["pct"] = (stock["price"] / base - 1) * 100
+        if base and base > 0 and current and current > 0:
+            stock["pct"] = (current / base - 1) * 100
+            stock.pop("base_unavailable", None)
+        else:
+            stock["pct"] = 0.0
+            stock["base_unavailable"] = True
 
     return stocks
 
