@@ -2848,7 +2848,7 @@ def main():
             )
         )
 
-               live_every = st.selectbox(
+        live_every = st.selectbox(
             "실시간 갱신 (시총 100위 TOP5)",
             [0, 10, 30, 60, 180, 300],
             index=1,
