@@ -2145,7 +2145,7 @@ def build_markdown(snapshot, time_text="확인 불가"):
 
     sections = [
         (
-            "🏷️ 오늘 강한 테마",
+            "🏷️ 오늘 뜨는 테마",
             "themes",
             "AI 반도체 · 2차전지",
         ),
