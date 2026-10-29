@@ -44,6 +44,13 @@ POST_NOTE = " ※ 현재가·등락률 확인 필수"
 KRX_OPEN = datetime.time(9, 0)
 KRX_CLOSE = datetime.time(15, 30)
 
+# 기준가 출처 표시용
+BASE_SOURCE_LABELS = {
+    "krx_close": "KRX 전일 종가(15:30)",
+    "krx": "네이버 전일비·등락률 역산",
+    "toss": "토스 일봉(KRX와 다를 수 있음)",
+}
+
 # ---------------------------------------------------------------
 # 테마별 키워드 (종목명·기사 제목에서 찾습니다)
 # 순서가 앞쪽일수록 동점일 때 우선합니다.
@@ -980,7 +987,8 @@ def parse_naver_market_sum(page_html, market):
     네이버 금융 시가총액 페이지(HTML) 한 장을 종목 목록으로 변환.
     열 위치는 표 머리글(현재가·전일비·등락률·시가총액)로 찾으므로 열 순서가 바뀌어도 동작합니다.
 
-    전일비(상승/하락 + 금액)를 읽어 KRX 전일 기준가(base = 현재가 - 전일비)를 함께 계산합니다.
+    전일비(상승/하락 + 금액)를 읽어 전일 기준가(base = 현재가 - 전일비)를 함께 계산합니다.
+    (이 값은 2순위 보조용이고, 1순위는 종목별 전일 종가 조회입니다.)
     기준가로 다시 계산한 등락률이 표의 등락률과 맞지 않으면 기준가는 버립니다(None).
     """
 
@@ -1053,7 +1061,7 @@ def parse_naver_market_sum(page_html, market):
         if price is None or pct is None or cap is None:
             continue
 
-        # KRX 전일 기준가 = 현재가 - 전일비(부호 포함)
+        # 전일 기준가 = 현재가 - 전일비(부호 포함)
         base = None
 
         if i_diff is not None:
@@ -1090,7 +1098,7 @@ def parse_naver_market_sum(page_html, market):
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_cap_rows_naver(phase):
     """[1순위] 코스피 상위 150개 + 코스닥 상위 100개를 네이버 금융 시가총액 기준으로 수집 (10분 캐시).
-    시총 '순위'와 KRX 전일 기준가(base)를 얻는 용도입니다.
+    시총 '순위'를 얻는 용도입니다. 등락률 기준가는 종목별 전일 종가 조회가 우선합니다.
     phase('open'/'closed')는 장 시작·마감 시점에 캐시가 바로 새로 만들어지도록 키로만 씁니다."""
 
     rows = {}
@@ -1122,6 +1130,76 @@ def fetch_cap_rows_naver(phase):
                 rows[row["symbol"]] = row
 
     return list(rows.values())
+
+
+def parse_naver_daily_close(page_html, before_text):
+    """네이버 금융 일별 시세(sise_day) HTML에서 before_text(YYYY-MM-DD) 이전
+    가장 최근 거래일의 종가를 돌려줍니다. 못 찾으면 None."""
+
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", page_html, re.S):
+        found = re.search(r"(\d{4})\.(\d{2})\.(\d{2})", tr)
+
+        if not found:
+            continue
+
+        day_iso = f"{found.group(1)}-{found.group(2)}-{found.group(3)}"
+
+        # 오늘(장중이면 진행 중인 값) 이후는 건너뛰고, 직전 거래일 행을 찾습니다.
+        if day_iso >= before_text:
+            continue
+
+        # 열 순서: 날짜, 종가, 전일비, 시가, 고가, 저가, 거래량 → 첫 숫자가 종가
+        values = re.findall(
+            r'class="tah p11[^"]*"[^>]*>\s*([\d,]+)\s*<',
+            tr
+        )
+
+        if values:
+            return num(values[0])
+
+    return None
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def fetch_krx_prev_close(symbol, day_text):
+    """종목 1개의 전일 KRX 정규장 종가(15:30). 6시간 캐시.
+    실패하면 예외를 던집니다(예외는 캐시되지 않아 다음에 다시 시도합니다)."""
+
+    response = requests.get(
+        "https://finance.naver.com/item/sise_day.naver",
+        params={"code": symbol, "page": 1},
+        headers=NAVER_WEB_HEADERS,
+        timeout=8,
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(f"네이버 일별 시세 HTTP {response.status_code}")
+
+    page_html = response.content.decode("cp949", errors="ignore")
+
+    close = parse_naver_daily_close(page_html, day_text)
+
+    if not close:
+        raise RuntimeError(f"{symbol} 전일 종가를 찾지 못했습니다.")
+
+    return close
+
+
+def fetch_krx_prev_closes(symbols, day_text):
+    """여러 종목의 전일 KRX 종가를 모읍니다. 실패한 종목은 결과에서 빠집니다."""
+
+    def one(symbol):
+        try:
+            return symbol, fetch_krx_prev_close(symbol, day_text)
+        except Exception:
+            return symbol, None
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        return {
+            symbol: close
+            for symbol, close in pool.map(one, symbols)
+            if close
+        }
 
 
 @st.cache_data(ttl=12 * 60 * 60, show_spinner=False)
@@ -1202,7 +1280,7 @@ def fetch_cap_candidates(day_text):
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_cap_rows_toss():
     """[2순위] 토스 API만으로 시총 상위 종목 목록 (평소에는 후보 300개 시세만 조회).
-    이 경로에는 KRX 기준가가 없어 등락률은 토스 전일 종가 기준으로 계산됩니다."""
+    기준가는 refresh_with_toss에서 전일 종가 조회로 채웁니다."""
 
     universe = fetch_share_universe()
 
@@ -1255,7 +1333,7 @@ def fetch_cap_rows():
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def fetch_prev_closes(symbols, day_text):
     """[마지막 수단] 토스 일봉의 종목별 전일 종가 (하루 단위로 캐시).
-    KRX 기준가를 얻지 못한 종목에만 씁니다. 대체거래소 체결이 섞였거나
+    KRX 전일 종가를 얻지 못한 종목에만 씁니다. 대체거래소 체결이 섞였거나
     권리락 등이 반영되지 않으면 KRX 등락률과 다를 수 있습니다."""
 
     def one(symbol):
@@ -1315,95 +1393,90 @@ def fetch_toss_prices(symbols):
 
 def refresh_with_toss(stocks, source="naver"):
     """
-    KRX 기준 등락률 계산.
+    등락률 = (현재가 ÷ 전일 KRX 종가(15:30) - 1) × 100
 
     기준가(base_price) 우선순위
-      1) 네이버 전일비로 구한 KRX 전일 기준가 (정확값)
-      2) 네이버 현재가·등락률로 역산한 기준가 (KRX 기준, 반올림 오차만 있음)
-      3) 토스 일봉 전일 종가 (KRX와 다를 수 있어 base_source='toss'로 표시)
+      1) 전일 KRX 정규장 종가 (네이버 일별 시세)            → base_source='krx_close'
+      2) 네이버 시총 표의 전일비 / 등락률로 구한 기준가       → base_source='krx'
+      3) 토스 일봉 전일 종가 (KRX와 다를 수 있음)            → base_source='toss'
 
-    - KRX 정규장 중: 토스 현재가 / 기준가로 등락률 계산
-    - 정규장 밖(네이버 사용 시): 대체거래소 체결이 섞이지 않도록 네이버(KRX) 현재가·등락률 유지
+    현재가
+      - KRX 정규장 중: 토스 현재가(REST)
+      - 정규장 밖: 네이버(KRX) 현재가 그대로 (대체거래소 체결이 섞이지 않도록)
     """
 
     if not stocks:
         return stocks
 
-    def derive_from_naver(stock):
-        if source == "naver" and stock["pct"] > -100 and stock["price"]:
-            return stock["price"] / (1 + stock["pct"] / 100)
-
-        return None
-
-    # 정규장 밖에는 토스 체결가(NXT 포함 가능)를 쓰지 않고 네이버(KRX) 값 그대로
-    if source == "naver" and not krx_regular_open():
-        for stock in stocks:
-            if stock.get("base_price"):
-                stock["base_source"] = "krx"
-                continue
-
-            derived = derive_from_naver(stock)
-
-            if derived:
-                stock["base_price"] = derived
-                stock["base_source"] = "krx"
-            else:
-                stock["base_source"] = "toss"
-
-        return stocks
+    today_text = datetime.datetime.now(KST).date().isoformat()
 
     # 순서만 바뀌어도 캐시가 깨지지 않게 정렬해서 키로 씁니다
     symbols = tuple(sorted(stock["symbol"] for stock in stocks))
 
+    # 1) 전일 KRX 종가
     try:
-        last = fetch_toss_prices(symbols)
-
+        krx_close = fetch_krx_prev_closes(symbols, today_text)
     except Exception:
-        return stocks
+        krx_close = {}
 
-    # KRX 기준가(1·2순위)를 못 구한 종목만 토스 전일 종가를 조회
     for stock in stocks:
+        close = krx_close.get(stock["symbol"])
+
+        if close:
+            stock["base_price"] = close
+            stock["base_source"] = "krx_close"
+            continue
+
+        # 2) 네이버 전일비로 구한 기준가가 이미 들어 있는 경우
         if stock.get("base_price"):
             stock["base_source"] = "krx"
             continue
 
-        derived = derive_from_naver(stock)
-
-        if derived:
-            stock["base_price"] = derived
+        # 2') 네이버 현재가·등락률로 역산
+        if source == "naver" and stock["pct"] > -100 and stock["price"]:
+            stock["base_price"] = stock["price"] / (1 + stock["pct"] / 100)
             stock["base_source"] = "krx"
 
+    # 3) 그래도 없는 종목만 토스 일봉 전일 종가
     need_prev = tuple(sorted(
         stock["symbol"] for stock in stocks if not stock.get("base_price")
     ))
 
-    prev = {}
-
     if need_prev:
         try:
-            prev = fetch_prev_closes(
-                need_prev,
-                datetime.datetime.now(KST).date().isoformat()
-            )
+            prev = fetch_prev_closes(need_prev, today_text)
         except Exception:
             prev = {}
 
+        for stock in stocks:
+            if not stock.get("base_price"):
+                fallback = prev.get(stock["symbol"])
+
+                if fallback:
+                    stock["base_price"] = fallback
+
+                stock["base_source"] = "toss"
+
+    # 현재가: 정규장 중에는 토스 현재가, 장외에는 네이버(KRX) 현재가 유지
+    # (네이버를 못 써서 토스 목록으로 대체된 경우에는 토스 현재가가 이미 들어 있습니다)
+    last = {}
+
+    if krx_regular_open():
+        try:
+            last = fetch_toss_prices(symbols)
+        except Exception:
+            last = {}
+
     for stock in stocks:
-        if not stock.get("base_price"):
-            fallback = prev.get(stock["symbol"])
-
-            if fallback:
-                stock["base_price"] = fallback
-                stock["base_source"] = "toss"
-            else:
-                stock["base_source"] = "toss"
-
         price = last.get(stock["symbol"])
+
+        if price:
+            stock["price"] = price
+
         base = stock.get("base_price")
 
-        if price and base:
-            stock["price"] = price
-            stock["pct"] = (price / base - 1) * 100
+        if base and stock.get("price"):
+            stock["pct"] = (stock["price"] / base - 1) * 100
 
     return stocks
 
@@ -1472,34 +1545,57 @@ def render_feed_status():
 
 
 def render_basis_status(snapshot):
-    """등락률 기준(KRX 전일 기준가) 사용 여부를 한 줄로 알려줍니다."""
+    """등락률 기준(전일 KRX 종가) 사용 여부를 알려주고, 종목별 기준가를 확인할 수 있게 합니다."""
 
     shown = snapshot.get("gainers", []) + snapshot.get("losers", [])
 
     if not shown:
         return
 
-    non_krx = [
+    not_close = [
         stock["name"]
         for stock in shown
-        if stock.get("base_source") != "krx"
+        if stock.get("base_source") != "krx_close"
     ]
 
-    if not non_krx:
+    if not not_close:
         st.caption(
-            "✅ 등락률 기준: KRX 전일 기준가 "
-            "(정규장 중에는 토스 실시간 체결가 ÷ KRX 기준가, 장외에는 KRX 마감 값)"
+            "✅ 등락률 기준: 전일 KRX 정규장 종가(15:30) "
+            "(정규장 중에는 토스 체결가 ÷ 전일 종가, 장외에는 KRX 마감 값)"
         )
 
     else:
         st.caption(
-            "⚠️ 일부 종목은 KRX 기준가를 확인하지 못해 토스 전일 종가 기준으로 계산되어 "
-            f"KRX 등락률과 다를 수 있습니다: {', '.join(non_krx[:5])}"
+            "⚠️ 일부 종목은 전일 KRX 종가를 확인하지 못해 보조 기준가로 계산되었습니다. "
+            f"KRX 등락률과 다를 수 있습니다: {', '.join(not_close[:5])}"
+        )
+
+    with st.expander("📋 등락률 기준가 확인 (종목별 전일 종가)"):
+        lines = [
+            "| 종목 | 현재가 | 기준가(전일 종가) | 등락률 | 기준가 출처 |",
+            "|---|---:|---:|---:|---|",
+        ]
+
+        for stock in shown:
+            base = stock.get("base_price")
+
+            lines.append(
+                f"| {cell_text(stock['name'])} "
+                f"| {fmt(stock.get('price'), 0)}원 "
+                f"| {fmt(base, 0) + '원' if base else '확인 불가'} "
+                f"| {pct_text(stock.get('pct'))} "
+                f"| {BASE_SOURCE_LABELS.get(stock.get('base_source'), '확인 불가')} |"
+            )
+
+        st.markdown("\n".join(lines))
+
+        st.caption(
+            "증권사 앱의 전일 종가와 기준가가 다르면 종목명과 값을 알려주세요."
         )
 
 
 def get_cap_rankings(mode="up"):
-    """시가총액 상위 100위(우선주·스팩 등 제외)를 KRX 기준가로 재계산한 뒤,
+    """시가총액 상위 100위(우선주·스팩 등 제외)를 전일 KRX 종가 기준으로 재계산한 뒤,
     등락률 순으로 급등/급락 TOP 5를 뽑습니다."""
 
     cap_rows, source = fetch_cap_rows()
@@ -1531,11 +1627,11 @@ def get_cap_rankings(mode="up"):
             "base_source": "krx" if row.get("base") else None,
             "rank": cap_rank,
             "theme": classify_theme(row["name"]),
-            "reason": "시가총액 상위 100위 내 당일 등락률 기준 (KRX 전일 기준가)",
+            "reason": "시가총액 상위 100위 내 당일 등락률 기준 (전일 KRX 종가 대비)",
             "timestamp": ranked_at,
         })
 
-    # 1) KRX 기준가 확보(네이버 전일비) + 정규장 중 토스 현재가로 등락률 계산
+    # 1) 전일 KRX 종가(15:30)를 기준가로 확보 + 정규장 중 토스 현재가로 등락률 계산
     # 2) 웹소켓 체결가가 정상 수신 중이고 정규장이면 실시간 값으로 덮어쓰기
     stocks = refresh_with_toss(stocks, source)
     stocks = apply_realtime(stocks)
@@ -2818,8 +2914,8 @@ def main():
             on_change=pick_universe,
             args=("uni_cap100",),
             help="시가총액 순위 기준 상위 100개(우선주·스팩 제외) 안에서 "
-                 "당일 등락률 TOP 5를 뽑습니다. 시총 순위와 KRX 전일 기준가는 네이버 금융으로, "
-                 "정규장 중 현재가는 토스 실시간 체결가로 계산해 KRX 기준 등락률을 만듭니다.",
+                 "당일 등락률 TOP 5를 뽑습니다. 등락률은 전일 KRX 정규장 종가(15:30)를 기준가로 하고, "
+                 "정규장 중 현재가는 토스 실시간 체결가를 씁니다.",
         )
 
         st.checkbox(
@@ -2937,7 +3033,7 @@ def main():
             f"화면 조회 {snapshot['fetched_at']} · "
             f"랭킹 기준 {snapshot['ranking_at'] or '확인 불가'} · "
             + (
-                "지수·환율: 토스증권 Open API / 시총 100위 종목: 시총 순위·KRX 전일 기준가 네이버 금융(실패 시 토스 계산) + 정규장 중 토스 실시간 체결가"
+                "지수·환율: 토스증권 Open API / 시총 100위 종목: 시총 순위 네이버 금융(실패 시 토스 계산) + 전일 KRX 종가(15:30) 대비 등락률, 정규장 중 토스 실시간 체결가"
                 if is_cap
                 else "토스증권 Open API"
             )
