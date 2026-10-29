@@ -3042,6 +3042,12 @@ def main():
 
         render_basis_status(snapshot)
 
+        if is_cap and not krx_regular_open():
+            st.info(
+                "지금은 KRX 정규장(평일 09:00~15:30) 시간이 아닙니다. "
+                "장 시작 전에는 당일 등락률이 0%라 급등·급락 목록이 비어 있을 수 있습니다."
+            )
+
         st.caption(
             f"{snapshot['date']} · "
             f"화면 조회 {snapshot['fetched_at']} · "
