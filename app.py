@@ -2532,13 +2532,17 @@ def _public_stock_name(row):
     for key in (
         "name", "stockName", "productName", "companyName", "displayName",
         "title", "shortName", "korName", "localizedName", "display_name",
+        "stockTitle", "displayTitle", "productTitle", "tickerName", "company",
     ):
         value = row.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
 
     # 응답에 종목 정보가 stock/product/company 아래로 중첩되는 경우 처리
-    for key in ("stock", "product", "stockInfo", "productInfo", "company", "security"):
+    for key in (
+        "stock", "product", "stockInfo", "productInfo", "company", "security",
+        "stockDto", "stockInfoDto", "productDto", "productInfoDto", "companyInfo",
+    ):
         nested = row.get(key)
         if isinstance(nested, dict):
             name = _public_stock_name(nested)
@@ -2556,7 +2560,10 @@ def _extract_public_stock_rows(payload):
         return []
 
     # 알려진 응답 키를 우선 순회합니다.
-    for key in ("stocks", "products", "items", "results", "content", "stockInfos", "data"):
+    for key in (
+        "stocks", "products", "items", "results", "content", "stockInfos",
+        "stockList", "stockItems", "productList", "productInfos", "data",
+    ):
         value = payload.get(key)
         if isinstance(value, list):
             rows = [row for row in value if isinstance(row, dict)]
@@ -2578,68 +2585,103 @@ def _extract_public_stock_rows(payload):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_public_sector_stocks(tics_id, limit=5):
-    """특정 TICS 산업의 대표 종목을 토스증권 공개 화면의 기본 정렬로 조회합니다."""
+    """토스 공개 산업 종목을 현재 섹터 API로 조회하고, 실패 시 공개 TICS 상세 API로 보완합니다."""
     tics_id = str(tics_id or "").strip()
-    if not tics_id.isdigit():
-        return []
+    if not tics_id:
+        raise TossError("산업 순위 응답에 ticsId가 없습니다.")
 
-    # 토스증권 홈의 산업 미리보기는 nation/page만 전송하고 나머지는 서버 기본값을 사용합니다.
-    result = _toss_web_request(
-        f"/api/v2/dashboard/wts/overview/tics/{tics_id}/stocks",
-        method="POST",
-        body={
-            "nation": "KR",
-            "page": 1,
-        },
-    )
-    rows = _extract_public_stock_rows(result)
-    if not rows:
-        if isinstance(result, dict):
-            response_keys = ", ".join(str(key) for key in list(result.keys())[:12]) or "없음"
-        else:
-            response_keys = type(result).__name__
-        raise TossError(
-            "산업 구성 종목 응답에서 종목 배열을 찾지 못했습니다. "
-            f"응답 키: {response_keys}"
+    safe_tics_id = quote(tics_id, safe="")
+    errors = []
+    payload_candidates = []
+
+    # 1차: 현재 산업 페이지의 종목 목록 API.
+    # 문서화된 정렬 계약을 명시해 시가총액 내림차순으로 요청합니다.
+    try:
+        payload = _toss_web_request(
+            f"/api/v2/dashboard/wts/overview/tics/{safe_tics_id}/stocks",
+            method="POST",
+            body={
+                "nation": "KR",
+                "sortBy": "MARKET_CAP",
+                "sortOrder": "DESC",
+                "page": 1,
+            },
         )
+        payload_candidates.append(("sector-stocks", payload))
+    except Exception as error:
+        errors.append(f"산업 종목 API: {str(error)[:180]}")
 
-    stocks = []
-    for row in rows:
-        name = _public_stock_name(row)
-        if not name:
-            continue
+    # 2차: 레거시 공개 TICS 상세 API. 문서상 응답에 stocks[]가 포함됩니다.
+    # 현재 섹터 API 응답 구조가 바뀌었을 때만 보조 경로로 사용합니다.
+    try:
+        payload = _toss_web_request(
+            f"/api/v1/tics/{safe_tics_id}/details",
+            method="GET",
+        )
+        payload_candidates.append(("tics-details", payload))
+    except Exception as error:
+        errors.append(f"TICS 상세 API: {str(error)[:180]}")
 
-        rate_value = None
-        for key in ("changeRate", "fluctuationRate", "changeRateRatio", "changeRatePercent", "rate"):
-            if row.get(key) is not None:
-                rate_value = _normalize_public_rate(row.get(key))
-                break
+    parse_errors = []
+    for source, payload in payload_candidates:
+        rows = _extract_public_stock_rows(payload)
+        stocks = []
+        for row in rows:
+            name = _public_stock_name(row)
+            if not name:
+                continue
 
-        # 일부 응답은 현재가/기준가를 제공하므로 등락률이 없을 때만 계산합니다.
-        if rate_value is None:
-            current = num(row.get("close") or row.get("currentPrice") or row.get("price"))
-            base = num(row.get("base") or row.get("basePrice") or row.get("previousClose"))
-            if current is not None and base not in (None, 0):
-                rate_value = (current / base - 1) * 100
+            rate_value = None
+            for key in (
+                "changeRate", "fluctuationRate", "changeRateRatio",
+                "changeRatePercent", "rate", "changeRatePct",
+            ):
+                if row.get(key) is not None:
+                    rate_value = _normalize_public_rate(row.get(key))
+                    break
 
-        stocks.append({
-            "name": name,
-            "code": str(
+            if rate_value is None:
+                current = num(
+                    row.get("close") or row.get("currentPrice")
+                    or row.get("price") or row.get("lastPrice")
+                )
+                base = num(
+                    row.get("base") or row.get("basePrice")
+                    or row.get("previousClose") or row.get("prevClose")
+                )
+                if current is not None and base not in (None, 0):
+                    rate_value = (current / base - 1) * 100
+
+            nested = row.get("stock") or row.get("product") or row.get("stockInfo") or row.get("productInfo")
+            code = (
                 row.get("productCode") or row.get("code") or row.get("stockCode")
                 or row.get("symbol") or ""
-            ),
-            "pct": rate_value,
-        })
-        if len(stocks) >= max(1, min(int(limit), 5)):
-            break
+            )
+            if not code and isinstance(nested, dict):
+                code = nested.get("productCode") or nested.get("code") or nested.get("symbol") or ""
 
-    if not stocks:
-        sample_keys = ", ".join(str(key) for key in list(rows[0].keys())[:15]) if rows else "없음"
-        raise TossError(
-            "산업 구성 종목은 반환됐지만 종목명을 판별하지 못했습니다. "
-            f"첫 종목의 응답 키: {sample_keys}"
+            stocks.append({"name": name, "code": str(code), "pct": rate_value})
+            if len(stocks) >= max(1, min(int(limit), 5)):
+                break
+
+        if stocks:
+            return stocks
+
+        if isinstance(payload, dict):
+            keys = ", ".join(str(key) for key in list(payload.keys())[:12]) or "없음"
+        else:
+            keys = type(payload).__name__
+        first_keys = (
+            ", ".join(str(key) for key in list(rows[0].keys())[:15])
+            if rows else "종목 배열 없음"
         )
-    return stocks
+        parse_errors.append(f"{source}: 응답 키 [{keys}], 첫 행 키 [{first_keys}]")
+
+    details = errors + parse_errors
+    raise TossError(
+        "토스증권 산업별 종목을 가져오지 못했습니다. "
+        + (" / ".join(details)[:600] if details else "두 공개 API 모두 종목 목록을 반환하지 않았습니다.")
+    )
 
 
 @st.cache_data(ttl=60, show_spinner=False)
