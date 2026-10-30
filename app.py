@@ -2384,6 +2384,247 @@ def autofill_themes():
     )
 
 
+# ---------------------------------------------------------------
+# 한 줄 요약 자동 생성
+# 기사 내용이 없으면 현재 시장 데이터로 생성하고,
+# 기사 내용이 있으면 기사 + 산업/종목 흐름을 함께 반영합니다.
+# ---------------------------------------------------------------
+def collect_summary_inputs(snapshot=None):
+    state = st.session_state
+    snapshot = snapshot or state.get("snapshot", {}) or {}
+
+    # 강세 산업/섹터: 토스 섹터 랭킹을 우선 사용
+    sector_items = []
+    try:
+        sector_items = [
+            item for item in fetch_strong_themes(limit=5)
+            if isinstance(item, dict) and item.get("name")
+        ]
+    except Exception as error:
+        state["summary_note"] = f"섹터 조회 실패: {error}"
+
+    sector_names = [item["name"] for item in sector_items[:3]]
+
+    # 수동 입력한 테마가 있으면 자동 조회 결과와 함께 보조 자료로 활용
+    typed_themes = str(state.get("themes", "")).strip()
+    if not sector_names and typed_themes:
+        sector_names = [
+            re.sub(r"^#", "", x.strip())
+            for x in re.split(r"[\s,·]+", typed_themes)
+            if x.strip()
+        ][:3]
+
+    gainers = snapshot.get("gainers", []) or []
+    losers = snapshot.get("losers", []) or []
+    rising_names = [
+        str(row.get("name", "")).strip()
+        for row in gainers[:3]
+        if isinstance(row, dict) and row.get("name")
+    ]
+    falling_names = [
+        str(row.get("name", "")).strip()
+        for row in losers[:3]
+        if isinstance(row, dict) and row.get("name")
+    ]
+
+    indices = snapshot.get("indices", {}) or {}
+    market_lines = []
+    for key, label in (("kospi", "코스피"), ("kosdaq", "코스닥")):
+        item = indices.get(key, {}) or {}
+        pct = num(item.get("pct"))
+        if pct is None:
+            market_lines.append(f"{label}: 등락률 확인 불가")
+        else:
+            direction = "상승" if pct > 0 else "하락" if pct < 0 else "보합"
+            market_lines.append(f"{label}: {direction}({pct:+.2f}%)")
+
+    # 각 이슈의 제목, 정리된 내용, 원문을 모두 확인하되
+    # 동일 기사 내용이 중복으로 들어가지 않도록 정리합니다.
+    issue_titles = []
+    article_blocks = []
+    seen_text = set()
+    default_titles = {
+        "당일 상승률 상위 종목 흐름",
+        "당일 하락률 상위 종목 흐름",
+        "시장 변동성 확인",
+    }
+
+    for i in range(1, 4):
+        title = str(state.get(f"is{i}t", "")).strip()
+        content = str(state.get(f"is{i}c", "")).strip()
+        source = str(state.get(f"is{i}src", "")).strip()
+
+        if title and title not in default_titles and title not in issue_titles:
+            issue_titles.append(title)
+
+        # 정리된 내용이 있으면 우선 사용하고, 없으면 기사 원문 사용
+        body = content or source
+        if body:
+            normalized = re.sub(r"\s+", " ", body).strip()
+            if normalized and normalized not in seen_text:
+                seen_text.add(normalized)
+                article_blocks.append((title or f"이슈 {i}", normalized[:5000]))
+
+    return {
+        "sectors": sector_names,
+        "sector_items": sector_items[:3],
+        "gainers": rising_names,
+        "losers": falling_names,
+        "market": market_lines,
+        "issue_titles": issue_titles,
+        "articles": article_blocks,
+        "date": str(snapshot.get("date", datetime.datetime.now(KST).strftime("%Y-%m-%d"))),
+    }
+
+
+def ai_market_summary(data):
+    """AI 키가 설정된 경우 기사와 시장 데이터를 종합해 한 문장으로 생성합니다."""
+    article_text = "\n\n".join(
+        f"[기사 {i}: {title}]\n{body}"
+        for i, (title, body) in enumerate(data["articles"], start=1)
+    )
+    if not article_text:
+        article_text = "입력된 기사가 없습니다. 시장 데이터만 사용하세요."
+
+    market_context = "\n".join([
+        f"기준일: {data['date']}",
+        f"강세 산업/섹터: {', '.join(data['sectors']) or '확인 불가'}",
+        f"급등 종목: {', '.join(data['gainers']) or '확인 불가'}",
+        f"급락 종목: {', '.join(data['losers']) or '확인 불가'}",
+        f"시장 지수: {' / '.join(data['market']) or '확인 불가'}",
+        f"이슈 제목: {' / '.join(data['issue_titles']) or '없음'}",
+    ])
+
+    response = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": secret("ANTHROPIC_API_KEY"),
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": secret("ANTHROPIC_MODEL", "claude-haiku-5-5"),
+            "max_tokens": 220,
+            "messages": [{
+                "role": "user",
+                "content": (
+                    "당신은 국내 주식시장 시황 편집자입니다. 제공된 시장 데이터와 기사만 근거로 "
+                    "한국어 한 문장 요약을 작성하세요. 100~160자 정도로 작성하고, 기사 내용이 "
+                    "있으면 여러 기사의 공통 핵심과 시장 영향을 종합하세요. 기사에 없는 원인이나 "
+                    "사실을 추측해 추가하지 마세요. 관련이 확인되지 않은 산업과 종목을 억지로 "
+                    "연결하지 마세요. 기사 내용이 없으면 강세 산업, 급등·급락 종목, 지수 흐름을 "
+                    "자연스럽게 요약하세요. 제목, 번호, 따옴표, 투자 권유 표현은 쓰지 마세요.\n\n"
+                    "[시장 데이터]\n" + market_context +
+                    "\n\n[기사 내용]\n" + article_text[:12000]
+                ),
+            }],
+        },
+        timeout=40,
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(f"AI 요약 HTTP {response.status_code}: {response.text[:200]}")
+
+    parts = response.json().get("content", [])
+    result = "".join(
+        part.get("text", "") for part in parts if part.get("type") == "text"
+    ).strip()
+    result = re.sub(r"\s+", " ", result).strip(" \"'“”‘’")
+    if not result:
+        raise RuntimeError("AI 요약 결과가 비어 있습니다.")
+    return result
+
+
+def fallback_market_summary(data):
+    """AI API가 없거나 실패했을 때 시장 데이터와 기사 핵심 문장을 규칙 기반으로 조합합니다."""
+    parts = []
+
+    if data["articles"]:
+        # 기사 본문들을 합쳐 중요 문장을 추출합니다.
+        joined = " ".join(
+            f"{title}. {body}" for title, body in data["articles"]
+        )
+        article_summary = extractive_summary(
+            joined,
+            max_sentences=2,
+            max_chars=190,
+        ).strip()
+        if article_summary:
+            parts.append(article_summary.rstrip(" .;"))
+        elif data["issue_titles"]:
+            parts.append(data["issue_titles"][0].rstrip(" .;"))
+
+    if data["sectors"]:
+        parts.append(f"강세 산업은 {', '.join(data['sectors'][:3])}")
+
+    stock_parts = []
+    if data["gainers"]:
+        stock_parts.append(f"급등 종목은 {', '.join(data['gainers'][:2])}")
+    if data["losers"]:
+        stock_parts.append(f"급락 종목은 {', '.join(data['losers'][:2])}")
+    if stock_parts:
+        parts.append("· ".join(stock_parts))
+
+    if data["market"]:
+        valid_market = [x for x in data["market"] if "확인 불가" not in x]
+        if valid_market:
+            parts.append("시장 지수는 " + ", ".join(valid_market))
+
+    # 반복 문구를 제거한 뒤 한 문장으로 정리
+    unique = []
+    for part in parts:
+        part = re.sub(r"\s+", " ", part).strip(" .;，,。")
+        if part and part not in unique:
+            unique.append(part)
+
+    if not unique:
+        return "현재 확인 가능한 산업·종목 데이터가 부족해 시장 흐름을 확인할 수 없습니다."
+
+    summary = "; ".join(unique)
+    if not summary.endswith((".", "다.", "요.")):
+        summary += "."
+    if len(summary) > 240:
+        summary = summary[:237].rsplit(" ", 1)[0] + "..."
+    return summary
+
+
+def generate_market_summary(snapshot=None):
+    """기사 입력 여부와 관계없이 현재 데이터로 한 줄 요약을 생성합니다."""
+    data = collect_summary_inputs(snapshot)
+
+    if secret("ANTHROPIC_API_KEY"):
+        try:
+            result = ai_market_summary(data)
+            st.session_state["summary_note"] = (
+                "AI 요약 완료 · "
+                + ("입력 기사와 시장 데이터를 종합했습니다." if data["articles"]
+                   else "기사 없이 현재 시장 데이터를 바탕으로 생성했습니다.")
+            )
+            return result
+        except Exception as error:
+            result = fallback_market_summary(data)
+            st.session_state["summary_note"] = f"AI 요약 실패로 자동 조합 방식을 사용했습니다: {error}"
+            return result
+
+    result = fallback_market_summary(data)
+    st.session_state["summary_note"] = (
+        "규칙 기반 요약 · 기사 내용이 있으면 핵심 문장과 시장 데이터를 조합합니다. "
+        "기사 전체를 의미적으로 종합하는 AI 요약은 ANTHROPIC_API_KEY 설정 시 사용할 수 있습니다."
+    )
+    return result
+
+
+def autofill_summary():
+    """버튼 클릭 시 최신 입력 기사와 시장 데이터를 반영해 요약을 다시 생성합니다."""
+    state = st.session_state
+    snapshot = state.get("snapshot", {})
+    try:
+        with st.spinner("시장 데이터와 입력 기사를 종합하는 중..."):
+            state["summary"] = generate_market_summary(snapshot)
+    except Exception as error:
+        state["summary_note"] = f"한 줄 요약 생성 실패: {error}"
+
+
 NEXT_DAY_LINE = re.compile(
     r"^(다음 영업일은 |\d{1,2}월 \d{1,2}일\([월화수목금토일]\) 정규장)"
 )
@@ -3337,11 +3578,29 @@ def main():
                 )
             )
 
+            # 첫 화면에서만 자동 생성합니다. 이후에는 사용자의 수정 내용을 유지합니다.
+            if "summary" not in st.session_state:
+                st.session_state["summary"] = generate_market_summary(snapshot)
+
+            summary_btn_col, summary_note_col = st.columns([1.7, 5], vertical_alignment="center")
+            summary_btn_col.button(
+                "✨ 한 줄 요약 자동 생성 / 다시 생성",
+                key="summary_generate_btn",
+                on_click=autofill_summary,
+                use_container_width=True,
+            )
+            if st.session_state.get("summary_note"):
+                summary_note_col.caption(st.session_state["summary_note"])
+
             st.text_area(
                 "한 줄 요약",
                 key="summary",
-                value="당일 등락률 상위 종목과 시장 흐름을 확인하세요.",
-                height=68,
+                height=90,
+                help=(
+                    "기사가 없어도 현재 산업·종목·지수 데이터로 생성됩니다. "
+                    "기사 내용을 입력한 뒤 다시 생성하면 입력 기사까지 반영합니다. "
+                    "필요하면 직접 수정할 수 있습니다."
+                ),
             )
 
             issues = [
