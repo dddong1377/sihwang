@@ -21,6 +21,19 @@ st.set_page_config(page_title="MTNW 오후 시황", layout="wide")
 
 KST = ZoneInfo("Asia/Seoul")
 BASE = "https://openapi.tossinvest.com"
+
+# 토스증권 웹 화면의 공개 산업(TICS) API
+# 공식 OAuth Open API와 별도이며, 공개 페이지에서 사용하는 읽기 전용 스냅샷입니다.
+TOSS_WEB_BASE = "https://wts-info-api.tossinvest.com"
+TOSS_WEB_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Referer": "https://www.tossinvest.com/",
+    "Accept": "application/json, text/plain, */*",
+    "Content-Type": "application/json",
+}
 WEEKDAYS = "월화수목금토일"
 GLOBAL_ITEMS = (
     ("nasdaq", "나스닥", ""),
@@ -2275,8 +2288,7 @@ def fetch_sector_depths():
     }
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_strong_themes(limit=5):
+def _fetch_strong_themes_openapi(limit=5):
     """
     오늘(조회 시점까지) 강했던 섹터.
     중분류 섹터 중 '거래대금 상위'이면서 '상승률이 높은' 순서로 고릅니다.
@@ -2349,6 +2361,312 @@ def fetch_strong_themes(limit=5):
     return themes
 
 
+
+
+def _toss_web_request(path, method="GET", params=None, body=None):
+    """토스증권 공개 웹 API 요청. 인증·계좌·주문 API는 사용하지 않습니다."""
+    url = f"{TOSS_WEB_BASE}{path}"
+    try:
+        if method.upper() == "POST":
+            response = requests.post(
+                url,
+                params=params or {},
+                json=body or {},
+                headers=TOSS_WEB_HEADERS,
+                timeout=(5, 12),
+            )
+        else:
+            response = requests.get(
+                url,
+                params=params or {},
+                headers=TOSS_WEB_HEADERS,
+                timeout=(5, 12),
+            )
+    except requests.RequestException as error:
+        raise TossError(f"토스증권 산업 데이터 연결 실패: {error}") from error
+
+    if response.status_code in (403, 429):
+        raise TossError(
+            f"토스증권 공개 웹 API 접근 제한(HTTP {response.status_code}). "
+            "잠시 후 다시 시도해 주세요."
+        )
+    if not response.ok:
+        raise TossError(
+            f"토스증권 산업 데이터 조회 실패 HTTP {response.status_code}: "
+            f"{response.text[:250]}"
+        )
+
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise TossError("토스증권 산업 데이터 응답이 JSON 형식이 아닙니다.") from error
+
+    # 대부분의 공개 API는 result에 실제 데이터가 들어오지만,
+    # 응답 형태가 달라지는 경우를 고려해 result가 있을 때만 벗깁니다.
+    if isinstance(payload, dict) and "result" in payload:
+        return payload["result"]
+    return payload
+
+
+@st.cache_data(ttl=180, show_spinner=False)
+def fetch_toss_dashboard_news(news_type="HOT", index_code=None, limit=12):
+    """토스증권 공개 대시보드 뉴스. 개인화 피드는 호출하지 않습니다."""
+    allowed_types = {"ALL_HIGHLIGHT", "HOT", "SOARING_STOCK", "INDEX"}
+    if news_type not in allowed_types:
+        news_type = "HOT"
+
+    body = {"type": news_type}
+    if news_type == "INDEX":
+        body["indexCode"] = index_code or "KGG01P"
+
+    try:
+        payload = _toss_web_request(
+            "/api/v1/dashboard/wts/news",
+            method="POST",
+            body=body,
+        )
+    except Exception:
+        return []
+
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, dict):
+        rows = payload.get("news") or payload.get("items") or payload.get("results") or []
+        if isinstance(rows, dict):
+            rows = rows.get("news") or rows.get("items") or []
+    else:
+        rows = []
+
+    normalized = []
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = (
+            row.get("title") or row.get("headline") or row.get("newsTitle")
+            or row.get("displayTitle") or row.get("name") or ""
+        )
+        title = re.sub(r"\\s+", " ", str(title)).strip()
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        url = (
+            row.get("url") or row.get("link") or row.get("newsUrl")
+            or row.get("originalUrl") or row.get("articleUrl") or ""
+        )
+        summary = (
+            row.get("summary") or row.get("description") or row.get("content")
+            or row.get("subTitle") or ""
+        )
+        source = (
+            row.get("source") or row.get("pressName") or row.get("providerName")
+            or row.get("mediaName") or ""
+        )
+        published = (
+            row.get("publishedAt") or row.get("createdAt") or row.get("date")
+            or row.get("datetime") or ""
+        )
+        normalized.append({
+            "title": title,
+            "url": str(url).strip() if url else "",
+            "summary": re.sub(r"\\s+", " ", str(summary)).strip(),
+            "source": str(source).strip() if source else "",
+            "published": str(published).strip() if published else "",
+        })
+        if len(normalized) >= max(1, min(int(limit), 20)):
+            break
+
+    return normalized
+
+
+def use_toss_news_for_issue(issue_number, item):
+    """선택한 토스증권 뉴스 제목/링크를 시황 이슈 입력칸으로 보냅니다."""
+    state = st.session_state
+    title = item.get("title", "").strip()
+    if title:
+        state[f"is{issue_number}t"] = clean_title(title)
+    if item.get("url"):
+        state[f"is{issue_number}link"] = item["url"]
+        state[f"is{issue_number}note"] = "토스증권 뉴스에서 제목과 링크를 가져왔습니다. 기사 불러오기를 눌러 본문을 가져오세요."
+    elif item.get("summary"):
+        state[f"is{issue_number}src"] = f"{title}\\n\\n{item['summary']}"
+        state[f"is{issue_number}note"] = "토스증권 뉴스의 요약을 기사 내용 칸에 넣었습니다. 확인 후 핵심 정리를 눌러 주세요."
+    else:
+        state[f"is{issue_number}note"] = "뉴스 제목을 가져왔습니다. 기사 링크가 제공되지 않아 본문은 직접 입력해 주세요."
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_public_tics_ranking(sort_by="FLUCTUATION_RATE"):
+    """토스증권 웹 화면의 현재 국내 산업(TICS) 순위 스냅샷."""
+    if sort_by not in {"FLUCTUATION_RATE", "TRADING_AMOUNT"}:
+        raise ValueError("지원하지 않는 산업 순위 정렬 기준입니다.")
+
+    result = _toss_web_request(
+        "/api/v2/dashboard/wts/overview/tics/ranking",
+        method="POST",
+        body={
+            "nation": "KR",
+            "duration": "1d",
+            "sortBy": sort_by,
+        },
+    )
+    rows = result.get("tics", []) if isinstance(result, dict) else result
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _normalize_public_rate(value):
+    """토스 웹 응답의 비율 값을 화면 표시용 퍼센트로 정규화합니다."""
+    value = num(value)
+    if value is None:
+        return None
+    # 공개 TICS API의 fluctuationRate/changeRate는 비율형으로 내려오는 경우가 있어
+    # 절댓값 1 이하 값은 소수 비율로 간주합니다.
+    return value * 100 if abs(value) <= 1 else value
+
+
+def _public_stock_name(row):
+    for key in ("name", "stockName", "productName", "companyName", "displayName", "title"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_public_sector_stocks(tics_id, limit=5):
+    """특정 TICS 산업의 대표 종목을 시가총액 내림차순으로 최대 5개 조회합니다."""
+    tics_id = str(tics_id or "").strip()
+    if not tics_id.isdigit():
+        return []
+
+    result = _toss_web_request(
+        f"/api/v2/dashboard/wts/overview/tics/{tics_id}/stocks",
+        method="POST",
+        body={
+            "nation": "KR",
+            "sortBy": "MARKET_CAP",
+            "sortOrder": "DESC",
+            "page": 1,
+        },
+    )
+    rows = result.get("stocks", []) if isinstance(result, dict) else []
+    stocks = []
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = _public_stock_name(row)
+        if not name:
+            continue
+
+        rate_value = None
+        for key in ("changeRate", "fluctuationRate", "changeRateRatio"):
+            if row.get(key) is not None:
+                rate_value = _normalize_public_rate(row.get(key))
+                break
+
+        stocks.append({
+            "name": name,
+            "code": str(
+                row.get("productCode")
+                or row.get("code")
+                or row.get("stockCode")
+                or ""
+            ),
+            "pct": rate_value,
+        })
+        if len(stocks) >= max(1, min(int(limit), 5)):
+            break
+
+    return stocks
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_strong_themes(limit=5):
+    """
+    토스증권 웹의 현재 산업 순위를 우선 사용합니다.
+    상승률 상위 산업 중 거래대금 순위에도 포함된 산업을 먼저 고르고,
+    각 산업의 대표 종목은 시가총액 내림차순으로 최대 5개 조회합니다.
+    공개 웹 API가 실패하면 기존 공식 Open API 기반 섹터 조회로 대체합니다.
+    """
+    try:
+        gain_rows = fetch_public_tics_ranking("FLUCTUATION_RATE")
+        amount_rows = fetch_public_tics_ranking("TRADING_AMOUNT")
+
+        active_ids = {
+            str(row.get("ticsId"))
+            for row in amount_rows[:25]
+            if row.get("ticsId") is not None
+        }
+
+        candidates = []
+        for row in gain_rows:
+            tics_id = row.get("ticsId")
+            name = str(row.get("name") or row.get("title") or "").strip()
+            raw_rate = row.get("fluctuationRate")
+            pct = _normalize_public_rate(raw_rate)
+
+            if tics_id is None or not name or pct is None or pct <= 0:
+                continue
+
+            candidates.append({
+                "id": str(tics_id),
+                "name": name,
+                "pct": pct,
+                "amount": num(
+                    row.get("tradingAmountKrw")
+                    or row.get("tradingAmount")
+                    or row.get("totalTradingAmountKrw")
+                ),
+                "leading_stock": (
+                    _public_stock_name(row.get("leadingStock"))
+                    if isinstance(row.get("leadingStock"), dict)
+                    else str(row.get("leadingStock") or "").strip()
+                ),
+                "_active": str(tics_id) in active_ids,
+            })
+
+        # 거래대금 상위 25개 산업과 겹치는 상승 산업을 우선합니다.
+        active = [row for row in candidates if row["_active"]]
+        active.sort(key=lambda row: row["pct"], reverse=True)
+        candidates.sort(key=lambda row: row["pct"], reverse=True)
+        selected = active[:limit]
+
+        if len(selected) < min(3, limit):
+            seen_ids = {row["id"] for row in selected}
+            selected.extend(
+                row for row in candidates
+                if row["id"] not in seen_ids
+            )
+            selected = selected[:limit]
+
+        # 대표 종목 조회는 표시할 상위 산업에 대해서만 제한적으로 실행합니다.
+        for item in selected:
+            try:
+                item["stocks"] = fetch_public_sector_stocks(item["id"], limit=5)
+            except Exception:
+                # 한 산업의 종목 목록 조회가 실패해도 나머지 산업 순위는 유지합니다.
+                item["stocks"] = []
+            item["stock_names"] = [stock["name"] for stock in item["stocks"]]
+            item.pop("_active", None)
+
+        if selected:
+            return selected
+
+    except Exception:
+        # 공개 웹 API 응답 변경/일시 장애 시 기존 기능이 완전히 멈추지 않도록
+        # 공식 Open API 기반 섹터 랭킹을 예비 경로로 유지합니다.
+        pass
+
+    fallback = _fetch_strong_themes_openapi(limit=limit)
+    for item in fallback:
+        item.setdefault("id", "")
+        item.setdefault("stocks", [])
+        item.setdefault("stock_names", [])
+        item.setdefault("leading_stock", "")
+    return fallback
+
+
 def theme_hashtag(name):
     """섹터명을 해시태그로. 공백·슬래시는 제거합니다."""
 
@@ -2368,6 +2686,7 @@ def autofill_themes():
         return
 
     themes = [theme for theme in themes if theme["name"]]
+    state["sector_items"] = themes
 
     if not themes:
         state["themes_note"] = (
@@ -2377,9 +2696,11 @@ def autofill_themes():
 
     state["themes"] = " ".join(theme_hashtag(theme["name"]) for theme in themes)
 
+    stock_sector_count = sum(1 for theme in themes if theme.get("stock_names"))
     state["themes_note"] = (
-        "토스 섹터 랭킹 기준(조회 시점까지, 거래대금 상위 중 상승률 순) · "
+        "토스증권 산업 순위 기준(거래대금 상위 산업 우선, 상승률순) · "
         + " · ".join(f"{t['name']} {t['pct']:+.2f}%" for t in themes)
+        + f" · 주요 종목 {stock_sector_count}개 산업 조회"
         + f" · 갱신 {datetime.datetime.now(KST).strftime('%H:%M:%S')}"
     )
 
@@ -2394,14 +2715,19 @@ def collect_summary_inputs(snapshot=None):
     snapshot = snapshot or state.get("snapshot", {}) or {}
 
     # 강세 산업/섹터: 토스 섹터 랭킹을 우선 사용
-    sector_items = []
-    try:
-        sector_items = [
-            item for item in fetch_strong_themes(limit=5)
-            if isinstance(item, dict) and item.get("name")
-        ]
-    except Exception as error:
-        state["summary_note"] = f"섹터 조회 실패: {error}"
+    sector_items = [
+        item for item in (state.get("sector_items") or [])
+        if isinstance(item, dict) and item.get("name")
+    ]
+    if not sector_items:
+        try:
+            sector_items = [
+                item for item in fetch_strong_themes(limit=5)
+                if isinstance(item, dict) and item.get("name")
+            ]
+            state["sector_items"] = sector_items
+        except Exception as error:
+            state["summary_note"] = f"섹터 조회 실패: {error}"
 
     sector_names = [item["name"] for item in sector_items[:3]]
 
@@ -2467,7 +2793,7 @@ def collect_summary_inputs(snapshot=None):
 
     return {
         "sectors": sector_names,
-        "sector_items": sector_items[:3],
+        "sector_items": sector_items[:5],
         "gainers": rising_names,
         "losers": falling_names,
         "market": market_lines,
@@ -2489,6 +2815,11 @@ def ai_market_summary(data):
     market_context = "\n".join([
         f"기준일: {data['date']}",
         f"강세 산업/섹터: {', '.join(data['sectors']) or '확인 불가'}",
+        "산업별 대표 종목: " + " / ".join(
+            f"{item.get('name')}: {', '.join(item.get('stock_names', [])[:5])}"
+            for item in data.get("sector_items", [])
+            if item.get("stock_names")
+        ),
         f"급등 종목: {', '.join(data['gainers']) or '확인 불가'}",
         f"급락 종목: {', '.join(data['losers']) or '확인 불가'}",
         f"시장 지수: {' / '.join(data['market']) or '확인 불가'}",
@@ -3645,6 +3976,58 @@ def main():
                 ),
             )
 
+            with st.expander("📰 토스증권 주요 뉴스 불러오기", expanded=False):
+                st.caption(
+                    "토스증권 공개 대시보드 뉴스입니다. 개인화 추천 피드나 커뮤니티 댓글은 불러오지 않습니다. "
+                    "뉴스 제목/링크를 이슈 입력칸으로 옮긴 뒤 기사 본문을 확인할 수 있습니다."
+                )
+                news_type_labels = {
+                    "주요 뉴스": "ALL_HIGHLIGHT",
+                    "최신 뉴스": "HOT",
+                    "급등주 뉴스": "SOARING_STOCK",
+                }
+                news_type_label = st.selectbox(
+                    "뉴스 분류",
+                    list(news_type_labels.keys()),
+                    key="toss_news_type_label",
+                )
+                news_btn_col, news_note_col = st.columns([1.6, 5], vertical_alignment="center")
+                news_btn_col.button(
+                    "🔄 토스 뉴스 불러오기",
+                    key="toss_news_fetch_btn",
+                    on_click=lambda: st.session_state.__setitem__(
+                        "toss_dashboard_news",
+                        fetch_toss_dashboard_news(news_type_labels[st.session_state.get("toss_news_type_label", "최신 뉴스")]),
+                    ),
+                )
+                toss_news_items = st.session_state.get("toss_dashboard_news", []) or []
+                if toss_news_items:
+                    news_note_col.caption(f"{len(toss_news_items)}건 표시 · 조회 결과는 최대 3분간 캐시됩니다.")
+                    for news_idx, news_item in enumerate(toss_news_items):
+                        news_title = news_item.get("title", "")
+                        metadata = " · ".join(
+                            part for part in [news_item.get("source", ""), news_item.get("published", "")]
+                            if part
+                        )
+                        st.markdown(f"**{news_idx + 1}. {news_title}**")
+                        if metadata:
+                            st.caption(metadata)
+                        if news_item.get("summary"):
+                            st.write(news_item["summary"][:280])
+                        if news_item.get("url"):
+                            st.markdown(f"[기사 링크 열기]({news_item['url']})")
+                        pick_cols = st.columns([1, 1, 1, 4])
+                        for issue_num, pick_col in zip((1, 2, 3), pick_cols[:3]):
+                            pick_col.button(
+                                f"이슈 {issue_num}에 적용",
+                                key=f"toss_news_{news_idx}_issue_{issue_num}",
+                                on_click=use_toss_news_for_issue,
+                                args=(issue_num, news_item),
+                            )
+                        st.divider()
+                else:
+                    st.caption("아직 조회된 뉴스가 없습니다. ‘토스 뉴스 불러오기’를 눌러 주세요.")
+
             issues = [
                 (1, "🔺", "당일 상승률 상위 종목 흐름"),
                 (2, "🔻", "당일 하락률 상위 종목 흐름"),
@@ -3740,6 +4123,39 @@ def main():
                 key="themes",
                 height=68,
             )
+
+            sector_items_for_ui = st.session_state.get("sector_items", []) or []
+            if sector_items_for_ui:
+                with st.expander("🏭 토스증권 산업별 주요 종목", expanded=False):
+                    st.caption(
+                        "토스증권 공개 산업 데이터 기준 · 대표 종목은 시가총액 내림차순 상위 최대 5개입니다. "
+                        "데이터는 조회 시점의 스냅샷이며, 실시간 체결 오버레이와 다를 수 있습니다."
+                    )
+                    for sector_item in sector_items_for_ui[:5]:
+                        stock_rows = sector_item.get("stocks", []) or []
+                        stock_labels = []
+                        for stock in stock_rows[:5]:
+                            label = stock.get("name", "")
+                            pct = stock.get("pct")
+                            if pct is not None:
+                                label += f" ({pct:+.2f}%)"
+                            stock_labels.append(label)
+                        if not stock_labels and sector_item.get("leading_stock"):
+                            stock_labels = [sector_item["leading_stock"]]
+                        if stock_labels:
+                            st.markdown(
+                                f"**{sector_item['name']} ({sector_item.get('pct', 0):+.2f}%)**  \n"
+                                + " · ".join(stock_labels)
+                            )
+                        else:
+                            st.markdown(
+                                f"**{sector_item['name']} ({sector_item.get('pct', 0):+.2f}%)**  \n"
+                                "주요 종목 데이터는 현재 확인되지 않았습니다."
+                            )
+            else:
+                st.caption(
+                    "산업별 주요 종목은 ‘강한 테마 자동 불러오기’를 실행하면 함께 조회됩니다."
+                )
 
             st.session_state.setdefault(
                 "checks",
