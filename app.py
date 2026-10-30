@@ -2508,12 +2508,23 @@ def ai_market_summary(data):
             "messages": [{
                 "role": "user",
                 "content": (
-                    "당신은 국내 주식시장 시황 편집자입니다. 제공된 시장 데이터와 기사만 근거로 "
-                    "한국어 한 문장 요약을 작성하세요. 100~160자 정도로 작성하고, 기사 내용이 "
-                    "있으면 여러 기사의 공통 핵심과 시장 영향을 종합하세요. 기사에 없는 원인이나 "
-                    "사실을 추측해 추가하지 마세요. 관련이 확인되지 않은 산업과 종목을 억지로 "
-                    "연결하지 마세요. 기사 내용이 없으면 강세 산업, 급등·급락 종목, 지수 흐름을 "
-                    "자연스럽게 요약하세요. 제목, 번호, 따옴표, 투자 권유 표현은 쓰지 마세요.\n\n"
+                    "당신은 국내 증권 뉴스룸의 경제부 데스크이자 헤드라인 카피라이터입니다. "
+                    "사용자가 원하는 결과는 설명문이나 시장 요약이 아니라, 실제 경제 기사에 붙을 법한 "
+                    "시선을 끄는 헤드라인 1개입니다. 25~45자 안팎으로 작성하세요.\n\n"
+                    "작성 원칙:\n"
+                    "1. 가장 중요한 사건·변화·시장 반응을 맨 앞에 배치하세요.\n"
+                    "2. 구체적인 기업명, 산업명, 수치, 정책·실적·수급 이슈가 자료에 있으면 적극 활용하세요.\n"
+                    "3. '시장을 확인할 필요가 있다', '관심이 필요하다', '흐름을 살펴보자' 같은 밋밋한 결론은 금지합니다.\n"
+                    "4. '○○에 쏠린 시선', '○○는 웃고 ○○는 울었다', '○○ 변수에 판 흔들'처럼 "
+                    "기사형 표현을 활용할 수 있지만, 내용과 맞지 않는 과장이나 낚시성 표현은 금지합니다.\n"
+                    "5. 여러 기사가 입력되면 공통된 핵심이나 서로 맞물리는 쟁점을 찾아 하나의 헤드라인으로 압축하세요. "
+                    "기사 제목만 이어 붙이지 마세요.\n"
+                    "6. 기사가 없으면 현재 강세 산업·급등 종목·급락 종목·지수 데이터 중 가장 눈에 띄는 "
+                    "대비나 집중 현상을 골라 헤드라인으로 만드세요.\n"
+                    "7. 제공된 자료에 없는 원인, 인과관계, 전망, 수치, 사실을 만들지 마세요. "
+                    "관련성이 확인되지 않은 산업과 종목을 억지로 연결하지 마세요.\n"
+                    "8. 헤드라인만 출력하세요. 설명, 번호, 따옴표, '한 줄 요약:' 같은 접두어, "
+                    "투자 권유 표현은 쓰지 마세요.\n\n"
                     "[시장 데이터]\n" + market_context +
                     "\n\n[기사 내용]\n" + article_text[:12000]
                 ),
@@ -2536,56 +2547,78 @@ def ai_market_summary(data):
 
 
 def fallback_market_summary(data):
-    """AI API가 없거나 실패했을 때 시장 데이터와 기사 핵심 문장을 규칙 기반으로 조합합니다."""
-    parts = []
+    """AI API가 없을 때도 설명문 대신 기사형 헤드라인을 구성합니다."""
+    sectors = [str(x).strip() for x in data.get("sectors", []) if str(x).strip()]
+    gainers = [str(x).strip() for x in data.get("gainers", []) if str(x).strip()]
+    losers = [str(x).strip() for x in data.get("losers", []) if str(x).strip()]
+    markets = [str(x).strip() for x in data.get("market", []) if str(x).strip() and "확인 불가" not in str(x)]
+    titles = [str(x).strip() for x in data.get("issue_titles", []) if str(x).strip()]
+    articles = data.get("articles", []) or []
 
-    if data["articles"]:
-        # 기사 본문들을 합쳐 중요 문장을 추출합니다.
-        joined = " ".join(
-            f"{title}. {body}" for title, body in data["articles"]
-        )
-        article_summary = extractive_summary(
-            joined,
-            max_sentences=2,
-            max_chars=190,
-        ).strip()
-        if article_summary:
-            parts.append(article_summary.rstrip(" .;"))
-        elif data["issue_titles"]:
-            parts.append(data["issue_titles"][0].rstrip(" .;"))
+    # 기사 제목이 있다면 문장형 시장 설명 대신 제목의 핵심을 우선합니다.
+    if titles:
+        headline = re.sub(r"\s+", " ", titles[0]).strip(" .;:—-")
+        # 제목이 짧고 기사 내용이 있으면 핵심 문장을 보조로 붙여 헤드라인화
+        if len(headline) < 14 and articles:
+            body = articles[0][1]
+            key_sentence = extractive_summary(body, max_sentences=1, max_chars=100).strip(" .;")
+            if key_sentence and key_sentence.lower() not in headline.lower():
+                headline = f"{headline}…{key_sentence}"
+        if len(titles) > 1 and len(headline) < 34:
+            second = re.sub(r"\s+", " ", titles[1]).strip(" .;:—-")
+            if second and second not in headline:
+                # 두 번째 기사 제목을 그대로 덧붙이기보다 공통 이슈를 암시하는 짧은 연결구 사용
+                headline = f"{headline}…엇갈린 쟁점은 {second}"
+        headline = re.sub(r"\s+", " ", headline).strip()
+        if len(headline) > 90:
+            headline = headline[:87].rsplit(" ", 1)[0] + "…"
+        return headline
 
-    if data["sectors"]:
-        parts.append(f"강세 산업은 {', '.join(data['sectors'][:3])}")
+    # 기사 제목이 없고 기사 본문만 있는 경우 핵심 문장을 제목형으로 변환합니다.
+    if articles:
+        joined = " ".join(body for _, body in articles)
+        extracted = extractive_summary(joined, max_sentences=1, max_chars=110).strip(" .;。")
+        if extracted:
+            extracted = re.sub(r"^(한편|또한|이와 함께|이에 따라|이날|최근)\s*", "", extracted)
+            if len(extracted) > 58:
+                extracted = extracted[:55].rsplit(" ", 1)[0] + "…"
+            if not re.search(r"[.!?…]$", extracted):
+                extracted += "…"
+            return extracted
 
-    stock_parts = []
-    if data["gainers"]:
-        stock_parts.append(f"급등 종목은 {', '.join(data['gainers'][:2])}")
-    if data["losers"]:
-        stock_parts.append(f"급락 종목은 {', '.join(data['losers'][:2])}")
-    if stock_parts:
-        parts.append("· ".join(stock_parts))
+    # 기사 없이 시장 데이터만 있는 경우, 데이터에 있는 대비와 집중 현상을 헤드라인으로 구성합니다.
+    sector_text = "·".join(sectors[:2])
+    rising_text = "·".join(gainers[:2])
+    falling_text = "·".join(losers[:2])
+    up_markets = [x.split(":", 1)[0] for x in markets if "상승" in x]
+    down_markets = [x.split(":", 1)[0] for x in markets if "하락" in x]
 
-    if data["market"]:
-        valid_market = [x for x in data["market"] if "확인 불가" not in x]
-        if valid_market:
-            parts.append("시장 지수는 " + ", ".join(valid_market))
+    if sector_text and rising_text and falling_text:
+        headline = f"{sector_text} 강세…{rising_text} 웃고 {falling_text} 하락"
+    elif sector_text and rising_text:
+        headline = f"{sector_text}로 쏠린 시선…{rising_text} 강세"
+    elif rising_text and falling_text:
+        headline = f"{rising_text} 급등 속 {falling_text} 약세…종목별 희비"
+    elif sector_text and down_markets:
+        headline = f"{sector_text} 강세에도 {', '.join(down_markets)} 하락"
+    elif sector_text and up_markets:
+        headline = f"{sector_text} 강세…{', '.join(up_markets)} 상승세"
+    elif rising_text:
+        headline = f"급등 흐름 주도한 {rising_text}…상승 종목 주목"
+    elif falling_text:
+        headline = f"{falling_text} 약세…하락 종목에 쏠린 시선"
+    elif up_markets and down_markets:
+        headline = f"{', '.join(up_markets)} 상승·{', '.join(down_markets)} 하락…엇갈린 증시"
+    elif up_markets:
+        headline = f"{', '.join(up_markets)} 상승…강세 흐름 이어져"
+    elif down_markets:
+        headline = f"{', '.join(down_markets)} 하락…시장 변동성 확대"
+    elif sector_text:
+        headline = f"오늘 시장 주도 산업은 {sector_text}…섹터별 온도차"
+    else:
+        headline = "주요 산업·종목 흐름에서 포착된 오늘의 증시 변수"
 
-    # 반복 문구를 제거한 뒤 한 문장으로 정리
-    unique = []
-    for part in parts:
-        part = re.sub(r"\s+", " ", part).strip(" .;，,。")
-        if part and part not in unique:
-            unique.append(part)
-
-    if not unique:
-        return "현재 확인 가능한 산업·종목 데이터가 부족해 시장 흐름을 확인할 수 없습니다."
-
-    summary = "; ".join(unique)
-    if not summary.endswith((".", "다.", "요.")):
-        summary += "."
-    if len(summary) > 240:
-        summary = summary[:237].rsplit(" ", 1)[0] + "..."
-    return summary
+    return headline[:70]
 
 
 def generate_market_summary(snapshot=None):
