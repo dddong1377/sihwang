@@ -3371,8 +3371,8 @@ def build_markdown(snapshot, time_text="확인 불가"):
         "",
         "### 장중 지수 현황",
         "",
-        "| 지수 | 현재가 | 등락률 | 기준 시각 |",
-        "|---|---:|---:|---|",
+        "| 지수 | 현재가 | 등락률 |",
+        "|---|---:|---:|",
     ]
 
     for key, label in (
@@ -3384,8 +3384,7 @@ def build_markdown(snapshot, time_text="확인 불가"):
         lines.append(
             f"| {label} "
             f"| {fmt(data.get('price'))} "
-            f"| {arrow(data.get('pct'))} {pct_text(data.get('pct'))} "
-            f"| {time_text} |"
+            f"| {arrow(data.get('pct'))} {pct_text(data.get('pct'))} |"
         )
 
     lines += [
@@ -3393,8 +3392,8 @@ def build_markdown(snapshot, time_text="확인 불가"):
         "",
         "### 🌎 해외 지수·환율",
         "",
-        "| 구분 | 현재가 | 등락률 | 기준 시각 |",
-        "|---|---:|---:|---|",
+        "| 구분 | 현재가 | 등락률 |",
+        "|---|---:|---:|",
     ]
 
     for key, label, unit in GLOBAL_ITEMS:
@@ -3410,8 +3409,7 @@ def build_markdown(snapshot, time_text="확인 불가"):
         lines.append(
             f"| {label} "
             f"| {price_text} "
-            f"| {arrow(data.get('pct'))} {pct_text(data.get('pct'))} "
-            f"| {time_text} |"
+            f"| {arrow(data.get('pct'))} {pct_text(data.get('pct'))} |"
         )
 
     suffix = (
