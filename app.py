@@ -2290,11 +2290,9 @@ def fetch_sector_depths():
 
 def _fetch_strong_themes_openapi(limit=5):
     """
-    오늘(조회 시점까지) 강했던 섹터.
-    중분류 섹터 중 '거래대금 상위'이면서 '상승률이 높은' 순서로 고릅니다.
-    반환: [{"name", "pct", "amount"}, ...]
+    공식 토스 Open API의 섹터 랭킹을 사용합니다.
+    응답의 sectorId를 유지하고 /api/v1/sectors/{sectorId}/stocks로 구성 종목을 조회합니다.
     """
-
     try:
         depths = fetch_sector_depths()
     except Exception:
@@ -2303,63 +2301,142 @@ def _fetch_strong_themes_openapi(limit=5):
     def ranking(rank_type):
         result = api_get(
             "/api/v1/sectors/rankings",
-            {"type": rank_type, "marketCountry": "KR", "duration": "1d"}
+            {"type": rank_type, "marketCountry": "KR", "duration": "1d"},
         )
-
         rows = result.get("rankings", []) if isinstance(result, dict) else result
-
         return [row for row in rows if isinstance(row, dict)]
 
     gain_rows = ranking("TOP_GAINERS")
     amount_rows = ranking("MARKET_TRADING_AMOUNT")
 
+    def rate_pct(row):
+        value = num(row.get("changeRate"))
+        return value * 100 if value is not None else None
+
     def at_depth(rows, depth):
         if not depths:
             return rows
-
         return [
             row for row in rows
             if depths.get(str(row.get("sectorId"))) == depth
         ]
 
-    def pick(depth, use_activity):
-        rows = [
-            row for row in at_depth(gain_rows, depth)
-            if (num(row.get("changeRate")) or 0) > 0
-        ]
+    # 먼저 중분류에서 거래대금과 상승률을 함께 고려합니다.
+    gain_middle = [
+        row for row in at_depth(gain_rows, 1)
+        if rate_pct(row) is not None and rate_pct(row) > 0
+    ]
+    amount_middle = at_depth(amount_rows, 1)
+    active_ids = {
+        str(row.get("sectorId"))
+        for row in amount_middle[:25]
+        if row.get("sectorId") is not None
+    }
+    selected_rows = [
+        row for row in gain_middle
+        if str(row.get("sectorId")) in active_ids
+    ]
 
-        if use_activity:
-            active = {
-                str(row.get("sectorId"))
-                for row in at_depth(amount_rows, depth)[:25]
-            }
+    # 중분류 교집합이 부족하면 중분류 전체, 이후 전체 순위에서 보충합니다.
+    if len(selected_rows) < limit:
+        existing = {str(row.get("sectorId")) for row in selected_rows}
+        for row in gain_middle:
+            sid = str(row.get("sectorId"))
+            if sid not in existing:
+                selected_rows.append(row)
+                existing.add(sid)
+            if len(selected_rows) >= limit:
+                break
 
-            rows = [row for row in rows if str(row.get("sectorId")) in active]
+    if len(selected_rows) < limit:
+        existing = {str(row.get("sectorId")) for row in selected_rows}
+        for row in gain_rows:
+            sid = str(row.get("sectorId"))
+            value = rate_pct(row)
+            if sid and sid not in existing and value is not None and value > 0:
+                selected_rows.append(row)
+                existing.add(sid)
+            if len(selected_rows) >= limit:
+                break
 
-        rows.sort(key=lambda row: num(row.get("changeRate")) or 0, reverse=True)
-
-        return rows
-
-    # 1) 중분류 + 거래대금 상위 → 2) 중분류 전체 → 3) 대분류까지 확대
-    rows = pick(1, True)
-
-    if len(rows) < 3:
-        rows += [row for row in pick(1, False) if row not in rows]
-
-    if len(rows) < 3:
-        rows += [row for row in pick(0, False) if row not in rows]
+    # 순위 선별 이후 전체를 등락률 내림차순으로 통일합니다.
+    selected_rows.sort(key=lambda row: rate_pct(row) or 0, reverse=True)
 
     themes = []
+    for row in selected_rows[:limit]:
+        sector_id = str(row.get("sectorId") or "").strip()
+        name = str(row.get("name") or "").strip()
+        pct = rate_pct(row)
+        if not sector_id or not name or pct is None:
+            continue
 
-    for row in rows[:limit]:
-        themes.append({
-            "name": str(row.get("name", "")).strip(),
-            "pct": (num(row.get("changeRate")) or 0) * 100,
+        item = {
+            "id": sector_id,
+            "name": name,
+            "pct": pct,
             "amount": num(row.get("tradingAmount")),
-        })
+            "leading_stock": "",
+            "stocks": [],
+            "stock_names": [],
+            "stock_error": "",
+        }
+        try:
+            item["stocks"] = fetch_openapi_sector_stocks(sector_id, limit=5)
+            item["stock_names"] = [stock["name"] for stock in item["stocks"]]
+        except Exception as error:
+            item["stock_error"] = str(error)[:240]
+        themes.append(item)
 
     return themes
 
+
+@st.cache_data(ttl=180, show_spinner=False)
+def fetch_openapi_sector_stocks(sector_id, limit=5):
+    """
+    공식 Open API의 섹터 구성 종목을 조회합니다.
+    marketCapitalization 기준으로 직접 내림차순 정렬해 최대 5개를 반환합니다.
+    """
+    sector_id = str(sector_id or "").strip()
+    if not sector_id:
+        raise TossError("공식 섹터 응답에 sectorId가 없습니다.")
+
+    result = api_get(
+        f"/api/v1/sectors/{quote(sector_id, safe='')}/stocks",
+        {"marketCountry": "KR"},
+    )
+    rows = result.get("stocks", []) if isinstance(result, dict) else result
+    if not isinstance(rows, list):
+        raise TossError("섹터 구성 종목 응답에 stocks 배열이 없습니다.")
+
+    valid_rows = [row for row in rows if isinstance(row, dict) and row.get("name")]
+    valid_rows.sort(
+        key=lambda row: num(row.get("marketCapitalization")) or 0,
+        reverse=True,
+    )
+
+    stocks = []
+    seen = set()
+    for row in valid_rows:
+        name = str(row.get("name") or "").strip()
+        symbol = str(row.get("symbol") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        stocks.append({
+            "name": name,
+            "code": symbol,
+            "pct": None,
+            "market_cap": num(row.get("marketCapitalization")),
+            "trading_amount": num(row.get("tradingAmount")),
+        })
+        if len(stocks) >= max(1, min(int(limit), 5)):
+            break
+
+    if not stocks:
+        raise TossError(
+            f"섹터 {sector_id} 구성 종목 응답은 정상이나 표시 가능한 종목이 없습니다."
+        )
+    return stocks
 
 
 
@@ -2687,11 +2764,21 @@ def fetch_public_sector_stocks(tics_id, limit=5):
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_strong_themes(limit=5):
     """
-    토스증권 웹의 현재 산업 순위를 우선 사용합니다.
-    상승률 상위 산업 중 거래대금 순위에도 포함된 산업을 먼저 고르고,
-    각 산업의 대표 종목은 시가총액 내림차순으로 최대 5개 조회합니다.
-    공개 웹 API가 실패하면 기존 공식 Open API 기반 섹터 조회로 대체합니다.
+    공식 Open API의 sectorId를 사용해 산업 순위와 구성 종목을 조회합니다.
+    공개 웹 TICS API는 공식 API 조회가 실패할 때만 보조 경로로 사용합니다.
     """
+    try:
+        official = _fetch_strong_themes_openapi(limit=limit)
+        if official:
+            official.sort(key=lambda row: num(row.get("pct")) or 0, reverse=True)
+            return official
+    except Exception as error:
+        official_error = str(error)[:220]
+    else:
+        official_error = "공식 섹터 랭킹에서 표시할 상승 산업을 찾지 못했습니다."
+
+    # 공식 API가 실패했을 때에만 공개 TICS 웹 API를 시도합니다.
+    # 공개 TICS ID와 Open API sectorId는 서로 다른 식별자이므로 교차 사용하지 않습니다.
     try:
         gain_rows = fetch_public_tics_ranking("FLUCTUATION_RATE")
         amount_rows = fetch_public_tics_ranking("TRADING_AMOUNT")
@@ -2706,21 +2793,14 @@ def fetch_strong_themes(limit=5):
         for row in gain_rows:
             tics_id = row.get("ticsId")
             name = str(row.get("name") or row.get("title") or "").strip()
-            raw_rate = row.get("fluctuationRate")
-            pct = _normalize_public_rate(raw_rate)
-
+            pct = _normalize_public_rate(row.get("fluctuationRate"))
             if tics_id is None or not name or pct is None or pct <= 0:
                 continue
-
             candidates.append({
                 "id": str(tics_id),
                 "name": name,
                 "pct": pct,
-                "amount": num(
-                    row.get("tradingAmountKrw")
-                    or row.get("tradingAmount")
-                    or row.get("totalTradingAmountKrw")
-                ),
+                "amount": num(row.get("tradingAmountKrw") or row.get("tradingAmount")),
                 "leading_stock": (
                     _public_stock_name(row.get("leadingStock"))
                     if isinstance(row.get("leadingStock"), dict)
@@ -2729,46 +2809,44 @@ def fetch_strong_themes(limit=5):
                 "_active": str(tics_id) in active_ids,
             })
 
-        # 거래대금 상위 25개 산업과 겹치는 상승 산업을 우선합니다.
-        active = [row for row in candidates if row["_active"]]
-        active.sort(key=lambda row: row["pct"], reverse=True)
+        active = sorted(
+            [row for row in candidates if row["_active"]],
+            key=lambda row: row["pct"],
+            reverse=True,
+        )
         candidates.sort(key=lambda row: row["pct"], reverse=True)
         selected = active[:limit]
-
         if len(selected) < min(3, limit):
-            seen_ids = {row["id"] for row in selected}
-            selected.extend(
-                row for row in candidates
-                if row["id"] not in seen_ids
-            )
-
-        # 거래대금 상위 산업 우선으로 보충한 뒤에는 반드시 상승률 내림차순으로
-        # 다시 정렬합니다. 보충 전의 우선순위가 화면 순서에 남는 문제를 방지합니다.
-        selected.sort(key=lambda row: row.get("pct", 0), reverse=True)
+            seen = {row["id"] for row in selected}
+            selected.extend(row for row in candidates if row["id"] not in seen)
+        selected.sort(key=lambda row: row["pct"], reverse=True)
         selected = selected[:limit]
 
-        # 대표 종목 조회는 표시할 상위 산업에 대해서만 제한적으로 실행합니다.
         for item in selected:
             try:
                 item["stocks"] = fetch_public_sector_stocks(item["id"], limit=5)
                 item["stock_error"] = ""
             except Exception as error:
-                # 한 산업의 종목 목록 조회가 실패해도 나머지 산업 순위는 유지합니다.
                 item["stocks"] = []
-                item["stock_error"] = str(error)[:180]
+                item["stock_error"] = (
+                    "공식 Open API 조회 실패: " + official_error
+                    + " / 공개 TICS 종목 조회 실패: " + str(error)[:180]
+                )
             item["stock_names"] = [stock["name"] for stock in item["stocks"]]
             item.pop("_active", None)
-
         if selected:
             return selected
+    except Exception as error:
+        web_error = str(error)[:220]
+    else:
+        web_error = "공개 TICS API에서 표시할 산업을 찾지 못했습니다."
 
+    # 양쪽 API가 실패한 경우, 실패 원인을 화면의 안내 문구로 전달할 수 있는
+    # 마지막 예비 결과를 시도합니다. 같은 공식 API 재호출도 실패할 수 있으므로 보호합니다.
+    try:
+        fallback = _fetch_strong_themes_openapi(limit=limit)
     except Exception:
-        # 공개 웹 API 응답 변경/일시 장애 시 기존 기능이 완전히 멈추지 않도록
-        # 공식 Open API 기반 섹터 랭킹을 예비 경로로 유지합니다.
-        pass
-
-    fallback = _fetch_strong_themes_openapi(limit=limit)
-    # 예비 Open API 결과도 반환 직전에 상승률 내림차순으로 통일합니다.
+        fallback = []
     fallback.sort(key=lambda row: num(row.get("pct")) or 0, reverse=True)
     for item in fallback:
         item.setdefault("id", "")
@@ -2777,7 +2855,7 @@ def fetch_strong_themes(limit=5):
         item.setdefault("leading_stock", "")
         item.setdefault(
             "stock_error",
-            "현재는 예비 산업 순위 데이터로 표시 중이며, 이 응답에는 공개 TICS 산업 ID가 없어 대표 종목을 연결하지 못했습니다.",
+            f"산업 ID/종목 조회 실패. 공식 API: {official_error}; 공개 웹 API: {web_error}",
         )
     return fallback[:limit]
 
