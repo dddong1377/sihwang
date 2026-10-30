@@ -2458,24 +2458,68 @@ def _toss_web_request(path, method="GET", params=None, body=None):
 
 
 @st.cache_data(ttl=180, show_spinner=False)
-def fetch_toss_dashboard_news(news_type="HOT", index_code=None, limit=12):
-    """토스증권 공개 대시보드 뉴스 조회. 오류는 호출부에서 표시할 수 있도록 예외를 유지합니다."""
+def fetch_toss_dashboard_news(news_type="ALL_HIGHLIGHT", index_code=None, limit=12):
+    """토스증권 웹 화면에서 사용하는 주요 뉴스 API를 직접 호출합니다.
+
+    확인된 요청:
+      POST https://wts-info-api.tossinvest.com/api/v1/dashboard/wts/news
+      JSON: {"type": "ALL_HIGHLIGHT"}
+
+    이 API는 공식 Open API가 아닌 토스증권 웹 화면용 엔드포인트입니다.
+    웹 화면에서 실제 사용되는 요청 헤더를 최대한 포함하되, 토스 측 정책 변경이나
+    서버의 요청 검증에 따라 배포 환경에서 거부될 수 있습니다.
+    """
     allowed_types = {"ALL_HIGHLIGHT", "HOT", "SOARING_STOCK", "INDEX"}
     if news_type not in allowed_types:
-        news_type = "HOT"
+        news_type = "ALL_HIGHLIGHT"
 
     body = {"type": news_type}
     if news_type == "INDEX":
         body["indexCode"] = index_code or "KGG01P"
 
-    payload = _toss_web_request(
-        "/api/v1/dashboard/wts/news",
-        method="POST",
-        body=body,
-    )
+    headers = {
+        **TOSS_WEB_HEADERS,
+        "Origin": "https://www.tossinvest.com",
+        "Referer": "https://www.tossinvest.com/",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+    }
+    url = f"{TOSS_WEB_BASE}/api/v1/dashboard/wts/news"
+    try:
+        response = requests.post(
+            url,
+            json=body,
+            headers=headers,
+            timeout=(5, 15),
+        )
+    except requests.RequestException as error:
+        raise TossError(f"토스증권 뉴스 서버 연결 실패: {error}") from error
+
+    if not response.ok:
+        detail = response.text[:500]
+        raise TossError(
+            f"토스증권 뉴스 API HTTP {response.status_code}: {detail}"
+        )
+
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise TossError("토스증권 뉴스 API 응답이 JSON 형식이 아닙니다.") from error
+
+    if isinstance(payload, dict) and payload.get("error"):
+        error_data = payload["error"]
+        raise TossError(
+            "토스증권 뉴스 API 오류 "
+            f"{error_data.get('code', '')}: {error_data.get('message', '')}"
+        )
+
+    # 사용자가 확인한 응답 구조는 {"result": {"type": ..., "news": [...]}}입니다.
+    if isinstance(payload, dict) and isinstance(payload.get("result"), (dict, list)):
+        payload = payload["result"]
 
     # API 응답이 result/data 등으로 한 겹 더 감싸진 경우도 처리합니다.
-    for _ in range(4):
+    for _ in range(3):
         if isinstance(payload, dict):
             nested = None
             for key in ("result", "data", "response", "content"):
@@ -2497,14 +2541,6 @@ def fetch_toss_dashboard_news(news_type="HOT", index_code=None, limit=12):
             if isinstance(value, list):
                 rows = value
                 break
-            if isinstance(value, dict):
-                for child_key in ("news", "items", "results", "body", "articles", "list", "contents"):
-                    child = value.get(child_key)
-                    if isinstance(child, list):
-                        rows = child
-                        break
-                if rows is not None:
-                    break
         if rows is None:
             raise TossError(
                 "토스 뉴스 API 응답은 받았지만 뉴스 목록을 찾지 못했습니다. "
@@ -2548,6 +2584,11 @@ def fetch_toss_dashboard_news(news_type="HOT", index_code=None, limit=12):
             "summary": re.sub(r"\s+", " ", str(summary)).strip(),
             "source": str(source).strip() if source else "",
             "published": str(published).strip() if published else "",
+            "news_id": str(row.get("newsId", "")).strip(),
+            "news_type": str(row.get("newsType", "")).strip(),
+            "nation": str(row.get("nation", "")).strip(),
+            "image_url": str(row.get("imageUrl", "")).strip(),
+            "related_stocks": row.get("relatedStocks", []) or [],
         })
         if len(normalized) >= max(1, min(int(limit), 20)):
             break
@@ -4259,6 +4300,7 @@ def main():
                 news_type_label = st.selectbox(
                     "뉴스 분류",
                     list(news_type_labels.keys()),
+                    index=0,
                     key="toss_news_type_label",
                 )
                 news_btn_col, news_note_col = st.columns([1.6, 5], vertical_alignment="center")
@@ -4285,8 +4327,21 @@ def main():
                             st.caption(metadata)
                         if news_item.get("summary"):
                             st.write(news_item["summary"][:280])
+                        related = news_item.get("related_stocks") or []
+                        related_names = []
+                        for related_item in related:
+                            if isinstance(related_item, dict):
+                                related_name = related_item.get("name") or related_item.get("stockName") or related_item.get("symbol")
+                                if related_name:
+                                    related_names.append(str(related_name))
+                            elif related_item:
+                                related_names.append(str(related_item))
+                        if related_names:
+                            st.caption("관련 종목: " + " · ".join(related_names[:8]))
                         if news_item.get("url"):
                             st.markdown(f"[기사 링크 열기]({news_item['url']})")
+                        elif news_item.get("news_id"):
+                            st.caption("토스 뉴스 ID: " + news_item["news_id"] + " · API 응답에 기사 URL이 없어 직접 링크는 표시하지 않습니다.")
                         pick_cols = st.columns([1, 1, 1, 4])
                         for issue_num, pick_col in zip((1, 2, 3), pick_cols[:3]):
                             pick_col.button(
