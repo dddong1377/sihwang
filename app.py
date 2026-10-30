@@ -3505,8 +3505,70 @@ def build_markdown(snapshot, time_text="확인 불가"):
                     f"- {item}" for item in items if item
                 )
 
+            elif key == "themes":
+                # 테마 입력 순서를 유지하면서 테마별 대표 종목과
+                # 산업별 주요 종목 목록의 첫 번째 종목을 미리보기에 표시합니다.
+                theme_names = [
+                    re.sub(r"^#", "", part.strip())
+                    for part in re.split(r"[/,·\s\n]+", value)
+                    if part.strip()
+                ]
+                sector_items = [
+                    item for item in (session.get("sector_items") or [])
+                    if isinstance(item, dict) and item.get("name")
+                ]
+
+                def _theme_key(name):
+                    return re.sub(r"[\s/#]", "", str(name or "")).casefold()
+
+                sector_lookup = {
+                    _theme_key(item.get("name")): item
+                    for item in sector_items
+                }
+                theme_lines = []
+                seen_theme_keys = set()
+
+                for theme_name in theme_names:
+                    lookup_key = _theme_key(theme_name)
+                    if not lookup_key or lookup_key in seen_theme_keys:
+                        continue
+                    seen_theme_keys.add(lookup_key)
+
+                    matched = sector_lookup.get(lookup_key)
+                    if matched:
+                        pct = num(matched.get("pct"))
+                        pct_label = f" ({pct:+.2f}%)" if pct is not None else ""
+                        display_name = str(matched.get("name") or theme_name)
+                    else:
+                        pct_label = ""
+                        display_name = theme_name
+
+                    theme_lines.append(f"- **{display_name}{pct_label}**")
+
+                    if matched:
+                        # 토스증권 산업별 주요 종목 목록의 첫 번째 종목을
+                        # 해당 테마의 대표 종목으로 단일 표시합니다.
+                        stocks = matched.get("stocks", []) or []
+                        representative_stock = ""
+                        if stocks and isinstance(stocks[0], dict):
+                            representative_stock = str(stocks[0].get("name") or "").strip()
+                        elif matched.get("stock_names"):
+                            representative_stock = str(matched["stock_names"][0]).strip()
+                        # 보조 API 경로에서만 별도 대표 종목 값이 제공될 수 있어
+                        # 목록 첫 종목이 없을 때에 한해 예비값으로 사용합니다.
+                        if not representative_stock:
+                            representative_stock = str(matched.get("leading_stock") or "").strip()
+
+                        if representative_stock:
+                            theme_lines.append(f"  - 대표 종목: {representative_stock}")
+                        else:
+                            theme_lines.append("  - 대표 종목: 확인 불가")
+
             else:
                 body_text = md_lines(value.replace("/", "\n- "))
+
+            if key == "themes":
+                body_text = "\n".join(theme_lines)
 
             lines += [
                 f"### {title}",
