@@ -1,4 +1,3 @@
-
                 a, b, c = st.columns([1, 3, 3])
 
                 a.selectbox(
