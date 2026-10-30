@@ -1405,17 +1405,22 @@ def kr_tick(price):
     return 1000
 
 
-def limit_prices(base):
+def limit_prices(base, mode="base"):
     """전일 기준가 → (상한가, 하한가).
-    KRX 규칙: 상한가 = 기준가 × 130% 를 호가 단위 미만 절사,
-              하한가 = 기준가 × 70% 를 호가 단위 미만 절상."""
+    상한가 = 기준가 × 130% 를 호가 단위 미만 절사,
+    하한가 = 기준가 × 70% 를 호가 단위 미만 절상.
+    mode='base' : 기준가 가격대의 호가 단위로 맞춤 (HMM·에이피알처럼 가격대가 갈리는 종목에서 맞는 방식)
+    mode='own'  : 계산된 상·하한가 각자의 가격대 호가 단위로 맞춤"""
 
     base = int(round(base))
 
-    up_tick = kr_tick(base * 13 / 10)
-    upper = (base * 13 // (10 * up_tick)) * up_tick
+    if mode == "base":
+        up_tick = low_tick = kr_tick(base)
+    else:
+        up_tick = kr_tick(base * 13 / 10)
+        low_tick = kr_tick(base * 7 / 10)
 
-    low_tick = kr_tick(base * 7 / 10)
+    upper = (base * 13 // (10 * up_tick)) * up_tick
     lower = -(-(base * 7) // (10 * low_tick)) * low_tick
 
     return upper, lower
@@ -1423,8 +1428,9 @@ def limit_prices(base):
 
 def derive_base_from_limits(upper, lower, hint=None):
     """당일 상·하한가에 정확히 들어맞는 전일 기준가(호가 단위 위의 값)를 찾습니다.
-    반환: (기준가, 후보 수). 후보가 둘이면 인접한 두 호가 중 하나이며(오차 ±1호가),
-    hint(네이버 기준가 등)에 가까운 쪽을, hint가 없으면 위쪽 값을 씁니다."""
+    두 가지 반올림 규칙을 모두 시도하고, 그래도 없으면 상·하한가 범위의 중간값을 가장 가까운 호가에 맞춰 씁니다.
+    반환: (기준가, 후보 수). 후보 수가 2 이상이면 ±1호가 오차 가능.
+    hint(네이버 기준가 등)가 있으면 그에 가까운 후보를 고릅니다."""
 
     upper = int(round(upper))
     lower = int(round(lower))
@@ -1434,21 +1440,36 @@ def derive_base_from_limits(upper, lower, hint=None):
     price = max(1, start - start % kr_tick(start))
     end = int(center * 1.03) + 1
 
-    found = []
+    found = set()
 
     while price <= end:
-        if limit_prices(price) == (upper, lower):
-            found.append(price)
+        for mode in ("base", "own"):
+            if limit_prices(price, mode) == (upper, lower):
+                found.add(price)
 
         price += kr_tick(price)
 
-    if not found:
+    found = sorted(found)
+
+    if found:
+        if hint:
+            return min(found, key=lambda value: abs(value - hint)), len(found)
+
+        return found[len(found) // 2], len(found)
+
+    # 정확히 맞는 값이 없을 때: 상한가·하한가가 각각 가리키는 범위의 중간값
+    estimate = (upper / 1.3 + lower / 0.7) / 2
+
+    if hint and abs(hint - estimate) <= estimate * 0.01:
+        estimate = hint
+
+    tick = kr_tick(estimate)
+    snapped = int(round(estimate / tick) * tick)
+
+    if snapped <= 0:
         return None, 0
 
-    if hint:
-        return min(found, key=lambda value: abs(value - hint)), len(found)
-
-    return found[len(found) // 2], len(found)
+    return snapped, 2
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
@@ -3064,12 +3085,14 @@ def main():
 
         live_every = st.selectbox(
             "실시간 갱신 (시총 100위 TOP5)",
-            [0, 2, 3, 5],
-            index=2,
+            [0, 10, 30, 60, 300],
+            index=1,
             format_func=lambda value: (
-                "끔" if value == 0 else f"{value}초"
+                "끔" if value == 0
+                else f"{value}초" if value < 60
+                else f"{value // 60}분"
             ),
-            help="웹소켓 체결가로 급등·급락 TOP5를 이 주기로 다시 계산합니다. "
+            help="급등·급락 TOP5를 이 주기로 다시 계산합니다. "
                  "긴 글을 입력할 때 간섭이 느껴지면 '끔'으로 두세요.",
         )
 
@@ -3139,7 +3162,7 @@ def main():
             st.session_state["pw_ok"] = False
             st.rerun()
 
-    # 시총 100위 + 실시간 갱신이 켜져 있으면 짧은 주기로, 아니면 기존 자동 갱신 주기로 다시 그립니다.
+    # 시총 100위 + 실시간 갱신이 켜져 있으면 그 주기로, 아니면 기존 자동 갱신 주기로 다시 그립니다.
     refresh_every = (
         live_every
         if (universe == "cap100" and live_every)
