@@ -2290,90 +2290,62 @@ def fetch_sector_depths():
 
 def _fetch_strong_themes_openapi(limit=5):
     """
-    공식 토스 Open API의 섹터 랭킹을 사용합니다.
-    응답의 sectorId를 유지하고 /api/v1/sectors/{sectorId}/stocks로 구성 종목을 조회합니다.
+    공식 토스 Open API의 TOP_GAINERS 랭킹 자체를 기준으로 상위 산업을 선정합니다.
+    거래대금 랭킹과의 교집합, depth별 보충으로 순위가 바뀌는 문제를 방지합니다.
     """
-    try:
-        depths = fetch_sector_depths()
-    except Exception:
-        depths = {}
+    result = api_get(
+        "/api/v1/sectors/rankings",
+        {
+            "type": "TOP_GAINERS",
+            "marketCountry": "KR",
+            "duration": "1d",
+        },
+    )
+    rows = result.get("rankings", []) if isinstance(result, dict) else result
+    if not isinstance(rows, list):
+        raise TossError("TOP_GAINERS 응답에 rankings 배열이 없습니다.")
 
-    def ranking(rank_type):
-        result = api_get(
-            "/api/v1/sectors/rankings",
-            {"type": rank_type, "marketCountry": "KR", "duration": "1d"},
-        )
-        rows = result.get("rankings", []) if isinstance(result, dict) else result
-        return [row for row in rows if isinstance(row, dict)]
-
-    gain_rows = ranking("TOP_GAINERS")
-    amount_rows = ranking("MARKET_TRADING_AMOUNT")
-
-    def rate_pct(row):
-        value = num(row.get("changeRate"))
-        return value * 100 if value is not None else None
-
-    def at_depth(rows, depth):
-        if not depths:
-            return rows
-        return [
-            row for row in rows
-            if depths.get(str(row.get("sectorId"))) == depth
-        ]
-
-    # 먼저 중분류에서 거래대금과 상승률을 함께 고려합니다.
-    gain_middle = [
-        row for row in at_depth(gain_rows, 1)
-        if rate_pct(row) is not None and rate_pct(row) > 0
-    ]
-    amount_middle = at_depth(amount_rows, 1)
-    active_ids = {
-        str(row.get("sectorId"))
-        for row in amount_middle[:25]
-        if row.get("sectorId") is not None
-    }
-    selected_rows = [
-        row for row in gain_middle
-        if str(row.get("sectorId")) in active_ids
-    ]
-
-    # 중분류 교집합이 부족하면 중분류 전체, 이후 전체 순위에서 보충합니다.
-    if len(selected_rows) < limit:
-        existing = {str(row.get("sectorId")) for row in selected_rows}
-        for row in gain_middle:
-            sid = str(row.get("sectorId"))
-            if sid not in existing:
-                selected_rows.append(row)
-                existing.add(sid)
-            if len(selected_rows) >= limit:
-                break
-
-    if len(selected_rows) < limit:
-        existing = {str(row.get("sectorId")) for row in selected_rows}
-        for row in gain_rows:
-            sid = str(row.get("sectorId"))
-            value = rate_pct(row)
-            if sid and sid not in existing and value is not None and value > 0:
-                selected_rows.append(row)
-                existing.add(sid)
-            if len(selected_rows) >= limit:
-                break
-
-    # 순위 선별 이후 전체를 등락률 내림차순으로 통일합니다.
-    selected_rows.sort(key=lambda row: rate_pct(row) or 0, reverse=True)
-
-    themes = []
-    for row in selected_rows[:limit]:
+    # API가 제공한 rank를 최우선으로 사용합니다.
+    # rank가 없는 응답에 한해서 등락률을 보조 정렬 기준으로 사용합니다.
+    valid_rows = []
+    seen_ids = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
         sector_id = str(row.get("sectorId") or "").strip()
         name = str(row.get("name") or "").strip()
-        pct = rate_pct(row)
-        if not sector_id or not name or pct is None:
+        pct_value = num(row.get("changeRate"))
+        if not sector_id or not name or pct_value is None or pct_value <= 0:
             continue
+        if sector_id in seen_ids:
+            continue
+        seen_ids.add(sector_id)
+        rank_value = num(row.get("rank"))
+        valid_rows.append({
+            **row,
+            "_sector_id": sector_id,
+            "_pct": pct_value * 100,
+            "_rank": rank_value,
+        })
 
+    if any(row["_rank"] is not None for row in valid_rows):
+        valid_rows.sort(
+            key=lambda row: (
+                row["_rank"] if row["_rank"] is not None else 10**9,
+                -row["_pct"],
+            )
+        )
+    else:
+        valid_rows.sort(key=lambda row: row["_pct"], reverse=True)
+
+    themes = []
+    for row in valid_rows[:max(1, int(limit))]:
+        sector_id = row["_sector_id"]
         item = {
             "id": sector_id,
-            "name": name,
-            "pct": pct,
+            "name": str(row.get("name") or "").strip(),
+            "pct": row["_pct"],
+            "rank": row.get("rank"),
             "amount": num(row.get("tradingAmount")),
             "leading_stock": "",
             "stocks": [],
@@ -2770,7 +2742,6 @@ def fetch_strong_themes(limit=5):
     try:
         official = _fetch_strong_themes_openapi(limit=limit)
         if official:
-            official.sort(key=lambda row: num(row.get("pct")) or 0, reverse=True)
             return official
     except Exception as error:
         official_error = str(error)[:220]
@@ -2880,7 +2851,8 @@ def autofill_themes():
 
     themes = [theme for theme in themes if theme["name"]]
     # 해시태그 입력 순서와 산업별 주요 종목 창의 순서를 동일하게 상승률순으로 맞춥니다.
-    themes.sort(key=lambda row: num(row.get("pct")) or 0, reverse=True)
+    themes.sort(key=lambda row: (num(row.get("rank")) if num(row.get("rank")) is not None else 10**9,
+                                  -(num(row.get("pct")) or 0)))
     state["sector_items"] = themes
 
     if not themes:
@@ -2893,7 +2865,7 @@ def autofill_themes():
 
     stock_sector_count = sum(1 for theme in themes if theme.get("stock_names"))
     state["themes_note"] = (
-        "토스증권 산업 순위 기준(거래대금 상위 산업 우선, 상승률순) · "
+        "토스증권 TOP_GAINERS 공식 순위 기준(랭킹 순서) · "
         + " · ".join(f"{t['name']} {t['pct']:+.2f}%" for t in themes)
         + f" · 주요 종목 {stock_sector_count}개 산업 조회"
         + f" · 갱신 {datetime.datetime.now(KST).strftime('%H:%M:%S')}"
