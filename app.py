@@ -2459,7 +2459,7 @@ def _toss_web_request(path, method="GET", params=None, body=None):
 
 @st.cache_data(ttl=180, show_spinner=False)
 def fetch_toss_dashboard_news(news_type="HOT", index_code=None, limit=12):
-    """토스증권 공개 대시보드 뉴스. 개인화 피드는 호출하지 않습니다."""
+    """토스증권 공개 대시보드 뉴스 조회. 오류는 호출부에서 표시할 수 있도록 예외를 유지합니다."""
     allowed_types = {"ALL_HIGHLIGHT", "HOT", "SOARING_STOCK", "INDEX"}
     if news_type not in allowed_types:
         news_type = "HOT"
@@ -2468,23 +2468,50 @@ def fetch_toss_dashboard_news(news_type="HOT", index_code=None, limit=12):
     if news_type == "INDEX":
         body["indexCode"] = index_code or "KGG01P"
 
-    try:
-        payload = _toss_web_request(
-            "/api/v1/dashboard/wts/news",
-            method="POST",
-            body=body,
-        )
-    except Exception:
-        return []
+    payload = _toss_web_request(
+        "/api/v1/dashboard/wts/news",
+        method="POST",
+        body=body,
+    )
+
+    # API 응답이 result/data 등으로 한 겹 더 감싸진 경우도 처리합니다.
+    for _ in range(4):
+        if isinstance(payload, dict):
+            nested = None
+            for key in ("result", "data", "response", "content"):
+                value = payload.get(key)
+                if isinstance(value, (dict, list)):
+                    nested = value
+                    break
+            if nested is not None:
+                payload = nested
+                continue
+        break
 
     if isinstance(payload, list):
         rows = payload
     elif isinstance(payload, dict):
-        rows = payload.get("news") or payload.get("items") or payload.get("results") or []
-        if isinstance(rows, dict):
-            rows = rows.get("news") or rows.get("items") or []
+        rows = None
+        for key in ("news", "items", "results", "body", "articles", "list", "contents"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                rows = value
+                break
+            if isinstance(value, dict):
+                for child_key in ("news", "items", "results", "body", "articles", "list", "contents"):
+                    child = value.get(child_key)
+                    if isinstance(child, list):
+                        rows = child
+                        break
+                if rows is not None:
+                    break
+        if rows is None:
+            raise TossError(
+                "토스 뉴스 API 응답은 받았지만 뉴스 목록을 찾지 못했습니다. "
+                f"응답 필드: {', '.join(map(str, payload.keys())) or '(없음)'}"
+            )
     else:
-        rows = []
+        raise TossError(f"토스 뉴스 API 응답 형식을 해석할 수 없습니다: {type(payload).__name__}")
 
     normalized = []
     seen = set()
@@ -2493,39 +2520,55 @@ def fetch_toss_dashboard_news(news_type="HOT", index_code=None, limit=12):
             continue
         title = (
             row.get("title") or row.get("headline") or row.get("newsTitle")
-            or row.get("displayTitle") or row.get("name") or ""
+            or row.get("displayTitle") or row.get("name") or row.get("subject") or ""
         )
-        title = re.sub(r"\\s+", " ", str(title)).strip()
+        title = re.sub(r"\s+", " ", str(title)).strip()
         if not title or title in seen:
             continue
         seen.add(title)
         url = (
             row.get("url") or row.get("link") or row.get("newsUrl")
-            or row.get("originalUrl") or row.get("articleUrl") or ""
+            or row.get("originalUrl") or row.get("articleUrl") or row.get("linkUrl") or ""
         )
         summary = (
             row.get("summary") or row.get("description") or row.get("content")
-            or row.get("subTitle") or ""
+            or row.get("subTitle") or row.get("shortDescription") or ""
         )
         source = (
             row.get("source") or row.get("pressName") or row.get("providerName")
-            or row.get("mediaName") or ""
+            or row.get("mediaName") or row.get("publisher") or ""
         )
         published = (
             row.get("publishedAt") or row.get("createdAt") or row.get("date")
-            or row.get("datetime") or ""
+            or row.get("datetime") or row.get("publishedDate") or ""
         )
         normalized.append({
             "title": title,
             "url": str(url).strip() if url else "",
-            "summary": re.sub(r"\\s+", " ", str(summary)).strip(),
+            "summary": re.sub(r"\s+", " ", str(summary)).strip(),
             "source": str(source).strip() if source else "",
             "published": str(published).strip() if published else "",
         })
         if len(normalized) >= max(1, min(int(limit), 20)):
             break
 
+    if not normalized:
+        raise TossError(
+            "토스 뉴스 API 응답에서 표시 가능한 제목을 찾지 못했습니다. "
+            "응답 항목의 필드 구성이 변경됐을 수 있습니다."
+        )
     return normalized
+
+
+def load_toss_dashboard_news(news_type):
+    """버튼 콜백. 실패 원인을 화면에 표시합니다."""
+    try:
+        items = fetch_toss_dashboard_news(news_type)
+        st.session_state["toss_dashboard_news"] = items
+        st.session_state["toss_dashboard_news_error"] = ""
+    except Exception as error:
+        st.session_state["toss_dashboard_news"] = []
+        st.session_state["toss_dashboard_news_error"] = str(error)
 
 
 def use_toss_news_for_issue(issue_number, item):
@@ -4222,11 +4265,12 @@ def main():
                 news_btn_col.button(
                     "🔄 토스 뉴스 불러오기",
                     key="toss_news_fetch_btn",
-                    on_click=lambda: st.session_state.__setitem__(
-                        "toss_dashboard_news",
-                        fetch_toss_dashboard_news(news_type_labels[st.session_state.get("toss_news_type_label", "최신 뉴스")]),
-                    ),
+                    on_click=load_toss_dashboard_news,
+                    args=(news_type_labels[st.session_state.get("toss_news_type_label", "최신 뉴스")],),
                 )
+                toss_news_error = st.session_state.get("toss_dashboard_news_error", "")
+                if toss_news_error:
+                    st.error(f"토스 뉴스 조회 실패: {toss_news_error}")
                 toss_news_items = st.session_state.get("toss_dashboard_news", []) or []
                 if toss_news_items:
                     news_note_col.caption(f"{len(toss_news_items)}건 표시 · 조회 결과는 최대 3분간 캐시됩니다.")
@@ -4252,7 +4296,7 @@ def main():
                                 args=(issue_num, news_item),
                             )
                         st.divider()
-                else:
+                elif not toss_news_error:
                     st.caption("아직 조회된 뉴스가 없습니다. ‘토스 뉴스 불러오기’를 눌러 주세요.")
 
             issues = [
