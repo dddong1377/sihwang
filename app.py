@@ -2741,7 +2741,11 @@ def fetch_strong_themes(limit=5):
                 row for row in candidates
                 if row["id"] not in seen_ids
             )
-            selected = selected[:limit]
+
+        # 거래대금 상위 산업 우선으로 보충한 뒤에는 반드시 상승률 내림차순으로
+        # 다시 정렬합니다. 보충 전의 우선순위가 화면 순서에 남는 문제를 방지합니다.
+        selected.sort(key=lambda row: row.get("pct", 0), reverse=True)
+        selected = selected[:limit]
 
         # 대표 종목 조회는 표시할 상위 산업에 대해서만 제한적으로 실행합니다.
         for item in selected:
@@ -2764,12 +2768,18 @@ def fetch_strong_themes(limit=5):
         pass
 
     fallback = _fetch_strong_themes_openapi(limit=limit)
+    # 예비 Open API 결과도 반환 직전에 상승률 내림차순으로 통일합니다.
+    fallback.sort(key=lambda row: num(row.get("pct")) or 0, reverse=True)
     for item in fallback:
         item.setdefault("id", "")
         item.setdefault("stocks", [])
         item.setdefault("stock_names", [])
         item.setdefault("leading_stock", "")
-    return fallback
+        item.setdefault(
+            "stock_error",
+            "현재는 예비 산업 순위 데이터로 표시 중이며, 이 응답에는 공개 TICS 산업 ID가 없어 대표 종목을 연결하지 못했습니다.",
+        )
+    return fallback[:limit]
 
 
 def theme_hashtag(name):
@@ -2791,6 +2801,8 @@ def autofill_themes():
         return
 
     themes = [theme for theme in themes if theme["name"]]
+    # 해시태그 입력 순서와 산업별 주요 종목 창의 순서를 동일하게 상승률순으로 맞춥니다.
+    themes.sort(key=lambda row: num(row.get("pct")) or 0, reverse=True)
     state["sector_items"] = themes
 
     if not themes:
@@ -4230,6 +4242,11 @@ def main():
             )
 
             sector_items_for_ui = st.session_state.get("sector_items", []) or []
+            sector_items_for_ui = sorted(
+                sector_items_for_ui,
+                key=lambda row: num(row.get("pct")) or 0,
+                reverse=True,
+            )
             if sector_items_for_ui:
                 with st.expander("🏭 토스증권 산업별 주요 종목", expanded=False):
                     st.caption(
