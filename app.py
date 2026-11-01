@@ -2466,8 +2466,8 @@ def fetch_toss_dashboard_news(news_type="ALL_HIGHLIGHT", index_code=None, limit=
       JSON: {"type": "ALL_HIGHLIGHT"}
 
     이 API는 공식 Open API가 아닌 토스증권 웹 화면용 엔드포인트입니다.
-    웹 화면에서 실제 사용되는 요청 헤더를 최대한 포함하되, 토스 측 정책 변경이나
-    서버의 요청 검증에 따라 배포 환경에서 거부될 수 있습니다.
+    브라우저에서 확인된 app-version / x-xsrf-token / Cookie를 Secrets에서 읽어
+    요청하며, 세션 만료 시 Secrets 값을 갱신해야 할 수 있습니다.
     """
     allowed_types = {"ALL_HIGHLIGHT", "HOT", "SOARING_STOCK", "INDEX"}
     if news_type not in allowed_types:
@@ -2477,14 +2477,41 @@ def fetch_toss_dashboard_news(news_type="ALL_HIGHLIGHT", index_code=None, limit=
     if news_type == "INDEX":
         body["indexCode"] = index_code or "KGG01P"
 
+    # 브라우저에서 성공한 요청에 포함된 세션 정보는 Streamlit Secrets로 전달합니다.
+    # Cookie / XSRF 토큰은 만료·갱신될 수 있으므로 코드에 직접 넣지 않습니다.
+    cookie = secret("TOSS_NEWS_COOKIE").strip()
+    xsrf_token = secret("TOSS_NEWS_XSRF_TOKEN").strip()
+    app_version = secret("TOSS_NEWS_APP_VERSION").strip()
+    browser_tab_id = secret("TOSS_NEWS_BROWSER_TAB_ID").strip()
+
+    missing = []
+    if not cookie:
+        missing.append("TOSS_NEWS_COOKIE")
+    if not xsrf_token:
+        missing.append("TOSS_NEWS_XSRF_TOKEN")
+    if not app_version:
+        missing.append("TOSS_NEWS_APP_VERSION")
+    if missing:
+        raise TossError(
+            "토스 뉴스 인증 정보가 설정되지 않았습니다. Streamlit Secrets에 "
+            + ", ".join(missing)
+            + " 값을 등록해 주세요. 실제 값은 코드에 입력하지 마세요."
+        )
+
     headers = {
         **TOSS_WEB_HEADERS,
         "Origin": "https://www.tossinvest.com",
-        "Referer": "https://www.tossinvest.com/",
+        "Referer": "https://www.tossinvest.com/feed/news",
+        "app-version": app_version,
+        "x-xsrf-token": xsrf_token,
+        "Cookie": cookie,
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "same-site",
     }
+    if browser_tab_id:
+        headers["browser-tab-id"] = browser_tab_id
+
     url = f"{TOSS_WEB_BASE}/api/v1/dashboard/wts/news"
     try:
         response = requests.post(
