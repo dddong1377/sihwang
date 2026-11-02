@@ -4,8 +4,6 @@ import html
 import json
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import requests
@@ -16,30 +14,79 @@ st.set_page_config(page_title="MTNW 장전 시황", layout="wide")
 
 KST = ZoneInfo("Asia/Seoul")
 WEEKDAYS = "월화수목금토일"
-NOW_TOKEN = "__NOW__"
 
-YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MTNW-Market/1.0)"}
+# ---------------------------------------------------------------
+# Toss 대시보드 지수 API 설정
+# ---------------------------------------------------------------
 
-# (표시명, 야후 심볼, 소수 자리, 구분)
-INDEX_ITEMS = (
-    ("다우존스", "^DJI", 2, "index"),
-    ("S&P500", "^GSPC", 2, "index"),
-    ("나스닥", "^IXIC", 2, "index"),
-    ("영국 FTSE100", "^FTSE", 2, "index"),
-    ("프랑스 CAC40", "^FCHI", 2, "index"),
-    ("독일 DAX", "^GDAXI", 2, "index"),
-    ("유로스톡스50", "^STOXX50E", 2, "index"),
-    ("원/달러 환율", "KRW=X", 2, "extra"),
-    ("WTI 유가", "CL=F", 2, "extra"),
-    ("미 10년물 금리(%)", "^TNX", 3, "extra"),
-    ("VIX", "^VIX", 2, "extra"),
-    ("달러인덱스", "DX-Y.NYB", 2, "extra"),
+TOSS_INDICATOR_URL = (
+    "https://wts-cert-api.tossinvest.com"
+    "/api/v1/dashboard/wts/overview/indicator/index"
 )
 
+TOSS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/156.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Origin": "https://www.tossinvest.com",
+    "Referer": "https://www.tossinvest.com/",
+}
+
+
+# Toss 응답에서 확인된 지수 코드
+# 표시 순서는 장전 리포트용으로 지정
+TOSS_INDEX_ITEMS = (
+    ("다우존스", "DJI.DJI", 2, "index"),
+    ("S&P500", "SPX.CBI", 2, "index"),
+    ("나스닥", "COMP.NAI", 2, "index"),
+    ("나스닥 100 선물", "RFU.NQc1", 2, "extra"),
+    ("S&P 500 선물", "RFU.ESc1", 2, "extra"),
+    ("러셀 2000 선물", "RFU.RTYc1", 2, "extra"),
+    ("필라델피아 반도체", "SOX.NAI", 2, "extra"),
+    ("VIX", "RGI..VIX", 2, "extra"),
+    ("코스피", "KGG01P", 2, "extra"),
+    ("코스닥", "QGG01P", 2, "extra"),
+)
+
+# 해외 주요 지수 표에 반드시 표시할 항목
+# API에서 값을 받지 못한 경우에도 확인 불가로 표시
+MAIN_INDEX_LABELS = (
+    "다우존스",
+    "S&P500",
+    "나스닥",
+    "영국 FTSE100",
+    "프랑스 CAC40",
+    "독일 DAX",
+    "유로스톡스50",
+)
+
+# API 응답에 추가 지표가 있을 때 이름을 연결하기 위한 별칭
+# 실제 응답에 해당 지표가 없으면 임의로 만들지 않음
+INDEX_NAME_ALIASES = {
+    "다우존스": ("다우존스", "다우 산업", "Dow Jones", "Dow Jones Industrial Average"),
+    "S&P500": ("S&P 500", "S&P500", "S&P 500 지수", "S&P 500 Index"),
+    "나스닥": ("나스닥", "나스닥 종합", "NASDAQ", "NASDAQ Composite"),
+    "영국 FTSE100": ("영국 FTSE100", "FTSE 100", "FTSE100"),
+    "프랑스 CAC40": ("프랑스 CAC40", "CAC 40", "CAC40"),
+    "독일 DAX": ("독일 DAX", "DAX", "DAX 40"),
+    "유로스톡스50": ("유로스톡스50", "Euro Stoxx 50", "EURO STOXX 50"),
+    "원/달러 환율": ("원/달러", "USD/KRW", "달러/원", "미국 달러"),
+    "WTI 유가": ("WTI", "WTI 유", "서부 텍사스산 원유"),
+    "미 10년물 금리(%)": ("미국 10년물", "미 10년물", "US 10Y", "미국 국채 10년"),
+    "VIX": ("VIX", "변동성지수"),
+    "달러인덱스": ("달러인덱스", "달러 지수", "Dollar Index", "DXY"),
+    "비트코인": ("비트코인", "Bitcoin", "BTC"),
+    "금": ("금", "Gold", "금 선물"),
+}
+
 
 # ---------------------------------------------------------------
-# 공통: 설정값 / 로그인 (오후 페이지와 같은 세션 비밀번호 사용)
+# 공통: 설정값 / 로그인
 # ---------------------------------------------------------------
+
 def secret(key, default=""):
     try:
         value = st.secrets.get(key)
@@ -61,11 +108,19 @@ def login():
 
     def verify():
         entered = st.session_state.get("pw", "").encode()
-        st.session_state["pw_ok"] = hmac.compare_digest(entered, expected.encode())
+        st.session_state["pw_ok"] = hmac.compare_digest(
+            entered,
+            expected.encode(),
+        )
         st.session_state["pw"] = ""
 
     st.title("MTNW 시황")
-    st.text_input("비밀번호", type="password", key="pw", on_change=verify)
+    st.text_input(
+        "비밀번호",
+        type="password",
+        key="pw",
+        on_change=verify,
+    )
 
     if st.session_state.get("pw_ok") is False:
         st.error("비밀번호가 올바르지 않습니다.")
@@ -78,91 +133,414 @@ if not login():
 
 
 # ---------------------------------------------------------------
-# 해외 지수 (야후 비공식 차트 API, 최근 일봉 2개로 종가·전일 대비 계산)
+# Toss API 요청 헤더
 # ---------------------------------------------------------------
-def prev_weekday(day):
-    day = day - datetime.timedelta(days=1)
 
-    while day.weekday() >= 5:
-        day -= datetime.timedelta(days=1)
+def toss_session_headers():
+    """
+    Toss 웹 세션이 필요한 경우 Streamlit Secrets의 쿠키 등을 사용한다.
 
-    return day
+    Secrets 설정 예시:
+    TOSS_INDICATOR_COOKIE = "브라우저에서 확인한 Cookie 값"
+    TOSS_INDICATOR_XSRF_TOKEN = "필요한 경우 XSRF 토큰"
+    TOSS_INDICATOR_APP_VERSION = "필요한 경우 앱 버전"
+    TOSS_INDICATOR_BROWSER_TAB_ID = "필요한 경우 브라우저 탭 ID"
+
+    쿠키나 인증값은 코드에 직접 입력하지 않는 것을 권장한다.
+    """
+
+    headers = dict(TOSS_HEADERS)
+
+    cookie = (
+        secret("TOSS_INDICATOR_COOKIE")
+        or secret("TOSS_NEWS_COOKIE")
+        or secret("TOSS_CALENDAR_COOKIE")
+    )
+
+    xsrf_token = (
+        secret("TOSS_INDICATOR_XSRF_TOKEN")
+        or secret("TOSS_NEWS_XSRF_TOKEN")
+        or secret("TOSS_CALENDAR_XSRF_TOKEN")
+    )
+
+    app_version = (
+        secret("TOSS_INDICATOR_APP_VERSION")
+        or secret("TOSS_NEWS_APP_VERSION")
+        or secret("TOSS_CALENDAR_APP_VERSION")
+    )
+
+    browser_tab_id = (
+        secret("TOSS_INDICATOR_BROWSER_TAB_ID")
+        or secret("TOSS_NEWS_BROWSER_TAB_ID")
+        or secret("TOSS_CALENDAR_BROWSER_TAB_ID")
+    )
+
+    if cookie:
+        headers["Cookie"] = cookie
+
+    if xsrf_token:
+        headers["x-xsrf-token"] = xsrf_token
+
+    if app_version:
+        headers["x-app-version"] = app_version
+
+    if browser_tab_id:
+        headers["x-browser-tab-id"] = browser_tab_id
+
+    return headers
 
 
-@st.cache_data(ttl=120, show_spinner=False)
-def yahoo_daily(symbol):
-    """(기준일 YYYY-MM-DD, 종가, 전 거래일 종가). 실패하면 None."""
+# ---------------------------------------------------------------
+# Toss 지수 API 조회
+# ---------------------------------------------------------------
 
-    try:
-        response = requests.get(
-            "https://query1.finance.yahoo.com/v8/finance/chart/"
-            f"{quote(symbol, safe='')}",
-            params={"range": "5d", "interval": "1d"},
-            headers=YAHOO_HEADERS,
-            timeout=8,
+@st.cache_data(ttl=60, show_spinner=False)
+def get_toss_indicators():
+    """
+    Toss 대시보드 지수 API 조회.
+
+    확인된 응답 구조:
+    result.majorIndicatorInfos[]
+
+    주요 필드:
+    code
+    name
+    displayName
+    price.latestPrice
+    price.basePrice
+    miniChart.tradingEnd
+    """
+
+    response = requests.get(
+        TOSS_INDICATOR_URL,
+        params={"market": "kr"},
+        headers=toss_session_headers(),
+        timeout=15,
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Toss 지수 API HTTP {response.status_code}: "
+            f"{response.text[:300]}"
         )
 
-        if response.status_code != 200:
+    data = response.json()
+
+    if not isinstance(data, dict):
+        raise RuntimeError("Toss API 응답 형식이 올바르지 않습니다.")
+
+    result = data.get("result") or {}
+    infos = result.get("majorIndicatorInfos")
+
+    if not isinstance(infos, list):
+        raise RuntimeError(
+            "Toss API 응답에서 majorIndicatorInfos를 찾을 수 없습니다."
+        )
+
+    return infos
+
+
+# ---------------------------------------------------------------
+# 데이터 변환
+# ---------------------------------------------------------------
+
+def safe_float(value):
+    try:
+        if value is None:
             return None
 
-        result = response.json()["chart"]["result"][0]
-        stamps = result.get("timestamp") or []
-        closes = result["indicators"]["quote"][0].get("close") or []
-        zone = ZoneInfo(result["meta"].get("exchangeTimezoneName") or "UTC")
+        if isinstance(value, str):
+            value = value.replace(",", "").replace("%", "").strip()
 
-        rows = [
-            (datetime.datetime.fromtimestamp(ts, zone).date().isoformat(), close)
-            for ts, close in zip(stamps, closes)
-            if close is not None
-        ]
+            if not value:
+                return None
 
-        if len(rows) < 2:
+        number = float(value)
+
+        if not (number == number):
             return None
 
-        return rows[-1][0], float(rows[-1][1]), float(rows[-2][1])
+        return number
 
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
-def load_indices():
-    expected = prev_weekday(datetime.datetime.now(KST).date()).isoformat()
+def format_timestamp(value):
+    """
+    Toss tradingEnd 값이 Unix timestamp 또는 날짜 문자열인 경우 변환.
+    확인할 수 없는 형식이면 '-' 반환.
+    """
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        fetched = list(pool.map(lambda item: yahoo_daily(item[1]), INDEX_ITEMS))
+    if value is None:
+        return "-"
+
+    try:
+        if isinstance(value, (int, float)):
+            timestamp = float(value)
+
+            # 밀리초 timestamp 대응
+            if timestamp > 10_000_000_000:
+                timestamp /= 1000
+
+            dt = datetime.datetime.fromtimestamp(
+                timestamp,
+                tz=KST,
+            )
+
+            return dt.strftime("%Y-%m-%d %H:%M")
+
+        if isinstance(value, str):
+            value = value.strip()
+
+            if not value:
+                return "-"
+
+            # ISO 날짜 문자열 대응
+            try:
+                dt = datetime.datetime.fromisoformat(
+                    value.replace("Z", "+00:00")
+                )
+
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=KST)
+                else:
+                    dt = dt.astimezone(KST)
+
+                return dt.strftime("%Y-%m-%d %H:%M")
+
+            except ValueError:
+                return value
+
+    except Exception:
+        pass
+
+    return "-"
+
+
+def get_info_name(info):
+    return str(
+        info.get("displayName")
+        or info.get("name")
+        or info.get("code")
+        or ""
+    ).strip()
+
+
+def get_info_price(info):
+    price = info.get("price") or {}
+
+    if not isinstance(price, dict):
+        price = {}
+
+    latest = safe_float(price.get("latestPrice"))
+    base = safe_float(price.get("basePrice"))
+
+    return latest, base
+
+
+def get_info_timestamp(info):
+    mini_chart = info.get("miniChart") or {}
+
+    if not isinstance(mini_chart, dict):
+        return "-"
+
+    return format_timestamp(mini_chart.get("tradingEnd"))
+
+
+def build_toss_rows(infos):
+    """
+    API에서 실제로 반환된 지수만 데이터로 사용한다.
+    응답에 없는 지수는 별도 처리에서 확인 불가로 표시한다.
+    """
+
+    by_code = {}
+
+    for info in infos:
+        if not isinstance(info, dict):
+            continue
+
+        code = str(info.get("code") or "").strip()
+
+        if code:
+            by_code[code] = info
 
     rows = []
 
-    for (label, symbol, digits, kind), data in zip(INDEX_ITEMS, fetched):
-        if not data:
+    for label, code, digits, kind in TOSS_INDEX_ITEMS:
+        info = by_code.get(code)
+
+        if not info:
             rows.append({
-                "label": label, "kind": kind, "text": "확인 불가",
-                "date": "-", "note": "",
+                "label": label,
+                "kind": kind,
+                "text": "확인 불가",
+                "date": "-",
+                "note": "Toss 응답에서 해당 지수 미확인",
+                "code": code,
             })
             continue
 
-        day, close, prev = data
-        change = close - prev
-        pct = (close / prev - 1) * 100 if prev else 0.0
-        arrow = "🔺" if change > 0 else "🔻" if change < 0 else "➖"
-        note = "휴장/미갱신 가능" if day < expected else ""
+        latest, base = get_info_price(info)
+        date_text = get_info_timestamp(info)
+
+        if latest is None:
+            text = "확인 불가"
+            note = "현재가 데이터 없음"
+
+        elif base is None or base == 0:
+            text = f"{latest:,.{digits}f} (등락 확인 불가)"
+            note = "기준가 데이터 없음"
+
+        else:
+            change = latest - base
+            pct = (change / base) * 100
+
+            arrow = (
+                "🔺" if change > 0
+                else "🔻" if change < 0
+                else "➖"
+            )
+
+            text = (
+                f"{latest:,.{digits}f} "
+                f"({change:+,.{digits}f}, {pct:+.2f}%) {arrow}"
+            )
+            note = ""
 
         rows.append({
             "label": label,
             "kind": kind,
-            "text": f"{close:,.{digits}f} ({change:+,.{digits}f}, {pct:+.2f}%) {arrow}",
-            "date": day,
+            "text": text,
+            "date": date_text,
             "note": note,
+            "code": code,
+        })
+
+    # 응답에 포함되어 있으나 고정 목록에는 없는 지표도 표시
+    known_codes = {item[1] for item in TOSS_INDEX_ITEMS}
+
+    for info in infos:
+        if not isinstance(info, dict):
+            continue
+
+        code = str(info.get("code") or "").strip()
+
+        if not code or code in known_codes:
+            continue
+
+        display_name = get_info_name(info)
+
+        if not display_name:
+            continue
+
+        latest, base = get_info_price(info)
+        date_text = get_info_timestamp(info)
+
+        if latest is None:
+            text = "확인 불가"
+            note = "현재가 데이터 없음"
+
+        elif base is None or base == 0:
+            text = f"{latest:,.2f} (등락 확인 불가)"
+            note = "기준가 데이터 없음"
+
+        else:
+            change = latest - base
+            pct = (change / base) * 100
+
+            arrow = (
+                "🔺" if change > 0
+                else "🔻" if change < 0
+                else "➖"
+            )
+
+            text = (
+                f"{latest:,.2f} "
+                f"({change:+,.2f}, {pct:+.2f}%) {arrow}"
+            )
+            note = ""
+
+        rows.append({
+            "label": display_name,
+            "kind": "extra",
+            "text": text,
+            "date": date_text,
+            "note": note,
+            "code": code,
         })
 
     return rows
 
 
+# ---------------------------------------------------------------
+# 해외 주요 지수 표 구성
+# ---------------------------------------------------------------
+
+def build_main_index_rows(rows):
+    """
+    장전 리포트에 필요한 미국·유럽 7개 지수 표.
+    API에 없는 유럽 지수는 확인 불가로 표시한다.
+    """
+
+    result = []
+
+    row_by_label = {
+        row["label"]: row
+        for row in rows
+    }
+
+    # 코드 기반으로 이미 조회된 항목
+    for label in MAIN_INDEX_LABELS:
+        found = row_by_label.get(label)
+
+        if found:
+            result.append(found)
+            continue
+
+        # API의 displayName이 고정 표시명과 다를 때 별칭으로 탐색
+        aliases = INDEX_NAME_ALIASES.get(label, ())
+        matched = None
+
+        for row in rows:
+            row_name = str(row.get("label", "")).lower()
+
+            if any(
+                alias.lower() == row_name
+                for alias in aliases
+            ):
+                matched = row
+                break
+
+        if matched:
+            result.append({
+                **matched,
+                "label": label,
+            })
+        else:
+            result.append({
+                "label": label,
+                "kind": "index",
+                "text": "확인 불가",
+                "date": "-",
+                "note": "Toss API 응답에서 해당 지수 미확인",
+                "code": "-",
+            })
+
+    return result
+
+
 def indices_markdown(rows):
-    lines = ["| 구분 | 종가/현재가 (전일 대비) | 기준일 | 비고 |", "|---|---|---|---|"]
+    lines = [
+        "| 구분 | 종가/현재가 (전일 대비) | 기준 시각 | 비고 |",
+        "|---|---|---|---|",
+    ]
 
     for row in rows:
-        lines.append(f"| {row['label']} | {row['text']} | {row['date']} | {row['note']} |")
+        lines.append(
+            f"| {row['label']} | {row['text']} | "
+            f"{row['date']} | {row['note']} |"
+        )
 
     return "\n".join(lines)
 
@@ -171,19 +549,26 @@ def fetch_indices():
     state = st.session_state
 
     try:
-        rows = load_indices()
+        infos = get_toss_indicators()
+        rows = build_toss_rows(infos)
+
         state["pm_indices"] = rows
+        state["pm_main_indices"] = build_main_index_rows(rows)
+
         state["pm_indices_note"] = (
-            f"조회 완료 · {datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
-            "야후 파이낸스(비공식) 기준, 휴장/미갱신 표시를 확인하세요."
+            f"Toss 조회 완료 · "
+            f"{datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
+            f"응답 지표 {len(infos)}개"
         )
+
     except Exception as error:
-        state["pm_indices_note"] = f"지수 조회 실패: {error}"
+        state["pm_indices_note"] = f"Toss 지수 조회 실패: {error}"
 
 
 # ---------------------------------------------------------------
 # 프롬프트
 # ---------------------------------------------------------------
+
 PREMARKET_PROMPT = """# 역할
 너는 경제신문 증권부 기자, 증권사 애널리스트, 네이버 SEO 전문가, 검색광고 마케터, 유튜브 PD를 겸하는 "MTNW 시황 에디터"다.
 국내외 최신 주식 뉴스를 조사해 MTNW 광고팀·콘텐츠팀·방송팀이 바로 쓸 수 있는 "한눈에 보이는 데일리 시황 리포트"를 작성한다.
@@ -207,12 +592,16 @@ PREMARKET_PROMPT = """# 역할
 6. 한국 개인투자자 관점에서 우선순위를 정한다.
 
 # 지수 데이터 규칙 (중요)
-- 아래 [확인된 지수 데이터]를 해외 증시 표의 기준 수치로 사용한다. 이 표에 없는 수치는 검색으로 교차 확인하고, 확인되지 않으면 "확인 불가"로 쓴다.
+- 아래 [확인된 Toss 지수 데이터]를 기준 수치로 사용한다.
+- Toss 데이터에 없는 지수는 검색으로 별도 확인한다.
+- 검색으로도 확인되지 않으면 "확인 불가"로 표기한다.
+- Toss 데이터에 표시된 기준 시각을 확인하고, 최신 종가인지 실시간 지표인지 구분한다.
+- 비고에 미확인 또는 데이터 없음으로 표시된 항목은 임의로 수치를 채우지 않는다.
 - 비고에 "휴장/미갱신 가능"이 있는 지수는 검색으로 휴장 여부를 확인해 사유를 표기한다.
 - 표기 형식: 지수명 : 지수값 (전일 대비 ±포인트, ±%) — 소수점 둘째 자리까지
 - 대상: 다우, S&P500, 나스닥, 영국 FTSE100, 프랑스 CAC40, 독일 DAX, 유로스톡스50
 
-[확인된 지수 데이터]
+[확인된 Toss 지수 데이터]
 __INDEX_TABLE__
 
 # 작성 원칙 (간결성 최우선)
@@ -364,26 +753,39 @@ __SOURCE__
 # ---------------------------------------------------------------
 # Claude 호출 (웹검색 도구 선택 사용)
 # ---------------------------------------------------------------
+
 def call_claude(prompt, search=False, max_tokens=8000):
     key = secret("ANTHROPIC_API_KEY")
 
     if not key:
-        raise RuntimeError("Streamlit Secrets에 ANTHROPIC_API_KEY를 설정하세요.")
+        raise RuntimeError(
+            "Streamlit Secrets에 ANTHROPIC_API_KEY를 설정하세요."
+        )
 
-    model = secret("ANTHROPIC_MODEL_PREMARKET") or "claude-sonnet-5-5"
+    model = (
+        secret("ANTHROPIC_MODEL_PREMARKET")
+        or "claude-sonnet-5-5"
+    )
 
     body = {
         "model": model,
         "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
     }
 
     if search:
-        body["tools"] = [{
-            "type": "web_search_20250305",
-            "name": "web_search",
-            "max_uses": 10,
-        }]
+        body["tools"] = [
+            {
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": 10,
+            }
+        ]
 
     texts = []
 
@@ -400,7 +802,10 @@ def call_claude(prompt, search=False, max_tokens=8000):
         )
 
         if response.status_code != 200:
-            raise RuntimeError(f"HTTP {response.status_code}: {response.text[:400]}")
+            raise RuntimeError(
+                f"HTTP {response.status_code}: "
+                f"{response.text[:400]}"
+            )
 
         data = response.json()
         content = data.get("content", [])
@@ -413,7 +818,10 @@ def call_claude(prompt, search=False, max_tokens=8000):
 
         if data.get("stop_reason") == "pause_turn":
             body["messages"] = body["messages"] + [
-                {"role": "assistant", "content": content}
+                {
+                    "role": "assistant",
+                    "content": content,
+                }
             ]
             continue
 
@@ -433,33 +841,58 @@ def call_claude(prompt, search=False, max_tokens=8000):
     return result
 
 
+# ---------------------------------------------------------------
+# 장전 시황 생성 및 압축
+# ---------------------------------------------------------------
+
 def run_premarket(use_source_only=False):
-    """콜백: (원문 생성) → 압축. 결과를 session_state에 저장."""
+    """원문 생성 → 압축. 결과를 session_state에 저장."""
 
     state = st.session_state
     now = datetime.datetime.now(KST)
-    today = f"{now.year}년 {now.month:02d}월 {now.day:02d}일 ({WEEKDAYS[now.weekday()]})"
+
+    today = (
+        f"{now.year}년 {now.month:02d}월 "
+        f"{now.day:02d}일 ({WEEKDAYS[now.weekday()]})"
+    )
 
     try:
         pasted = state.get("pm_pasted", "").strip()
 
         if use_source_only and pasted:
             source = pasted
+
         else:
             rows = state.get("pm_indices")
 
             if not rows:
-                rows = load_indices()
+                infos = get_toss_indicators()
+                rows = build_toss_rows(infos)
+
                 state["pm_indices"] = rows
+                state["pm_main_indices"] = build_main_index_rows(rows)
+
+            main_rows = state.get("pm_main_indices")
+
+            if not main_rows:
+                main_rows = build_main_index_rows(rows)
+
+            index_table = indices_markdown(main_rows)
 
             prompt = (
                 PREMARKET_PROMPT
                 .replace("__TODAY__", today)
-                .replace("__INDEX_TABLE__", indices_markdown(rows))
+                .replace("__INDEX_TABLE__", index_table)
             )
 
-            with st.spinner("① 웹검색으로 장전 시황 원본 작성 중... (1~3분)"):
-                source = call_claude(prompt, search=True, max_tokens=8000)
+            with st.spinner(
+                "① 웹검색으로 장전 시황 원본 작성 중... (1~3분)"
+            ):
+                source = call_claude(
+                    prompt,
+                    search=True,
+                    max_tokens=8000,
+                )
 
             state["pm_long"] = source
 
@@ -471,8 +904,10 @@ def run_premarket(use_source_only=False):
             )
 
         state["pm_short"] = short
+
         state["pm_note"] = (
-            f"생성 완료 · {datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
+            f"생성 완료 · "
+            f"{datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
             "수치·종목·출처를 발행 전에 확인하세요."
         )
 
@@ -483,6 +918,7 @@ def run_premarket(use_source_only=False):
 # ---------------------------------------------------------------
 # 마크다운 → HTML / 복사 버튼
 # ---------------------------------------------------------------
+
 def md_to_html(markdown):
     output = []
     in_table = False
@@ -490,15 +926,25 @@ def md_to_html(markdown):
 
     def inline(text):
         safe = html.escape(text)
-        return re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", safe)
+        return re.sub(
+            r"\*\*(.*?)\*\*",
+            r"<b>\1</b>",
+            safe,
+        )
 
     for line in markdown.splitlines():
         stripped = line.strip()
 
         if stripped.startswith("|"):
-            cells = [cell.strip() for cell in stripped.split("|")[1:-1]]
+            cells = [
+                cell.strip()
+                for cell in stripped.split("|")[1:-1]
+            ]
 
-            if all(re.fullmatch(r":?-+:?", cell) for cell in cells):
+            if all(
+                re.fullmatch(r":?-+:?", cell)
+                for cell in cells
+            ):
                 continue
 
             if in_list:
@@ -513,7 +959,12 @@ def md_to_html(markdown):
                 in_table = True
 
             output.append(
-                "<tr>" + "".join(f"<td>{inline(cell)}</td>" for cell in cells) + "</tr>"
+                "<tr>"
+                + "".join(
+                    f"<td>{inline(cell)}</td>"
+                    for cell in cells
+                )
+                + "</tr>"
             )
             continue
 
@@ -526,7 +977,9 @@ def md_to_html(markdown):
                 output.append("<ul>")
                 in_list = True
 
-            output.append(f"<li>{inline(stripped[2:])}</li>")
+            output.append(
+                f"<li>{inline(stripped[2:])}</li>"
+            )
             continue
 
         if in_list:
@@ -534,15 +987,29 @@ def md_to_html(markdown):
             in_list = False
 
         if stripped.startswith("### "):
-            output.append(f"<h3>{inline(stripped[4:])}</h3>")
+            output.append(
+                f"<h3>{inline(stripped[4:])}</h3>"
+            )
+
         elif stripped.startswith("## "):
-            output.append(f"<h2>{inline(stripped[3:])}</h2>")
+            output.append(
+                f"<h2>{inline(stripped[3:])}</h2>"
+            )
+
         elif stripped.startswith("# "):
-            output.append(f"<h1>{inline(stripped[2:])}</h1>")
+            output.append(
+                f"<h1>{inline(stripped[2:])}</h1>"
+            )
+
         elif stripped.startswith("> "):
-            output.append(f"<p>{inline(stripped[2:])}</p>")
+            output.append(
+                f"<p>{inline(stripped[2:])}</p>"
+            )
+
         elif stripped:
-            output.append(f"<p>{inline(stripped)}</p>")
+            output.append(
+                f"<p>{inline(stripped)}</p>"
+            )
 
     if in_table:
         output.append("</table>")
@@ -555,7 +1022,10 @@ def md_to_html(markdown):
 
 def copy_buttons(markdown):
     payload = json.dumps(
-        {"md": markdown, "html": md_to_html(markdown)},
+        {
+            "md": markdown,
+            "html": md_to_html(markdown),
+        },
         ensure_ascii=False,
     ).replace("</", "<\\/")
 
@@ -572,11 +1042,19 @@ def copy_buttons(markdown):
         try {{
             await navigator.clipboard.write([
                 new ClipboardItem({{
-                    'text/html': new Blob([P.html], {{type: 'text/html'}}),
-                    'text/plain': new Blob([P.md], {{type: 'text/plain'}})
+                    'text/html': new Blob(
+                        [P.html],
+                        {{type: 'text/html'}}
+                    ),
+                    'text/plain': new Blob(
+                        [P.md],
+                        {{type: 'text/plain'}}
+                    )
                 }})
             ]);
+
             s.textContent = ' 복사 완료';
+
         }} catch (e) {{
             s.textContent = ' 복사 실패';
         }}
@@ -586,6 +1064,7 @@ def copy_buttons(markdown):
         try {{
             await navigator.clipboard.writeText(P.md);
             s.textContent = ' 복사 완료';
+
         }} catch (e) {{
             s.textContent = ' 복사 실패';
         }}
@@ -599,32 +1078,53 @@ def copy_buttons(markdown):
 # ---------------------------------------------------------------
 # 화면
 # ---------------------------------------------------------------
+
 def main():
     state = st.session_state
 
     st.title("MTNW 장전 시황")
+
     st.caption(
         "해외 지수를 먼저 확인한 뒤, 웹검색으로 장전 브리핑 원본을 만들고 "
-        "한눈에 보이는 시황글로 압축합니다. 오후 시황은 왼쪽 메뉴의 'app'에서 작성합니다."
+        "한눈에 보이는 시황글로 압축합니다. "
+        "오후 시황은 왼쪽 메뉴의 'app'에서 작성합니다."
     )
 
     # 1) 해외 지수
     st.markdown("### 🌎 ① 해외 지수·지표 확인")
 
     with st.container(border=True):
-        col_btn, col_note = st.columns([1.6, 5], vertical_alignment="center")
+        col_btn, col_note = st.columns(
+            [1.6, 5],
+            vertical_alignment="center",
+        )
 
-        col_btn.button("🔄 해외 지수 불러오기", on_click=fetch_indices, type="primary")
+        col_btn.button(
+            "🔄 해외 지수 불러오기",
+            on_click=fetch_indices,
+            type="primary",
+        )
 
         if state.get("pm_indices_note"):
-            col_note.caption(state["pm_indices_note"])
+            col_note.caption(
+                state["pm_indices_note"]
+            )
 
         rows = state.get("pm_indices")
 
         if rows:
             st.markdown(indices_markdown(rows))
+
+            st.caption(
+                "※ Toss API에서 실제 반환된 값만 표시합니다. "
+                "응답에 없는 지수는 확인 불가로 표시됩니다."
+            )
+
         else:
-            st.caption("아직 조회 전입니다. 생성 버튼을 눌러도 지수는 자동으로 먼저 조회됩니다.")
+            st.caption(
+                "아직 조회 전입니다. "
+                "생성 버튼을 누르면 지수도 자동으로 먼저 조회합니다."
+            )
 
     # 2) 생성
     st.markdown("### ✨ ② 장전 시황 생성")
@@ -634,10 +1134,16 @@ def main():
             "원문 직접 붙여넣기 (선택)",
             key="pm_pasted",
             height=140,
-            help="이미 만들어 둔 긴 시황글이 있으면 붙여넣고 '압축만 실행'을 누르세요. 웹검색 단계를 건너뜁니다.",
+            help=(
+                "이미 만들어 둔 긴 시황글이 있으면 붙여넣고 "
+                "'압축만 실행'을 누르세요. 웹검색 단계를 건너뜁니다."
+            ),
         )
 
-        col_a, col_b, col_c = st.columns([1.8, 1.4, 4], vertical_alignment="center")
+        col_a, col_b, col_c = st.columns(
+            [1.8, 1.4, 4],
+            vertical_alignment="center",
+        )
 
         col_a.button(
             "✨ 장전 시황 생성 (웹검색 + 압축)",
@@ -656,12 +1162,19 @@ def main():
         )
 
         if state.get("pm_note"):
-            col_c.caption(state["pm_note"])
+            col_c.caption(
+                state["pm_note"]
+            )
 
     # 3) 결과
     st.markdown("### 📝 ③ 결과")
 
-    tab_short, tab_long = st.tabs(["한눈에 보이는 시황글", "원본 상세 리포트"])
+    tab_short, tab_long = st.tabs(
+        [
+            "한눈에 보이는 시황글",
+            "원본 상세 리포트",
+        ]
+    )
 
     with tab_short:
         st.text_area(
@@ -686,8 +1199,12 @@ def main():
 
             with st.container(border=True):
                 st.markdown(long_text)
+
         else:
-            st.caption("원본 상세 리포트가 아직 없습니다. 직접 붙여넣은 원문만 압축한 경우에는 표시되지 않습니다.")
+            st.caption(
+                "원본 상세 리포트가 아직 없습니다. "
+                "직접 붙여넣은 원문만 압축한 경우에는 표시되지 않습니다."
+            )
 
 
 main()
