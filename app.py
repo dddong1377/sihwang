@@ -3969,33 +3969,32 @@ def pick_universe(changed):
     st.session_state[other] = not st.session_state[changed]
 
 
-def apply_label_style(theme_mode="라이트"):
-    """라이트/블랙 테마와 큰 글자 스타일을 적용합니다. 미리보기 내용 생성 로직은 유지합니다."""
+def apply_label_style():
+    """대시보드 전반의 가독성과 간격을 정리합니다. 미리보기 스타일은 별도 유지합니다."""
 
-    if theme_mode == "블랙":
-        page_bg = "#080D18"
-        panel_bg = "#111A2A"
-        panel_alt = "#172338"
-        panel_border = "#34445F"
-        text_main = "#F8FAFF"
-        text_muted = "#C0CBDA"
-        input_bg = "#0D1728"
-        accent = "#75A7FF"
-        positive = "#FF7777"
-        negative = "#69A7FF"
-        shadow = "rgba(0, 0, 0, .28)"
+    theme = "light"
+    try:
+        theme = st.context.theme.type or "light"
+    except Exception:
+        try:
+            theme = st.get_option("theme.base") or "light"
+        except Exception:
+            pass
+
+    if theme == "dark":
+        page_bg = "#0E1117"
+        panel_bg = "#171B24"
+        panel_border = "#303744"
+        text_main = "#F3F5F8"
+        text_muted = "#AAB3C2"
+        input_bg = "#202633"
     else:
-        page_bg = "#EEF3FA"
+        page_bg = "#F5F7FB"
         panel_bg = "#FFFFFF"
-        panel_alt = "#F7F9FD"
-        panel_border = "#CBD6E5"
-        text_main = "#101B2D"
-        text_muted = "#45546A"
+        panel_border = "#E3E8F0"
+        text_main = "#182230"
+        text_muted = "#667085"
         input_bg = "#FFFFFF"
-        accent = "#174EA6"
-        positive = "#D92D20"
-        negative = "#175CD3"
-        shadow = "rgba(28, 48, 78, .08)"
 
     st.markdown(
         f"""
@@ -4003,76 +4002,53 @@ def apply_label_style(theme_mode="라이트"):
         :root {{
             --mtnw-page: {page_bg};
             --mtnw-panel: {panel_bg};
-            --mtnw-panel-alt: {panel_alt};
             --mtnw-border: {panel_border};
             --mtnw-text: {text_main};
             --mtnw-muted: {text_muted};
             --mtnw-input: {input_bg};
-            --mtnw-accent: {accent};
-            --mtnw-positive: {positive};
-            --mtnw-negative: {negative};
-            color-scheme: {'dark' if theme_mode == '블랙' else 'light'};
         }}
 
-        .stApp {{ background: var(--mtnw-page); color: var(--mtnw-text); }}
+        /* 전체 화면: 여백과 본문 폭 */
+        .stApp {{ background: var(--mtnw-page); }}
         .main .block-container {{
-            max-width: 1500px;
-            padding-top: 1.35rem;
+            max-width: 1480px;
+            padding-top: 1.7rem;
             padding-bottom: 3rem;
             padding-left: clamp(1rem, 3vw, 2.8rem);
             padding-right: clamp(1rem, 3vw, 2.8rem);
         }}
-
-        /* 기본 글자: 크고 진하게 */
-        .stMarkdown, .stMarkdown p, .stMarkdown li,
-        [data-testid="stText"], [data-testid="stCaptionContainer"] p {{
-            color: var(--mtnw-text) !important;
-            font-size: 1.02rem !important;
-            font-weight: 550 !important;
-            line-height: 1.62 !important;
-        }}
         h1 {{
             color: var(--mtnw-text) !important;
-            font-size: clamp(2rem, 2.8vw, 2.55rem) !important;
-            font-weight: 900 !important;
-            letter-spacing: -.045em !important;
-            margin-bottom: .5rem !important;
+            font-size: clamp(1.7rem, 2.4vw, 2.25rem) !important;
+            font-weight: 800 !important;
+            letter-spacing: -0.045em !important;
+            margin-bottom: .35rem !important;
         }}
-        h2 {{
+        h2, h3 {{
             color: var(--mtnw-text) !important;
-            font-size: 1.62rem !important;
-            font-weight: 900 !important;
-            letter-spacing: -.03em !important;
-            margin-top: 1.65rem !important;
-            margin-bottom: .85rem !important;
+            font-weight: 750 !important;
+            letter-spacing: -0.025em !important;
         }}
-        h3 {{
-            color: var(--mtnw-text) !important;
-            font-size: 1.32rem !important;
-            font-weight: 850 !important;
-            letter-spacing: -.02em !important;
-            margin-top: 1.2rem !important;
-            margin-bottom: .7rem !important;
-        }}
-        strong, b {{ color: var(--mtnw-text) !important; font-weight: 850 !important; }}
+        h2 {{ margin-top: 1.5rem !important; margin-bottom: .8rem !important; }}
+        h3 {{ margin-top: 1.1rem !important; margin-bottom: .65rem !important; }}
+        p, li, label {{ color: var(--mtnw-text); }}
 
-        [data-testid="stVerticalBlock"] {{ gap: .9rem; }}
-        [data-testid="stHorizontalBlock"] {{ gap: .9rem; }}
+        /* Streamlit 요소 간 간격 */
+        [data-testid="stVerticalBlock"] {{ gap: .8rem; }}
+        [data-testid="stHorizontalBlock"] {{ gap: .8rem; }}
         [data-testid="stCaptionContainer"] p {{
             color: var(--mtnw-muted) !important;
-            font-size: .94rem !important;
-            font-weight: 600 !important;
-            line-height: 1.55 !important;
+            font-size: .83rem !important;
+            line-height: 1.5 !important;
         }}
 
-        /* 라벨 및 입력 글자 */
+        /* 입력 영역 */
         [data-testid="stWidgetLabel"] p,
         [data-testid="stWidgetLabel"] span,
-        [data-testid="stCheckbox"] label p,
-        [data-testid="stRadio"] label p {{
+        [data-testid="stCheckbox"] label p {{
             color: var(--mtnw-text) !important;
-            font-size: 1.04rem !important;
-            font-weight: 800 !important;
+            font-size: .94rem !important;
+            font-weight: 700 !important;
             opacity: 1 !important;
         }}
         [data-testid="stTextInput"] input,
@@ -4081,95 +4057,61 @@ def apply_label_style(theme_mode="라이트"):
         [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
         [data-testid="stMultiSelect"] div[data-baseweb="select"] > div {{
             background: var(--mtnw-input) !important;
-            color: var(--mtnw-text) !important;
-            border: 1px solid var(--mtnw-border) !important;
-            border-radius: 11px !important;
-            font-size: 1.02rem !important;
-            font-weight: 650 !important;
+            border-color: var(--mtnw-border) !important;
+            border-radius: 10px !important;
         }}
-        [data-testid="stTextArea"] textarea {{ line-height: 1.65 !important; }}
+        [data-testid="stTextArea"] textarea {{ line-height: 1.55 !important; }}
 
         /* 버튼 */
         .stButton > button {{
-            min-height: 2.9rem;
-            border-radius: 11px;
+            min-height: 2.55rem;
+            border-radius: 10px;
             border: 1px solid var(--mtnw-border);
-            color: var(--mtnw-text) !important;
-            font-size: 1rem !important;
-            font-weight: 850 !important;
-            background: var(--mtnw-panel) !important;
-            box-shadow: 0 2px 8px {shadow};
+            font-weight: 700;
             transition: border-color .15s ease, transform .15s ease;
         }}
-        .stButton > button:hover {{ border-color: var(--mtnw-accent); transform: translateY(-1px); }}
+        .stButton > button:hover {{ border-color: #7C91B5; transform: translateY(-1px); }}
         .stButton > button[kind="primary"] {{
-            background: var(--mtnw-accent) !important;
-            color: #FFFFFF !important;
             border: 0;
-            box-shadow: 0 3px 12px {shadow};
+            box-shadow: 0 3px 10px rgba(35, 83, 160, .16);
         }}
 
-        /* 데이터 표 / 카드 / 접이식 영역 */
+        /* 표 */
         [data-testid="stDataFrame"], [data-testid="stTable"] {{
             border: 1px solid var(--mtnw-border);
-            border-radius: 13px;
+            border-radius: 12px;
             overflow: hidden;
             background: var(--mtnw-panel);
         }}
+
+        /* 접이식 영역과 사이드바 */
         [data-testid="stExpander"] {{
             border: 1px solid var(--mtnw-border) !important;
-            border-radius: 14px !important;
+            border-radius: 13px !important;
             background: var(--mtnw-panel) !important;
             overflow: hidden;
-            box-shadow: 0 3px 12px {shadow};
         }}
-        [data-testid="stExpander"] summary {{ padding: .95rem 1.1rem !important; }}
+        [data-testid="stExpander"] summary {{ padding: .8rem 1rem !important; }}
         [data-testid="stExpander"] summary p {{
             color: var(--mtnw-text) !important;
-            font-size: 1.12rem !important;
-            font-weight: 850 !important;
+            font-size: .98rem !important;
+            font-weight: 750 !important;
         }}
         [data-testid="stSidebar"] {{
             background: var(--mtnw-panel);
             border-right: 1px solid var(--mtnw-border);
         }}
-        [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {{ gap: .85rem; }}
-        [data-testid="stAlert"] {{ border-radius: 12px; }}
-        [data-testid="stAlert"] p {{ font-size: 1rem !important; font-weight: 650 !important; }}
+        [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {{ gap: .75rem; }}
 
-        /* 상단 테마 선택 컨트롤 */
-        [data-testid="stRadio"] > div {{ gap: .45rem; }}
-        [data-testid="stRadio"] label {{
-            background: var(--mtnw-panel) !important;
-            border: 1px solid var(--mtnw-border) !important;
-            border-radius: 10px !important;
-            padding: .35rem .7rem !important;
-        }}
+        /* 안내 메시지 */
+        [data-testid="stAlert"] {{ border-radius: 11px; }}
 
-        /* 시황글 미리보기는 기존 글자 크기와 밀도를 유지 */
-        .st-key-preview_container .stMarkdown p,
-        .st-key-preview_container .stMarkdown li {{
-            font-size: 1rem !important;
-            font-weight: 400 !important;
-            line-height: 1.5 !important;
-        }}
-        .st-key-preview_container .stMarkdown h1 {{
-            font-size: clamp(1.7rem, 2.4vw, 2.25rem) !important;
-            font-weight: 800 !important;
-        }}
-        .st-key-preview_container .stMarkdown h2,
-        .st-key-preview_container .stMarkdown h3 {{
-            font-size: revert !important;
-            font-weight: 750 !important;
-        }}
-
+        /* 모바일 */
         @media (max-width: 760px) {{
             .main .block-container {{ padding: 1rem .8rem 2rem .8rem; }}
-            [data-testid="stHorizontalBlock"] {{ gap: .5rem; }}
-            h1 {{ font-size: 1.8rem !important; }}
-            h2 {{ font-size: 1.4rem !important; }}
-            h3 {{ font-size: 1.2rem !important; }}
-            [data-testid="stWidgetLabel"] p {{ font-size: .98rem !important; }}
+            [data-testid="stHorizontalBlock"] {{ gap: .45rem; }}
+            h1 {{ font-size: 1.55rem !important; }}
+            [data-testid="stWidgetLabel"] p {{ font-size: .88rem !important; }}
         }}
         </style>
         """,
@@ -4178,20 +4120,9 @@ def apply_label_style(theme_mode="라이트"):
 
 
 def main():
-    st.session_state.setdefault("mtnw_theme_mode", "라이트")
-    title_col, theme_col = st.columns([4.5, 1.5], vertical_alignment="center")
-    with title_col:
-        st.title("MTNW 오후 시황")
-    with theme_col:
-        st.radio(
-            "화면 테마",
-            ["라이트", "블랙"],
-            horizontal=True,
-            key="mtnw_theme_mode",
-            label_visibility="collapsed",
-        )
+    st.title("MTNW 오후 시황")
 
-    apply_label_style(st.session_state.get("mtnw_theme_mode", "라이트"))
+    apply_label_style()
 
     # 시총 100위 모드를 기본값으로 시작합니다.
     st.session_state.setdefault("uni_all", False)
@@ -4751,7 +4682,7 @@ def main():
 
         copy_buttons(build_markdown(snapshot, NOW_TOKEN))
 
-        with st.container(border=True, key="preview_container"):
+        with st.container(border=True):
             st.markdown(markdown)
 
         with st.expander("마크다운 원문 보기"):
