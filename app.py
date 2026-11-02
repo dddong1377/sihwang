@@ -3317,21 +3317,61 @@ def next_business_info():
 
 
 def fetch_toss_monthly_calendar(target_day):
-    """토스증권 공개 월별 캘린더에서 지정일의 원본 이벤트를 가져옵니다.
+    """토스증권 웹 캘린더의 월별 이벤트를 브라우저 요청 헤더와 맞춰 조회합니다.
 
-    브라우저에서 확인한 POST 요청처럼 요청 본문은 비워 둡니다.
-    XSRF 토큰/쿠키는 사용자 세션에 종속되므로 코드에 고정하지 않습니다.
+    월별 캘린더는 공개 웹 화면용 API입니다. 기존 뉴스 연동에 등록한
+    TOSS_NEWS_* 세션 정보를 우선 재사용하고, 캘린더 전용 Secrets가 있으면
+    해당 값을 우선합니다. 실제 Cookie/XSRF 값은 코드에 저장하지 않습니다.
     """
     year_month = target_day.strftime("%Y-%m")
     url = f"{TOSS_CALENDAR_BASE}/api/v4/calendar/monthly/{year_month}"
-    headers = dict(TOSS_CALENDAR_HEADERS)
-    # 필요할 때만 Streamlit Secrets에 저장한 최신 XSRF 토큰을 사용합니다.
-    # 토큰은 브라우저 세션에 따라 만료될 수 있으므로 코드에 직접 넣지 않습니다.
-    xsrf_token = secret("TOSS_CALENDAR_XSRF_TOKEN")
-    if xsrf_token:
-        headers["x-xsrf-token"] = xsrf_token
+
+    # 캘린더 전용 값 우선, 없으면 같은 토스 웹 세션을 사용하는 뉴스 설정 재사용
+    cookie = (
+        secret("TOSS_CALENDAR_COOKIE").strip()
+        or secret("TOSS_NEWS_COOKIE").strip()
+    )
+    xsrf_token = (
+        secret("TOSS_CALENDAR_XSRF_TOKEN").strip()
+        or secret("TOSS_NEWS_XSRF_TOKEN").strip()
+    )
+    app_version = (
+        secret("TOSS_CALENDAR_APP_VERSION").strip()
+        or secret("TOSS_NEWS_APP_VERSION").strip()
+    )
+    browser_tab_id = (
+        secret("TOSS_CALENDAR_BROWSER_TAB_ID").strip()
+        or secret("TOSS_NEWS_BROWSER_TAB_ID").strip()
+    )
+
+    missing = []
+    if not cookie:
+        missing.append("TOSS_CALENDAR_COOKIE 또는 TOSS_NEWS_COOKIE")
+    if not xsrf_token:
+        missing.append("TOSS_CALENDAR_XSRF_TOKEN 또는 TOSS_NEWS_XSRF_TOKEN")
+    if not app_version:
+        missing.append("TOSS_CALENDAR_APP_VERSION 또는 TOSS_NEWS_APP_VERSION")
+    if missing:
+        raise RuntimeError(
+            "토스 캘린더 요청에 필요한 브라우저 세션 정보가 없습니다: "
+            + ", ".join(missing)
+            + ". Streamlit Secrets에 등록해 주세요. 실제 값은 코드에 입력하지 마세요."
+        )
+
+    headers = {
+        **TOSS_CALENDAR_HEADERS,
+        "app-version": app_version,
+        "x-xsrf-token": xsrf_token,
+        "Cookie": cookie,
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+    }
+    if browser_tab_id:
+        headers["browser-tab-id"] = browser_tab_id
 
     try:
+        # 브라우저 DevTools에서 확인한 것처럼 POST + 빈 본문으로 전송합니다.
         response = requests.post(
             url,
             data=b"",
@@ -3344,12 +3384,12 @@ def fetch_toss_monthly_calendar(target_day):
     if response.status_code in (401, 403, 429):
         raise RuntimeError(
             f"토스 캘린더 접근 제한(HTTP {response.status_code}). "
-            "브라우저 세션 인증이 필요한지 확인해야 합니다."
+            "브라우저 세션이 만료되었을 수 있으므로 Cookie/XSRF 값을 갱신해 주세요."
         )
     if not response.ok:
         raise RuntimeError(
             f"토스 캘린더 조회 실패(HTTP {response.status_code}): "
-            f"{response.text[:180]}"
+            f"{response.text[:300]}"
         )
     try:
         payload = response.json()
