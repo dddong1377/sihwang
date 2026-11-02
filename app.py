@@ -3970,10 +3970,9 @@ def pick_universe(changed):
 
 
 def apply_label_style():
-    """입력칸 이름(라벨)과 표 머리글(캡션)을 더 크고 진하게 보이게 합니다."""
+    """대시보드 전반의 가독성과 간격을 정리합니다. 미리보기 스타일은 별도 유지합니다."""
 
     theme = "light"
-
     try:
         theme = st.context.theme.type or "light"
     except Exception:
@@ -3982,32 +3981,137 @@ def apply_label_style():
         except Exception:
             pass
 
-    strong, soft = (
-        ("#FFFFFF", "#E6E6E6") if theme == "dark" else ("#000000", "#1A1A1A")
-    )
+    if theme == "dark":
+        page_bg = "#0E1117"
+        panel_bg = "#171B24"
+        panel_border = "#303744"
+        text_main = "#F3F5F8"
+        text_muted = "#AAB3C2"
+        input_bg = "#202633"
+    else:
+        page_bg = "#F5F7FB"
+        panel_bg = "#FFFFFF"
+        panel_border = "#E3E8F0"
+        text_main = "#182230"
+        text_muted = "#667085"
+        input_bg = "#FFFFFF"
 
     st.markdown(
         f"""
         <style>
+        :root {{
+            --mtnw-page: {page_bg};
+            --mtnw-panel: {panel_bg};
+            --mtnw-border: {panel_border};
+            --mtnw-text: {text_main};
+            --mtnw-muted: {text_muted};
+            --mtnw-input: {input_bg};
+        }}
+
+        /* 전체 화면: 여백과 본문 폭 */
+        .stApp {{ background: var(--mtnw-page); }}
+        .main .block-container {{
+            max-width: 1480px;
+            padding-top: 1.7rem;
+            padding-bottom: 3rem;
+            padding-left: clamp(1rem, 3vw, 2.8rem);
+            padding-right: clamp(1rem, 3vw, 2.8rem);
+        }}
+        h1 {{
+            color: var(--mtnw-text) !important;
+            font-size: clamp(1.7rem, 2.4vw, 2.25rem) !important;
+            font-weight: 800 !important;
+            letter-spacing: -0.045em !important;
+            margin-bottom: .35rem !important;
+        }}
+        h2, h3 {{
+            color: var(--mtnw-text) !important;
+            font-weight: 750 !important;
+            letter-spacing: -0.025em !important;
+        }}
+        h2 {{ margin-top: 1.5rem !important; margin-bottom: .8rem !important; }}
+        h3 {{ margin-top: 1.1rem !important; margin-bottom: .65rem !important; }}
+        p, li, label {{ color: var(--mtnw-text); }}
+
+        /* Streamlit 요소 간 간격 */
+        [data-testid="stVerticalBlock"] {{ gap: .8rem; }}
+        [data-testid="stHorizontalBlock"] {{ gap: .8rem; }}
+        [data-testid="stCaptionContainer"] p {{
+            color: var(--mtnw-muted) !important;
+            font-size: .83rem !important;
+            line-height: 1.5 !important;
+        }}
+
+        /* 입력 영역 */
         [data-testid="stWidgetLabel"] p,
         [data-testid="stWidgetLabel"] span,
         [data-testid="stCheckbox"] label p {{
-            font-size: 1.1rem !important;
+            color: var(--mtnw-text) !important;
+            font-size: .94rem !important;
             font-weight: 700 !important;
-            color: {strong} !important;
             opacity: 1 !important;
         }}
-        [data-testid="stCaptionContainer"],
-        [data-testid="stCaptionContainer"] p {{
-            font-size: 1rem !important;
-            font-weight: 600 !important;
-            color: {soft} !important;
-            opacity: 1 !important;
+        [data-testid="stTextInput"] input,
+        [data-testid="stTextArea"] textarea,
+        [data-testid="stNumberInput"] input,
+        [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+        [data-testid="stMultiSelect"] div[data-baseweb="select"] > div {{
+            background: var(--mtnw-input) !important;
+            border-color: var(--mtnw-border) !important;
+            border-radius: 10px !important;
         }}
+        [data-testid="stTextArea"] textarea {{ line-height: 1.55 !important; }}
+
+        /* 버튼 */
+        .stButton > button {{
+            min-height: 2.55rem;
+            border-radius: 10px;
+            border: 1px solid var(--mtnw-border);
+            font-weight: 700;
+            transition: border-color .15s ease, transform .15s ease;
+        }}
+        .stButton > button:hover {{ border-color: #7C91B5; transform: translateY(-1px); }}
+        .stButton > button[kind="primary"] {{
+            border: 0;
+            box-shadow: 0 3px 10px rgba(35, 83, 160, .16);
+        }}
+
+        /* 표 */
+        [data-testid="stDataFrame"], [data-testid="stTable"] {{
+            border: 1px solid var(--mtnw-border);
+            border-radius: 12px;
+            overflow: hidden;
+            background: var(--mtnw-panel);
+        }}
+
+        /* 접이식 영역과 사이드바 */
+        [data-testid="stExpander"] {{
+            border: 1px solid var(--mtnw-border) !important;
+            border-radius: 13px !important;
+            background: var(--mtnw-panel) !important;
+            overflow: hidden;
+        }}
+        [data-testid="stExpander"] summary {{ padding: .8rem 1rem !important; }}
         [data-testid="stExpander"] summary p {{
-            font-size: 1.15rem !important;
-            font-weight: 700 !important;
-            color: {strong} !important;
+            color: var(--mtnw-text) !important;
+            font-size: .98rem !important;
+            font-weight: 750 !important;
+        }}
+        [data-testid="stSidebar"] {{
+            background: var(--mtnw-panel);
+            border-right: 1px solid var(--mtnw-border);
+        }}
+        [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {{ gap: .75rem; }}
+
+        /* 안내 메시지 */
+        [data-testid="stAlert"] {{ border-radius: 11px; }}
+
+        /* 모바일 */
+        @media (max-width: 760px) {{
+            .main .block-container {{ padding: 1rem .8rem 2rem .8rem; }}
+            [data-testid="stHorizontalBlock"] {{ gap: .45rem; }}
+            h1 {{ font-size: 1.55rem !important; }}
+            [data-testid="stWidgetLabel"] p {{ font-size: .88rem !important; }}
         }}
         </style>
         """,
@@ -4124,7 +4228,22 @@ def main():
     @st.fragment(run_every=refresh_every if refresh_every else None)
     def body():
 
-        if st.button("수기 입력 초기화 (현재가·등락률)"):
+        st.markdown("### ⚙️ 시세 조회")
+        with st.container(border=True):
+            reset_col, fetch_col, info_col = st.columns([1.35, 1.35, 3.3], vertical_alignment="center")
+            reset_clicked = reset_col.button(
+                "수기 입력 초기화",
+                use_container_width=True,
+                help="직접 수정한 현재가와 등락률을 조회 데이터 기준으로 초기화합니다.",
+            )
+            fetch_clicked = fetch_col.button(
+                "🔄 지금 시세 조회",
+                type="primary",
+                use_container_width=True,
+            )
+            info_col.caption("시세·지수·환율 및 급등·급락 순위를 다시 불러옵니다.")
+
+        if reset_clicked:
             for key in list(st.session_state.keys()):
                 if "_price_" in key or "_pct_" in key:
                     del st.session_state[key]
@@ -4135,7 +4254,7 @@ def main():
         )
 
         should_fetch = (
-            st.button("지금 시세 조회", type="primary")
+            fetch_clicked
             or "snapshot" not in st.session_state
             or st.session_state.get("duration") != duration
             or st.session_state.get("universe") != universe
@@ -4207,68 +4326,75 @@ def main():
         if snapshot.get("note"):
             st.warning(snapshot["note"])
 
-        c1, c2 = st.columns(2)
+        st.markdown("### 📊 주요 시장 지표")
+        with st.container(border=True):
+            c1, c2 = st.columns(2)
 
-        for col, key, label in (
+            for col, key, label in (
             (c1, "kospi", "코스피"),
             (c2, "kosdaq", "코스닥"),
-        ):
-            data = snapshot["indices"].get(key, {})
+            ):
+                data = snapshot["indices"].get(key, {})
 
-            col.markdown(
-                f"**{label}**  \n### {fmt(data.get('price'))}"
-            )
-
-            col.markdown(
-                f"{arrow(data.get('pct'))} "
-                f"{pct_text(data.get('pct'))}"
-            )
-
-            if data.get("pct") is None:
-                col.caption(
-                    "전일 종가를 확인할 수 없어 "
-                    "등락률은 표시하지 않았습니다."
+                col.markdown(
+                    f"**{label}**  \n### {fmt(data.get('price'))}"
                 )
 
-        g_cols = st.columns(3)
+                col.markdown(
+                    f"{arrow(data.get('pct'))} "
+                    f"{pct_text(data.get('pct'))}"
+                )
 
-        for col, (key, label, unit) in zip(g_cols, GLOBAL_ITEMS):
-            data = snapshot.get("global", {}).get(key, {})
-            price = data.get("price")
+                if data.get("pct") is None:
+                    col.caption(
+                        "전일 종가를 확인할 수 없어 "
+                        "등락률은 표시하지 않았습니다."
+                    )
 
-            col.markdown(
-                f"**{label}**  \n### "
-                f"{fmt(price)}{unit if price is not None else ''}"
+        st.markdown("### 🌐 해외 지표 및 환율")
+        with st.container(border=True):
+            g_cols = st.columns(3)
+
+            for col, (key, label, unit) in zip(g_cols, GLOBAL_ITEMS):
+                data = snapshot.get("global", {}).get(key, {})
+                price = data.get("price")
+
+                col.markdown(
+                    f"**{label}**  \n### "
+                    f"{fmt(price)}{unit if price is not None else ''}"
+                )
+
+                col.markdown(
+                    f"{arrow(data.get('pct'))} "
+                    f"{pct_text(data.get('pct'))}"
+                )
+
+        st.markdown("### 🔎 오늘의 급등·급락 종목")
+        with st.container(border=True):
+            render_stock_section(
+                f"🔺 급등 특징주 TOP 5{CAP_SUFFIX if is_cap else ''}",
+                snapshot["gainers"],
+                "up",
+                "🔺",
+                "상승 이유",
+                "show_up_reason",
+                "급등 랭킹이 비어 있습니다. "
+                "선택한 기간의 랭킹 데이터가 있는지 확인하세요.",
+                snapshot.get("universe", "all"),
             )
 
-            col.markdown(
-                f"{arrow(data.get('pct'))} "
-                f"{pct_text(data.get('pct'))}"
+        with st.container(border=True):
+            render_stock_section(
+                f"🔻 급락 특징주 TOP 5{CAP_SUFFIX if is_cap else ''}",
+                snapshot["losers"],
+                "down",
+                "🔻",
+                "하락 이유",
+                "show_down_reason",
+                "급락 랭킹이 비어 있습니다. "
+                "선택한 기간의 랭킹 데이터가 있는지 확인하세요.",
+                snapshot.get("universe", "all"),
             )
-
-        render_stock_section(
-            f"🔺 급등 특징주 TOP 5{CAP_SUFFIX if is_cap else ''}",
-            snapshot["gainers"],
-            "up",
-            "🔺",
-            "상승 이유",
-            "show_up_reason",
-            "급등 랭킹이 비어 있습니다. "
-            "선택한 기간의 랭킹 데이터가 있는지 확인하세요.",
-            snapshot.get("universe", "all"),
-        )
-
-        render_stock_section(
-            f"🔻 급락 특징주 TOP 5{CAP_SUFFIX if is_cap else ''}",
-            snapshot["losers"],
-            "down",
-            "🔻",
-            "하락 이유",
-            "show_down_reason",
-            "급락 랭킹이 비어 있습니다. "
-            "선택한 기간의 랭킹 데이터가 있는지 확인하세요.",
-            snapshot.get("universe", "all"),
-        )
 
         # 처음 한 번만 오늘 강했던 테마를 자동으로 채움 (이후 수기 수정 유지)
         if "themes_filled" not in st.session_state:
@@ -4276,8 +4402,8 @@ def main():
             autofill_themes()
 
         with st.expander(
-            "📝 시황글 추가 내용 편집",
-            expanded=True
+            "📝 시황글 추가 내용 편집 · 이슈·뉴스·테마·체크포인트",
+            expanded=False
         ):
             st.caption(
                 "이슈별로 기사 링크를 넣고 [기사 불러오기] → [핵심 정리]를 누르면 "
