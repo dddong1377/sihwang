@@ -4,6 +4,7 @@ import html
 import json
 import os
 import re
+import time
 from zoneinfo import ZoneInfo
 
 import requests
@@ -21,6 +22,9 @@ WEEKDAYS = "월화수목금토일"
 # ---------------------------------------------------------------
 
 GEMINI_MODEL = "models/gemini-3.8-flash"
+
+# 일시적인 요청 제한일 때만 재시도
+GEMINI_RETRY_WAIT = 20
 
 
 def get_gemini_api_key():
@@ -77,11 +81,9 @@ TOSS_HEADERS = {
 TOSS_INDEX_ITEMS = (
     ("코스피", "KGG01P", 2, "extra"),
     ("코스닥", "QGG01P", 2, "extra"),
-
     ("다우존스", "DJI.DJI", 2, "index"),
     ("S&P500", "SPX.CBI", 2, "index"),
     ("나스닥", "COMP.NAI", 2, "index"),
-
     ("필라델피아 반도체", "SOX.NAI", 2, "extra"),
     ("VIX", "RGI..VIX", 2, "extra"),
 )
@@ -104,80 +106,42 @@ MAIN_INDEX_LABELS = (
 
 INDEX_NAME_ALIASES = {
     "다우존스": (
-        "다우존스",
-        "다우 산업",
-        "Dow Jones",
+        "다우존스", "다우 산업", "Dow Jones",
         "Dow Jones Industrial Average",
     ),
     "S&P500": (
-        "S&P 500",
-        "S&P500",
-        "S&P 500 지수",
-        "S&P 500 Index",
+        "S&P 500", "S&P500", "S&P 500 지수", "S&P 500 Index",
     ),
     "나스닥": (
-        "나스닥",
-        "나스닥 종합",
-        "NASDAQ",
-        "NASDAQ Composite",
+        "나스닥", "나스닥 종합", "NASDAQ", "NASDAQ Composite",
     ),
     "영국 FTSE100": (
-        "영국 FTSE100",
-        "FTSE 100",
-        "FTSE100",
+        "영국 FTSE100", "FTSE 100", "FTSE100",
     ),
     "프랑스 CAC40": (
-        "프랑스 CAC40",
-        "CAC 40",
-        "CAC40",
+        "프랑스 CAC40", "CAC 40", "CAC40",
     ),
     "독일 DAX": (
-        "독일 DAX",
-        "DAX",
-        "DAX 40",
+        "독일 DAX", "DAX", "DAX 40",
     ),
     "유로스톡스50": (
-        "유로스톡스50",
-        "Euro Stoxx 50",
-        "EURO STOXX 50",
+        "유로스톡스50", "Euro Stoxx 50", "EURO STOXX 50",
     ),
     "원/달러 환율": (
-        "원/달러",
-        "USD/KRW",
-        "달러/원",
-        "미국 달러",
+        "원/달러", "USD/KRW", "달러/원", "미국 달러",
     ),
     "WTI 유가": (
-        "WTI",
-        "WTI 유",
-        "서부 텍사스산 원유",
+        "WTI", "WTI 유", "서부 텍사스산 원유",
     ),
     "미 10년물 금리(%)": (
-        "미국 10년물",
-        "미 10년물",
-        "US 10Y",
-        "미국 국채 10년",
+        "미국 10년물", "미 10년물", "US 10Y", "미국 국채 10년",
     ),
-    "VIX": (
-        "VIX",
-        "변동성지수",
-    ),
+    "VIX": ("VIX", "변동성지수"),
     "달러인덱스": (
-        "달러인덱스",
-        "달러 지수",
-        "Dollar Index",
-        "DXY",
+        "달러인덱스", "달러 지수", "Dollar Index", "DXY",
     ),
-    "비트코인": (
-        "비트코인",
-        "Bitcoin",
-        "BTC",
-    ),
-    "금": (
-        "금",
-        "Gold",
-        "금 선물",
-    ),
+    "비트코인": ("비트코인", "Bitcoin", "BTC"),
+    "금": ("금", "Gold", "금 선물"),
 }
 
 
@@ -238,7 +202,6 @@ if not login():
 # ---------------------------------------------------------------
 
 def toss_session_headers():
-
     headers = dict(TOSS_HEADERS)
 
     cookie = (
@@ -286,7 +249,6 @@ def toss_session_headers():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_toss_indicators():
-
     response = requests.get(
         TOSS_INDICATOR_URL,
         params={"market": "kr"},
@@ -347,7 +309,6 @@ def safe_float(value):
 # ---------------------------------------------------------------
 
 def parse_timestamp(value):
-
     if value is None or isinstance(value, bool):
         return None
 
@@ -417,35 +378,20 @@ def parse_timestamp(value):
 
 
 def find_candle_timestamps(value, results=None):
-
     if results is None:
         results = []
 
     timestamp_keys = {
-        "timestamp",
-        "time",
-        "datetime",
-        "date",
-        "candleTime",
-        "candleDate",
-        "tradingTime",
-        "tradingDate",
-        "startTime",
-        "endTime",
-        "startDate",
-        "endDate",
-        "baseDateTime",
-        "localDateTime",
-        "tradeDate",
-        "chartTime",
-        "x",
-        "t",
+        "timestamp", "time", "datetime", "date",
+        "candleTime", "candleDate", "tradingTime",
+        "tradingDate", "startTime", "endTime",
+        "startDate", "endDate", "baseDateTime",
+        "localDateTime", "tradeDate", "chartTime",
+        "x", "t",
     }
 
     if isinstance(value, dict):
-
         for key, item in value.items():
-
             if str(key) in timestamp_keys:
                 dt = parse_timestamp(item)
 
@@ -456,9 +402,7 @@ def find_candle_timestamps(value, results=None):
                 find_candle_timestamps(item, results)
 
     elif isinstance(value, list):
-
         for item in value:
-
             if isinstance(item, (dict, list)):
                 find_candle_timestamps(item, results)
 
@@ -466,7 +410,6 @@ def find_candle_timestamps(value, results=None):
 
 
 def format_timestamp(value):
-
     dt = parse_timestamp(value)
 
     if dt is None:
@@ -485,7 +428,6 @@ def get_info_name(info):
 
 
 def get_info_price(info):
-
     price = info.get("price") or {}
 
     if not isinstance(price, dict):
@@ -498,7 +440,6 @@ def get_info_price(info):
 
 
 def get_info_timestamp(info):
-
     mini_chart = info.get("miniChart") or {}
 
     if not isinstance(mini_chart, dict):
@@ -514,9 +455,7 @@ def get_info_timestamp(info):
     if not timestamps:
         return "확인 불가"
 
-    latest_timestamp = max(timestamps)
-
-    return latest_timestamp.strftime("%Y-%m-%d %H:%M")
+    return max(timestamps).strftime("%Y-%m-%d %H:%M")
 
 
 # ---------------------------------------------------------------
@@ -524,7 +463,6 @@ def get_info_timestamp(info):
 # ---------------------------------------------------------------
 
 def is_futures_index(info):
-
     code = str(info.get("code") or "").strip()
     name = get_info_name(info).lower()
 
@@ -534,16 +472,9 @@ def is_futures_index(info):
     if code.upper().startswith("RFU."):
         return True
 
-    futures_keywords = (
-        "선물",
-        "futures",
-        "future",
-    )
+    futures_keywords = ("선물", "futures", "future")
 
-    if any(keyword in name for keyword in futures_keywords):
-        return True
-
-    return False
+    return any(keyword in name for keyword in futures_keywords)
 
 
 # ---------------------------------------------------------------
@@ -551,20 +482,15 @@ def is_futures_index(info):
 # ---------------------------------------------------------------
 
 def build_toss_rows(infos):
-
     by_code = {}
 
     for info in infos:
-
         if not isinstance(info, dict):
             continue
 
         code = str(info.get("code") or "").strip()
 
-        if not code:
-            continue
-
-        if is_futures_index(info):
+        if not code or is_futures_index(info):
             continue
 
         by_code[code] = info
@@ -572,11 +498,9 @@ def build_toss_rows(infos):
     rows = []
 
     for label, code, digits, kind in TOSS_INDEX_ITEMS:
-
         info = by_code.get(code)
 
         if not info:
-
             rows.append({
                 "label": label,
                 "kind": kind,
@@ -585,24 +509,20 @@ def build_toss_rows(infos):
                 "note": "Toss 응답에서 해당 지수 미확인",
                 "code": code,
             })
-
             continue
 
         latest, base = get_info_price(info)
         date_text = get_info_timestamp(info)
 
         if latest is None:
-
             text = "확인 불가"
             note = "현재가 데이터 없음"
 
         elif base is None or base == 0:
-
             text = f"{latest:,.{digits}f} (등락 확인 불가)"
             note = "기준가 데이터 없음"
 
         else:
-
             change = latest - base
             pct = (change / base) * 100
 
@@ -616,7 +536,6 @@ def build_toss_rows(infos):
                 f"{latest:,.{digits}f} "
                 f"({change:+,.{digits}f}, {pct:+.2f}%) {arrow}"
             )
-
             note = ""
 
         rows.append({
@@ -628,13 +547,9 @@ def build_toss_rows(infos):
             "code": code,
         })
 
-    known_codes = {
-        item[1]
-        for item in TOSS_INDEX_ITEMS
-    }
+    known_codes = {item[1] for item in TOSS_INDEX_ITEMS}
 
     for info in infos:
-
         if not isinstance(info, dict):
             continue
 
@@ -655,17 +570,14 @@ def build_toss_rows(infos):
         date_text = get_info_timestamp(info)
 
         if latest is None:
-
             text = "확인 불가"
             note = "현재가 데이터 없음"
 
         elif base is None or base == 0:
-
             text = f"{latest:,.2f} (등락 확인 불가)"
             note = "기준가 데이터 없음"
 
         else:
-
             change = latest - base
             pct = (change / base) * 100
 
@@ -679,7 +591,6 @@ def build_toss_rows(infos):
                 f"{latest:,.2f} "
                 f"({change:+,.2f}, {pct:+.2f}%) {arrow}"
             )
-
             note = ""
 
         rows.append({
@@ -699,7 +610,6 @@ def build_toss_rows(infos):
 # ---------------------------------------------------------------
 
 def build_main_index_rows(rows):
-
     result = []
 
     row_by_label = {
@@ -708,7 +618,6 @@ def build_main_index_rows(rows):
     }
 
     for label in MAIN_INDEX_LABELS:
-
         found = row_by_label.get(label)
 
         if found:
@@ -719,27 +628,18 @@ def build_main_index_rows(rows):
         matched = None
 
         for row in rows:
+            row_name = str(row.get("label", "")).lower()
 
-            row_name = str(
-                row.get("label", "")
-            ).lower()
-
-            if any(
-                alias.lower() == row_name
-                for alias in aliases
-            ):
+            if any(alias.lower() == row_name for alias in aliases):
                 matched = row
                 break
 
         if matched:
-
             result.append({
                 **matched,
                 "label": label,
             })
-
         else:
-
             result.append({
                 "label": label,
                 "kind": "index",
@@ -753,14 +653,12 @@ def build_main_index_rows(rows):
 
 
 def indices_markdown(rows):
-
     lines = [
         "| 구분 | 종가/현재가 (전일 대비) | 기준 시각 | 비고 |",
         "|---|---|---|---|",
     ]
 
     for row in rows:
-
         lines.append(
             f"| {row['label']} | {row['text']} | "
             f"{row['date']} | {row['note']} |"
@@ -770,11 +668,9 @@ def indices_markdown(rows):
 
 
 def fetch_indices():
-
     state = st.session_state
 
     try:
-
         infos = get_toss_indicators()
         rows = build_toss_rows(infos)
 
@@ -788,10 +684,7 @@ def fetch_indices():
         )
 
     except Exception as error:
-
-        state["pm_indices_note"] = (
-            f"Toss 지수 조회 실패: {error}"
-        )
+        state["pm_indices_note"] = f"Toss 지수 조회 실패: {error}"
 
 
 # ---------------------------------------------------------------
@@ -799,50 +692,51 @@ def fetch_indices():
 # ---------------------------------------------------------------
 
 PREMARKET_PROMPT = """# 역할
-너는 경제신문 증권부 기자, 증권사 애널리스트, 네이버 SEO 전문가, 검색광고 마케터, 유튜브 PD를 겸하는 "MTNW 시황 에디터"다.
-국내외 최신 주식 뉴스를 조사해 MTNW 광고팀·콘텐츠팀·방송팀이 바로 쓸 수 있는 "한눈에 보이는 데일리 시황 리포트"를 작성한다.
+너는 경제신문 증권부 기자, 증권사 애널리스트, 네이버 SEO 전문가,
+검색광고 마케터, 유튜브 PD를 겸하는 "MTNW 시황 에디터"다.
+국내외 최신 주식 뉴스를 조사해 MTNW 광고팀·콘텐츠팀·방송팀이
+바로 쓸 수 있는 "한눈에 보이는 데일리 시황 리포트"를 작성한다.
 
-# 실행 모드: [장전] (개장 전 브리핑)
+# 실행 모드: [장전]
 - 중심 내용: 미국·유럽 마감 결과, 간밤 주요 이슈, 오늘 국내 증시 전망, 오늘 일정
-- 지수 표기: 미국·유럽 "종가" 기준 (휴장이면 사유 표기)
+- 지수 표기: 미국·유럽 종가 기준 (휴장이면 사유 표기)
 - 키워드: 개장 직후 검색 급증이 예상되는 키워드 우선
-- 섹션 강조: 해외 증시 → 핵심 이슈 → 글로벌 이슈 → 오늘 일정
 - 오늘 날짜: __TODAY__
 
-# 조사 원칙 (반드시 웹검색 사용)
+# 조사 원칙
 1. 오늘 날짜 기준 최근 24시간 이내 기사만 사용한다.
 2. 아래 출처 중 최소 10개 이상을 교차 검증한다.
    - 국내: 연합뉴스, 한국경제, 매일경제, 머니투데이, 서울경제, 뉴스1, 이데일리, 아시아경제
    - 해외: Reuters, Bloomberg, CNBC, WSJ, FT, AP
-   - 공시·지표: DART, 한국거래소, FOMC, CPI, PPI, PCE, 미국 국채금리, 달러인덱스, 국제유가, VIX
+   - 공시·지표: DART, 한국거래소, FOMC, CPI, PPI, PCE,
+     미국 국채금리, 달러인덱스, 국제유가, VIX
 3. 같은 뉴스는 하나로 통합한다. 기사 문장을 그대로 복사하지 않는다.
 4. 확인되지 않은 루머, 증시와 무관한 정치 뉴스는 제외한다.
-5. 확인 불가한 수치는 추정하지 말고 "확인 불가"로 표기한다. 허위 정보는 절대 작성하지 않는다.
+5. 확인 불가한 수치는 추정하지 말고 "확인 불가"로 표기한다.
 6. 한국 개인투자자 관점에서 우선순위를 정한다.
 
-# 지수 데이터 규칙 (중요)
+# 지수 데이터 규칙
 - 아래 [확인된 Toss 지수 데이터]를 기준 수치로 사용한다.
 - Toss 데이터에 없는 지수는 검색으로 별도 확인한다.
 - 검색으로도 확인되지 않으면 "확인 불가"로 표기한다.
-- Toss 데이터에 표시된 기준 시각을 확인하고, 최신 종가인지 실시간 지표인지 구분한다.
-- 비고에 미확인 또는 데이터 없음으로 표시된 항목은 임의로 수치를 채우지 않는다.
-- 비고에 "휴장/미갱신 가능"이 있는 지수는 검색으로 휴장 여부를 확인해 사유를 표기한다.
-- 표기 형식: 지수명 : 지수값 (전일 대비 ±포인트, ±%) — 소수점 둘째 자리까지
-- 대상: 다우, S&P500 현물, 나스닥 현물, 영국 FTSE100, 프랑스 CAC40, 독일 DAX, 유로스톡스50
+- 기준 시각을 확인하고 최신 종가인지 실시간 지표인지 구분한다.
+- 비고에 미확인 또는 데이터 없음으로 표시된 항목은 임의로 채우지 않는다.
+- 휴장/미갱신 가능 지수는 검색으로 휴장 여부를 확인한다.
+- 표기 형식: 지수명 : 지수값 (전일 대비 ±포인트, ±%)
+- 대상: 다우, S&P500 현물, 나스닥 현물, FTSE100, CAC40, DAX, 유로스톡스50
 - 선물 지수는 사용하지 않는다. S&P500은 반드시 현물 지수만 사용한다.
 
 [확인된 Toss 지수 데이터]
 __INDEX_TABLE__
 
-# 작성 원칙 (간결성 최우선)
-- 전체 분량: 모바일 스크롤 기준 3~4화면 내외로 압축한다.
-- 문장은 한 줄 요약형, 표·불릿 위주. 줄글은 "글로벌 이슈"에서만 2~3문장 허용.
-- 각 항목은 지정된 개수를 넘기지 않는다. 이모지는 섹션 제목과 핵심 포인트에만 사용한다.
-- 키워드는 네이버/구글 검색광고에 바로 넣을 수 있는 단어형만 쓴다. (O: 삼성전자, HBM, 환율 / X: 미국 금리 인상 가능성)
-- 주요 주장에는 [번호]로 출처를 붙이고, 하단 출처 목록과 연결한다.
-- 검색 과정이나 설명 문장은 쓰지 말고, 아래 형식의 최종 리포트만 출력한다.
+# 작성 원칙
+- 전체 분량: 모바일 스크롤 기준 3~4화면 내외
+- 문장은 한 줄 요약형, 표·불릿 위주
+- 키워드는 검색광고에 바로 넣을 수 있는 단어형만 사용
+- 주요 주장에는 [번호]로 출처를 붙이고 하단 출처 목록과 연결
+- 검색 과정 설명 없이 최종 리포트만 작성
 
-# 출력 형식
+# 상세 리포트 출력 형식
 
 ## 📅 YYYY년 MM월 DD일 (요일) | MTNW Market Intelligence [장전]
 > 📌 **오늘 한 줄 요약**: (20~30자)
@@ -853,142 +747,199 @@ __INDEX_TABLE__
 (7개 지수, 휴장 사유 표기)
 
 ### 2. 🔥 핵심 이슈 TOP5
-각 이슈는 아래 4줄 고정:
+각 이슈는 아래 4줄:
 - **제목** (시장 영향도 ⭐1~5 / 콘텐츠 점수 00/100)
 - 무슨 일: 1문장
 - 왜 중요한가 + 관련 종목·테마: 1문장
 - 향후 일정/리스크: 1문장 [출처번호]
 
 ### 3. 🔍 검색 키워드
-**실시간 TOP20** (단어형만)
+**실시간 TOP20**
 | 순위 | 키워드 | 검색 의도 | 광고/SEO 활용 |
+
 **급상승 TOP10**
-| 순위 | 키워드 | 급상승 이유(10자 내외) |
+| 순위 | 키워드 | 급상승 이유 |
 
 ### 4. 📈 종목·테마·수급
-- **언급 TOP10 종목**: 종목 | 이유(한 줄) | 방송 적합도(상/중/하)
+- **언급 TOP10 종목**: 종목 | 이유 | 방송 적합도
 - **강세 테마 TOP5**: 테마 | 관련 종목 | 지속 가능성
 - **돈 몰리는 업종 TOP5**: 업종 | 이유
-- **수급**: 외국인 / 기관 / 개인 순매수·순매도 요약, 매수 업종, 매도 업종 (각 1줄)
+- **수급**: 외국인 / 기관 / 개인 순매수·순매도 요약
 
-### 5. 🌐 글로벌 이슈 (미국·중국·일본·유럽·원자재·환율)
-각 2~3문장. 지표(금리, 달러인덱스, 유가, VIX 등) 수치 포함.
+### 5. 🌐 글로벌 이슈
+미국·중국·일본·유럽·원자재·환율 관련 내용을 각 2~3문장.
+금리, 달러인덱스, 유가, VIX 등 확인 가능한 수치 포함.
 
 ### 6. 📆 오늘 체크 일정
 | 시간 | 일정 | 시장 영향 |
 
 ### 7. 🎬 오늘 반드시 만들 콘텐츠 TOP3
-| 순위 | 뉴스 | 추천 형식 | 핵심 키워드 | 썸네일 문구(15자 이하) |
+| 순위 | 뉴스 | 추천 형식 | 핵심 키워드 | 썸네일 문구 |
 
-### 8. 💰 광고 키워드 (각 5개 이내)
-| 구분(브랜드/일반/정보탐색/급상승/롱테일) | 키워드 | 전환 가능성 |
+### 8. 💰 광고 키워드
+| 구분 | 키워드 | 전환 가능성 |
 
 ### 9. ✍️ 콘텐츠 아이디어
 - 유튜브 제목 5개
-- 블로그 제목 10개 (SEO형)
-- 숏폼 아이디어 10개 (한 줄씩)
+- 블로그 제목 10개
+- 숏폼 아이디어 10개
 - 카드뉴스 주제 5개
-- 썸네일 문구 20개 (15자 이하, 클릭 유도형)
+- 썸네일 문구 20개
 
 ### 10. 🎙️ 방송 추천 종목 TOP5 + 오늘 꼭 봐야 할 종목 TOP5
 | 종목 | 이유 | 주의점 |
 
 ### 11. 🔄 전일 대비 변화
-새로 등장 / 사라진 키워드, 강해진·약해진 테마 (각 1줄)
+새로 등장 / 사라진 키워드, 강해진·약해진 테마
 
 ### 12. 📎 출처
 | 번호 | 언론사 | 기사 제목 | 링크 |
 (최소 10개, 24시간 이내)
 
-# 최종 점검 (출력 전)
+# 최종 점검
 - 지수 수치와 휴장 여부를 재확인했는가?
 - 24시간 초과 기사나 미확인 루머가 없는가?
-- 모든 항목이 지정 개수 이내로 간결한가?
+- 지정 개수 이내로 간결한가?
 - 키워드가 전부 단어형인가?
-"""
 
-COMPRESS_PROMPT = """# 역할
-너는 바쁜 투자자가 5초 만에 읽는 "MTNW 시황 압축 에디터"다.
-아래 [원문 시황글]을 읽고, 핵심만 남긴 "한눈에 보이는 시황글"로 압축한다.
+=========================================================
+# 추가 출력 지시: 상세 리포트와 압축본을 한 번에 작성
+=========================================================
 
-# 압축 원칙
-1. 원문에 있는 사실만 사용한다. 새로운 수치·종목·뉴스를 추가하지 않는다.
-2. 원문에서 "확인 불가", "추정", "후보"로 표시된 내용은 단정하지 말고 그 표시를 유지한다.
-3. 전체 분량은 모바일 1화면 반(원문의 약 20~25%) 이내로 한다.
-4. 문장은 모두 한 줄(40자 내외). 설명·배경·반복 문장은 삭제한다.
-5. 핵심 포인트마다 반드시 관련 종목을 붙인다.
-6. 강조 규칙을 반드시 지킨다.
-   - 핵심 키워드·수치·종목명은 **굵게**
-   - 상승·호재는 🔺, 하락·악재는 🔻, 중립·관망은 ➖
-   - 가장 중요한 이슈 1개에는 🔥 표시
-7. 표는 지수표 1개만 허용한다. 나머지는 불릿으로 쓴다.
-8. 출처는 번호 없이 "출처: 언론사명 나열"로 한 줄만 쓴다. (링크 생략, 필요하면 요청 시 제공)
-9. 설명 문장 없이 아래 형식의 최종 결과만 출력한다.
+중요: API 호출을 한 번만 사용해야 한다.
+위의 상세 리포트를 먼저 완성한 다음, 그 리포트 내용만 활용해 압축본도 작성한다.
+상세 리포트와 압축본을 모두 하나의 응답에 출력한다.
+두 결과 사이에는 반드시 아래 구분자를 정확히 넣는다.
 
-# 출력 형식
+<<<MTNW_DETAIL_START>>>
 
-## 📅 YYYY년 MM월 DD일 (요일) | [장전/오후] 시황
+(위 출력 형식에 맞춘 상세 리포트 전체)
 
-> 📌 **한 줄 요약**: (20~30자, 가장 강한 메시지)
+<<<MTNW_DETAIL_END>>>
+
+<<<MTNW_SHORT_START>>>
+
+(아래 압축 규칙에 맞춘 압축 시황글)
+
+<<<MTNW_SHORT_END>>>
+
+구분자 바깥에는 설명이나 인사말을 쓰지 않는다.
+상세 리포트와 압축본의 내용이 서로 모순되지 않도록 한다.
+
+# 압축본 작성 규칙
+
+- 원문 상세 리포트에 있는 사실만 사용한다.
+- 새로운 수치·종목·뉴스를 추가하지 않는다.
+- "확인 불가", "추정", "후보"는 단정하지 않는다.
+- 모바일 1화면 반 이내, 상세 리포트의 약 20~25% 분량
+- 문장은 한 줄 40자 내외
+- 핵심 포인트마다 관련 종목을 붙인다.
+- 핵심 키워드·수치·종목명은 **굵게**
+- 상승·호재는 🔺, 하락·악재는 🔻, 중립·관망은 ➖
+- 가장 중요한 이슈 1개에는 🔥 표시
+- 표는 지수표 1개만 허용한다.
+
+## 압축본 출력 형식
+
+## 📅 YYYY년 MM월 DD일 (요일) | 장전 시황
+
+> 📌 **한 줄 요약**: (20~30자)
 
 ### 🌎 지수 한눈에
 | 지수 | 등락 |
 |---|---|
-(원문에서 미국 3대 지수 + 유럽 4개 + 필요 시 코스피·코스닥만. 형식: 수치 (±%) + 🔺/🔻. 기준일 표기. 수치 없으면 "확인 불가")
+(원문에 있는 미국 3대 지수 + 유럽 4개 + 필요 시 코스피·코스닥)
 
 ### 🔥 오늘의 핵심 포인트 TOP3
-각 포인트는 아래 3줄 고정:
-**① 핵심 문장 (15자 내외 제목)** 🔺/🔻/➖
-- 내용: 무슨 일인지 한 줄
-- 📌 관련 종목: **종목A**, **종목B**, **종목C**
-- ⏰ 체크: 일정 또는 리스크 한 줄
+각 포인트 3줄:
+**① 핵심 문장** 🔺/🔻/➖
+- 내용: 한 줄
+- 📌 관련 종목: 원문에 있는 종목만
+- ⏰ 체크: 일정 또는 리스크
 
 ### 📈 오늘 주목 종목 TOP5
 | 종목 | 한 줄 이유 | 주의 |
-|---|---|---|
-(종목명 굵게. 원문에 근거 있는 종목만)
 
 ### 🏷️ 강세·관심 테마
-**테마1** · **테마2** · **테마3** (최대 5개, 한 줄로 나열)
+최대 5개, 한 줄로 나열
 
 ### 💰 수급
-외국인 **○○** / 기관 **○○** / 개인 **○○** (원문에 없으면 "확인 불가")
+외국인 / 기관 / 개인
+원문에 없으면 "확인 불가"
 
 ### 📆 오늘·이번 주 일정
-- 시간 | 일정 (**핵심 일정은 굵게**, 최대 5개)
+최대 5개
 
 ### 🔍 핵심 키워드 10
-#키워드1 #키워드2 ... (단어형만, 원문에 등장한 키워드 위주)
+원문에 등장한 단어형 키워드
 
 ### ⚠️ 한 줄 주의
-(오늘 가장 큰 리스크 1문장)
+오늘 가장 큰 리스크 1문장
+"""
 
-# 압축 우선순위 (원문에서 이것만 살린다)
-1순위: 지수 등락, 시장을 움직인 핵심 이슈, 관련 종목
-2순위: 수급, 오늘 일정, 강세 테마
-3순위: 키워드
-삭제 대상: 콘텐츠 점수, 광고 키워드, 콘텐츠 아이디어, 썸네일 문구, 글로벌 이슈 상세, 전일 대비 변화, 출처 링크, 최종 점검, 각종 참고 문구
 
-# 최종 점검 (출력 전)
-- 원문에 없는 수치·종목을 넣지 않았는가?
-- 핵심 포인트마다 관련 종목이 붙어 있는가?
-- 굵게·이모지 강조가 핵심에만 쓰였는가?
-- 모든 문장이 한 줄인가?
+COMPRESS_PROMPT = """# 역할
+너는 바쁜 투자자가 5초 만에 읽는 "MTNW 시황 압축 에디터"다.
+아래 [원문 시황글]을 읽고 핵심만 남긴 시황글로 압축한다.
 
-# [원문 시황글]
+# 압축 원칙
+1. 원문에 있는 사실만 사용한다. 새로운 수치·종목·뉴스를 추가하지 않는다.
+2. "확인 불가", "추정", "후보"는 단정하지 않는다.
+3. 모바일 1화면 반 이내로 압축한다.
+4. 문장은 한 줄 40자 내외로 작성한다.
+5. 핵심 포인트마다 관련 종목을 붙인다.
+6. 핵심 키워드·수치·종목명은 **굵게** 표시한다.
+7. 상승은 🔺, 하락은 🔻, 중립은 ➖로 표시한다.
+8. 가장 중요한 이슈 1개에는 🔥 표시한다.
+9. 표는 지수표 1개만 허용한다.
+10. 출처는 "출처: 언론사명 나열" 한 줄로 작성한다.
+
+# 출력 형식
+
+## 📅 YYYY년 MM월 DD일 (요일) | 장전 시황
+
+> 📌 **한 줄 요약**: (20~30자)
+
+### 🌎 지수 한눈에
+| 지수 | 등락 |
+|---|---|
+(원문에 있는 미국 3대 지수 + 유럽 4개 + 필요 시 코스피·코스닥)
+
+### 🔥 오늘의 핵심 포인트 TOP3
+각 포인트 3줄:
+**① 핵심 문장** 🔺/🔻/➖
+- 내용: 한 줄
+- 📌 관련 종목: 원문에 있는 종목만
+- ⏰ 체크: 일정 또는 리스크
+
+### 📈 오늘 주목 종목 TOP5
+| 종목 | 한 줄 이유 | 주의 |
+
+### 🏷️ 강세·관심 테마
+최대 5개, 한 줄로 나열
+
+### 💰 수급
+외국인 / 기관 / 개인 (원문에 없으면 확인 불가)
+
+### 📆 오늘·이번 주 일정
+최대 5개
+
+### 🔍 핵심 키워드 10
+원문에 등장한 단어형 키워드
+
+### ⚠️ 한 줄 주의
+오늘 가장 큰 리스크 1문장
+
+# 원문 시황글
 __SOURCE__
 """
 
 
 # ---------------------------------------------------------------
-# Gemini 호출 (Google Search 선택 사용)
+# Gemini 응답 텍스트 추출
 # ---------------------------------------------------------------
 
 def extract_interaction_text(interaction):
-    """
-    Gemini Interactions 응답에서 최종 텍스트를 가져온다.
-    """
-
     output_text = getattr(interaction, "output_text", None)
 
     if output_text:
@@ -1000,7 +951,6 @@ def extract_interaction_text(interaction):
         texts = []
 
         for step in steps:
-
             step_text = getattr(step, "text", None)
 
             if step_text:
@@ -1018,8 +968,79 @@ def extract_interaction_text(interaction):
     return ""
 
 
-def call_gemini(prompt, search=False, max_tokens=8000):
+# ---------------------------------------------------------------
+# Gemini 오류 구분
+# ---------------------------------------------------------------
 
+def classify_gemini_error(error):
+    message = str(error)
+    lower = message.lower()
+
+    if (
+        "API_KEY_INVALID" in message
+        or "invalid api key" in lower
+        or "api key not valid" in lower
+    ):
+        return "invalid_key"
+
+    if (
+        "quota" in lower
+        or "limit: 0" in lower
+        or "daily" in lower
+        or "per day" in lower
+        or "resource_exhausted" in lower
+    ):
+        return "quota"
+
+    if (
+        "429" in message
+        or "rate limit" in lower
+        or "too many requests" in lower
+    ):
+        return "rate_limit"
+
+    if "403" in message or "permission_denied" in lower:
+        return "permission"
+
+    return "other"
+
+
+def friendly_gemini_error(error):
+    error_type = classify_gemini_error(error)
+
+    if error_type == "invalid_key":
+        return (
+            "Gemini API 키가 유효하지 않습니다. "
+            "Google AI Studio에서 API 키를 확인해 주세요."
+        )
+
+    if error_type == "quota":
+        return (
+            "Gemini 무료 API의 사용량 한도에 도달했습니다. "
+            "일일 또는 분당 할당량이 초기화된 후 다시 시도해 주세요. "
+            "이 오류는 자동 재시도하지 않습니다."
+        )
+
+    if error_type == "rate_limit":
+        return (
+            "Gemini 요청이 일시적으로 집중되어 제한되었습니다. "
+            "잠시 기다린 후 다시 시도해 주세요."
+        )
+
+    if error_type == "permission":
+        return (
+            "Gemini API 권한 오류입니다. "
+            "API 키와 모델 사용 가능 여부를 확인해 주세요."
+        )
+
+    return f"Gemini API 호출 실패: {str(error)[:500]}"
+
+
+# ---------------------------------------------------------------
+# Gemini 호출
+# ---------------------------------------------------------------
+
+def call_gemini(prompt, search=False, max_tokens=8000):
     client = get_gemini_client()
 
     generation_config = {
@@ -1030,56 +1051,78 @@ def call_gemini(prompt, search=False, max_tokens=8000):
     tools = []
 
     if search:
-        tools = [
-            {
-                "type": "google_search",
-            }
-        ]
+        tools = [{"type": "google_search"}]
 
-    try:
+    last_error = None
 
-        interaction = client.interactions.create(
-            model=GEMINI_MODEL,
-            input=prompt,
-            tools=tools,
-            generation_config=generation_config,
-        )
-
-    except Exception as error:
-
-        error_text = str(error)
-
-        if "API_KEY_INVALID" in error_text or "invalid api key" in error_text.lower():
-            raise RuntimeError(
-                "Gemini API 키가 유효하지 않습니다. "
-                "Google AI Studio에서 새 API 키를 확인해 주세요."
+    for attempt in range(2):
+        try:
+            interaction = client.interactions.create(
+                model=GEMINI_MODEL,
+                input=prompt,
+                tools=tools,
+                generation_config=generation_config,
             )
 
-        if "429" in error_text or "RESOURCE_EXHAUSTED" in error_text:
-            raise RuntimeError(
-                "Gemini 무료 API 사용 한도에 도달했거나 요청이 많습니다. "
-                "잠시 후 다시 시도해 주세요."
-            )
+            result = extract_interaction_text(interaction)
 
-        if "403" in error_text or "PERMISSION_DENIED" in error_text:
-            raise RuntimeError(
-                "Gemini API 권한 오류입니다. "
-                "Google AI Studio의 API 키와 모델 사용 가능 여부를 확인해 주세요."
-            )
+            if not result:
+                raise RuntimeError(
+                    "Gemini 응답이 비어 있습니다. "
+                    "모델 응답 또는 API 사용량을 확인해 주세요."
+                )
 
-        raise RuntimeError(
-            f"Gemini API 호출 실패: {error_text[:500]}"
+            return result
+
+        except Exception as error:
+            last_error = error
+            error_type = classify_gemini_error(error)
+
+            # 일일 할당량 초과는 재시도해도 해결되지 않으므로 중단
+            if error_type == "quota":
+                raise RuntimeError(friendly_gemini_error(error))
+
+            # 일시적인 분당 요청 제한에 한해서만 한 번 재시도
+            if error_type == "rate_limit" and attempt == 0:
+                time.sleep(GEMINI_RETRY_WAIT)
+                continue
+
+            raise RuntimeError(friendly_gemini_error(error))
+
+    raise RuntimeError(friendly_gemini_error(last_error))
+
+
+# ---------------------------------------------------------------
+# 상세 리포트 / 압축본 구분
+# ---------------------------------------------------------------
+
+def extract_dual_output(raw_text):
+    detail_start = "<<<MTNW_DETAIL_START>>>"
+    detail_end = "<<<MTNW_DETAIL_END>>>"
+    short_start = "<<<MTNW_SHORT_START>>>"
+    short_end = "<<<MTNW_SHORT_END>>>"
+
+    if not all(
+        marker in raw_text
+        for marker in (
+            detail_start,
+            detail_end,
+            short_start,
+            short_end,
         )
+    ):
+        return None, None
 
-    result = extract_interaction_text(interaction)
+    detail = raw_text.split(detail_start, 1)[1]
+    detail = detail.split(detail_end, 1)[0].strip()
 
-    if not result:
-        raise RuntimeError(
-            "Gemini 응답이 비어 있습니다. "
-            "모델 응답 또는 API 사용량을 확인해 주세요."
-        )
+    short = raw_text.split(short_start, 1)[1]
+    short = short.split(short_end, 1)[0].strip()
 
-    return result
+    if not detail or not short:
+        return None, None
+
+    return detail, short
 
 
 # ---------------------------------------------------------------
@@ -1087,7 +1130,6 @@ def call_gemini(prompt, search=False, max_tokens=8000):
 # ---------------------------------------------------------------
 
 def run_premarket(use_source_only=False):
-
     state = st.session_state
     now = datetime.datetime.now(KST)
 
@@ -1096,69 +1138,104 @@ def run_premarket(use_source_only=False):
         f"{now.day:02d}일 ({WEEKDAYS[now.weekday()]})"
     )
 
+    pasted = state.get("pm_pasted", "").strip()
+
     try:
+        # -------------------------------------------------------
+        # 직접 붙여넣은 원문: 압축만 실행 (Gemini 1회)
+        # -------------------------------------------------------
 
-        pasted = state.get("pm_pasted", "").strip()
+        if use_source_only:
+            if not pasted:
+                state["pm_note"] = (
+                    "압축할 원문을 먼저 붙여넣어 주세요."
+                )
+                return
 
-        if use_source_only and pasted:
-
-            source = pasted
-
-        else:
-
-            rows = state.get("pm_indices")
-
-            if not rows:
-
-                infos = get_toss_indicators()
-                rows = build_toss_rows(infos)
-
-                state["pm_indices"] = rows
-                state["pm_main_indices"] = build_main_index_rows(rows)
-
-            main_rows = state.get("pm_main_indices")
-
-            if not main_rows:
-                main_rows = build_main_index_rows(rows)
-
-            index_table = indices_markdown(main_rows)
-
-            prompt = (
-                PREMARKET_PROMPT
-                .replace("__TODAY__", today)
-                .replace("__INDEX_TABLE__", index_table)
-            )
-
-            with st.spinner(
-                "① Gemini Google 검색으로 장전 시황 원본 작성 중... (1~3분)"
-            ):
-
-                source = call_gemini(
-                    prompt,
-                    search=True,
-                    max_tokens=8000,
+            with st.spinner("Gemini로 원문을 압축하는 중..."):
+                short = call_gemini(
+                    COMPRESS_PROMPT.replace(
+                        "__SOURCE__",
+                        pasted,
+                    ),
+                    search=False,
+                    max_tokens=3000,
                 )
 
-            state["pm_long"] = source
+            state["pm_short"] = short
 
-        with st.spinner("② Gemini로 한눈에 보이는 시황글 압축 중..."):
-
-            short = call_gemini(
-                COMPRESS_PROMPT.replace("__SOURCE__", source),
-                search=False,
-                max_tokens=3000,
+            state["pm_note"] = (
+                f"압축 완료 · "
+                f"{datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
+                "Gemini API 1회 호출"
             )
 
+            return
+
+        # -------------------------------------------------------
+        # 장전 시황: 상세 리포트 + 압축본을 한 번에 생성
+        # -------------------------------------------------------
+
+        rows = state.get("pm_indices")
+
+        if not rows:
+            infos = get_toss_indicators()
+            rows = build_toss_rows(infos)
+
+            state["pm_indices"] = rows
+            state["pm_main_indices"] = build_main_index_rows(rows)
+
+        main_rows = state.get("pm_main_indices")
+
+        if not main_rows:
+            main_rows = build_main_index_rows(rows)
+
+        index_table = indices_markdown(main_rows)
+
+        prompt = (
+            PREMARKET_PROMPT
+            .replace("__TODAY__", today)
+            .replace("__INDEX_TABLE__", index_table)
+        )
+
+        with st.spinner(
+            "Gemini가 웹검색으로 상세 리포트와 압축본을 함께 작성 중입니다... "
+            "(약 1~3분)"
+        ):
+            raw_result = call_gemini(
+                prompt,
+                search=True,
+                max_tokens=12000,
+            )
+
+        detail, short = extract_dual_output(raw_result)
+
+        # -------------------------------------------------------
+        # 구분자 누락 등으로 응답 파싱에 실패한 경우
+        # 상세 결과를 보존하고 오류 안내
+        # -------------------------------------------------------
+
+        if detail is None or short is None:
+            state["pm_long"] = raw_result
+
+            state["pm_note"] = (
+                "상세 리포트는 생성됐지만 압축본 구분에 실패했습니다. "
+                "원본 상세 리포트 탭에서 결과를 확인해 주세요. "
+                "불필요한 추가 API 호출은 실행하지 않았습니다."
+            )
+
+            return
+
+        state["pm_long"] = detail
         state["pm_short"] = short
 
         state["pm_note"] = (
             f"생성 완료 · "
             f"{datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
-            "Gemini 3.8 Flash · 수치·종목·출처를 발행 전에 확인하세요."
+            "Gemini API 1회 호출 · 상세 리포트 + 압축본"
         )
 
     except Exception as error:
-
         state["pm_note"] = f"생성 실패: {error}"
 
 
@@ -1167,13 +1244,11 @@ def run_premarket(use_source_only=False):
 # ---------------------------------------------------------------
 
 def md_to_html(markdown):
-
     output = []
     in_table = False
     in_list = False
 
     def inline(text):
-
         safe = html.escape(text)
 
         return re.sub(
@@ -1183,11 +1258,9 @@ def md_to_html(markdown):
         )
 
     for line in markdown.splitlines():
-
         stripped = line.strip()
 
         if stripped.startswith("|"):
-
             cells = [
                 cell.strip()
                 for cell in stripped.split("|")[1:-1]
@@ -1204,12 +1277,10 @@ def md_to_html(markdown):
                 in_list = False
 
             if not in_table:
-
                 output.append(
                     "<table border='1' cellpadding='6' cellspacing='0' "
                     "style='border-collapse:collapse'>"
                 )
-
                 in_table = True
 
             output.append(
@@ -1220,7 +1291,6 @@ def md_to_html(markdown):
                 )
                 + "</tr>"
             )
-
             continue
 
         if in_table:
@@ -1228,7 +1298,6 @@ def md_to_html(markdown):
             in_table = False
 
         if stripped.startswith("- "):
-
             if not in_list:
                 output.append("<ul>")
                 in_list = True
@@ -1236,7 +1305,6 @@ def md_to_html(markdown):
             output.append(
                 f"<li>{inline(stripped[2:])}</li>"
             )
-
             continue
 
         if in_list:
@@ -1244,31 +1312,26 @@ def md_to_html(markdown):
             in_list = False
 
         if stripped.startswith("### "):
-
             output.append(
                 f"<h3>{inline(stripped[4:])}</h3>"
             )
 
         elif stripped.startswith("## "):
-
             output.append(
                 f"<h2>{inline(stripped[3:])}</h2>"
             )
 
         elif stripped.startswith("# "):
-
             output.append(
                 f"<h1>{inline(stripped[2:])}</h1>"
             )
 
         elif stripped.startswith("> "):
-
             output.append(
                 f"<p>{inline(stripped[2:])}</p>"
             )
 
         elif stripped:
-
             output.append(
                 f"<p>{inline(stripped)}</p>"
             )
@@ -1283,7 +1346,6 @@ def md_to_html(markdown):
 
 
 def copy_buttons(markdown):
-
     payload = json.dumps(
         {
             "md": markdown,
@@ -1343,14 +1405,13 @@ def copy_buttons(markdown):
 # ---------------------------------------------------------------
 
 def main():
-
     state = st.session_state
 
     st.title("MTNW 장전 시황")
 
     st.caption(
-        "해외 지수를 먼저 확인한 뒤, 웹검색으로 장전 브리핑 원본을 만들고 "
-        "한눈에 보이는 시황글로 압축합니다. "
+        "해외 지수를 먼저 확인한 뒤, 웹검색으로 장전 브리핑 원본과 "
+        "압축본을 한 번에 생성합니다. "
         "오후 시황은 왼쪽 메뉴의 'app'에서 작성합니다."
     )
 
@@ -1358,7 +1419,6 @@ def main():
     st.markdown("### 🌎 ① 해외 지수·지표 확인")
 
     with st.container(border=True):
-
         col_btn, col_note = st.columns(
             [1.6, 5],
             vertical_alignment="center",
@@ -1371,18 +1431,12 @@ def main():
         )
 
         if state.get("pm_indices_note"):
-
-            col_note.caption(
-                state["pm_indices_note"]
-            )
+            col_note.caption(state["pm_indices_note"])
 
         rows = state.get("pm_indices")
 
         if rows:
-
-            st.markdown(
-                indices_markdown(rows)
-            )
+            st.markdown(indices_markdown(rows))
 
             st.caption(
                 "※ Toss API에서 실제 반환된 값만 표시합니다. "
@@ -1391,7 +1445,6 @@ def main():
             )
 
         else:
-
             st.caption(
                 "아직 조회 전입니다. "
                 "생성 버튼을 누르면 지수도 자동으로 먼저 조회합니다."
@@ -1401,7 +1454,6 @@ def main():
     st.markdown("### ✨ ② 장전 시황 생성")
 
     with st.container(border=True):
-
         st.text_area(
             "원문 직접 붙여넣기 (선택)",
             key="pm_pasted",
@@ -1434,10 +1486,7 @@ def main():
         )
 
         if state.get("pm_note"):
-
-            col_c.caption(
-                state["pm_note"]
-            )
+            col_c.caption(state["pm_note"])
 
     # 3) 결과
     st.markdown("### 📝 ③ 결과")
@@ -1450,7 +1499,6 @@ def main():
     )
 
     with tab_short:
-
         st.text_area(
             "압축 시황글 (수정 가능 · 복사 버튼은 수정한 내용으로 복사됩니다)",
             key="pm_short",
@@ -1460,25 +1508,21 @@ def main():
         short = state.get("pm_short", "").strip()
 
         if short:
-
             copy_buttons(short)
 
             with st.container(border=True):
                 st.markdown(short)
 
     with tab_long:
-
         long_text = state.get("pm_long", "").strip()
 
         if long_text:
-
             copy_buttons(long_text)
 
             with st.container(border=True):
                 st.markdown(long_text)
 
         else:
-
             st.caption(
                 "원본 상세 리포트가 아직 없습니다. "
                 "직접 붙여넣은 원문만 압축한 경우에는 표시되지 않습니다."
