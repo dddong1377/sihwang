@@ -66,20 +66,81 @@ MAIN_INDEX_LABELS = (
 # API 응답에 추가 지표가 있을 때 이름을 연결하기 위한 별칭
 # 실제 응답에 해당 지표가 없으면 임의로 만들지 않음
 INDEX_NAME_ALIASES = {
-    "다우존스": ("다우존스", "다우 산업", "Dow Jones", "Dow Jones Industrial Average"),
-    "S&P500": ("S&P 500", "S&P500", "S&P 500 지수", "S&P 500 Index"),
-    "나스닥": ("나스닥", "나스닥 종합", "NASDAQ", "NASDAQ Composite"),
-    "영국 FTSE100": ("영국 FTSE100", "FTSE 100", "FTSE100"),
-    "프랑스 CAC40": ("프랑스 CAC40", "CAC 40", "CAC40"),
-    "독일 DAX": ("독일 DAX", "DAX", "DAX 40"),
-    "유로스톡스50": ("유로스톡스50", "Euro Stoxx 50", "EURO STOXX 50"),
-    "원/달러 환율": ("원/달러", "USD/KRW", "달러/원", "미국 달러"),
-    "WTI 유가": ("WTI", "WTI 유", "서부 텍사스산 원유"),
-    "미 10년물 금리(%)": ("미국 10년물", "미 10년물", "US 10Y", "미국 국채 10년"),
-    "VIX": ("VIX", "변동성지수"),
-    "달러인덱스": ("달러인덱스", "달러 지수", "Dollar Index", "DXY"),
-    "비트코인": ("비트코인", "Bitcoin", "BTC"),
-    "금": ("금", "Gold", "금 선물"),
+    "다우존스": (
+        "다우존스",
+        "다우 산업",
+        "Dow Jones",
+        "Dow Jones Industrial Average",
+    ),
+    "S&P500": (
+        "S&P 500",
+        "S&P500",
+        "S&P 500 지수",
+        "S&P 500 Index",
+    ),
+    "나스닥": (
+        "나스닥",
+        "나스닥 종합",
+        "NASDAQ",
+        "NASDAQ Composite",
+    ),
+    "영국 FTSE100": (
+        "영국 FTSE100",
+        "FTSE 100",
+        "FTSE100",
+    ),
+    "프랑스 CAC40": (
+        "프랑스 CAC40",
+        "CAC 40",
+        "CAC40",
+    ),
+    "독일 DAX": (
+        "독일 DAX",
+        "DAX",
+        "DAX 40",
+    ),
+    "유로스톡스50": (
+        "유로스톡스50",
+        "Euro Stoxx 50",
+        "EURO STOXX 50",
+    ),
+    "원/달러 환율": (
+        "원/달러",
+        "USD/KRW",
+        "달러/원",
+        "미국 달러",
+    ),
+    "WTI 유가": (
+        "WTI",
+        "WTI 유",
+        "서부 텍사스산 원유",
+    ),
+    "미 10년물 금리(%)": (
+        "미국 10년물",
+        "미 10년물",
+        "US 10Y",
+        "미국 국채 10년",
+    ),
+    "VIX": (
+        "VIX",
+        "변동성지수",
+    ),
+    "달러인덱스": (
+        "달러인덱스",
+        "달러 지수",
+        "Dollar Index",
+        "DXY",
+    ),
+    "비트코인": (
+        "비트코인",
+        "Bitcoin",
+        "BTC",
+    ),
+    "금": (
+        "금",
+        "Gold",
+        "금 선물",
+    ),
 }
 
 
@@ -108,13 +169,16 @@ def login():
 
     def verify():
         entered = st.session_state.get("pw", "").encode()
+
         st.session_state["pw_ok"] = hmac.compare_digest(
             entered,
             expected.encode(),
         )
+
         st.session_state["pw"] = ""
 
     st.title("MTNW 시황")
+
     st.text_input(
         "비밀번호",
         type="password",
@@ -208,7 +272,7 @@ def get_toss_indicators():
     displayName
     price.latestPrice
     price.basePrice
-    miniChart.tradingEnd
+    miniChart.candles[]
     """
 
     response = requests.get(
@@ -266,14 +330,26 @@ def safe_float(value):
         return None
 
 
-def format_timestamp(value):
+# ---------------------------------------------------------------
+# [수정] 실제 캔들 시간 추출
+# ---------------------------------------------------------------
+
+def parse_timestamp(value):
     """
-    Toss tradingEnd 값이 Unix timestamp 또는 날짜 문자열인 경우 변환.
-    확인할 수 없는 형식이면 '-' 반환.
+    다양한 형식의 날짜·시간 데이터를 KST로 변환한다.
+
+    지원 형식:
+    - Unix timestamp (초)
+    - Unix timestamp (밀리초)
+    - ISO 날짜 문자열
+    - YYYYMMDD
+    - YYYYMMDDHHMMSS
+
+    미래 시각은 실제 업데이트 시각으로 인정하지 않는다.
     """
 
-    if value is None:
-        return "-"
+    if value is None or isinstance(value, bool):
+        return None
 
     try:
         if isinstance(value, (int, float)):
@@ -288,16 +364,31 @@ def format_timestamp(value):
                 tz=KST,
             )
 
-            return dt.strftime("%Y-%m-%d %H:%M")
-
-        if isinstance(value, str):
+        elif isinstance(value, str):
             value = value.strip()
 
             if not value:
-                return "-"
+                return None
 
-            # ISO 날짜 문자열 대응
-            try:
+            # 숫자형 timestamp 문자열
+            if re.fullmatch(r"\d{10,13}", value):
+                return parse_timestamp(int(value))
+
+            # YYYYMMDD
+            elif re.fullmatch(r"\d{8}", value):
+                dt = datetime.datetime.strptime(
+                    value,
+                    "%Y%m%d",
+                ).replace(tzinfo=KST)
+
+            # YYYYMMDDHHMMSS
+            elif re.fullmatch(r"\d{14}", value):
+                dt = datetime.datetime.strptime(
+                    value,
+                    "%Y%m%d%H%M%S",
+                ).replace(tzinfo=KST)
+
+            else:
                 dt = datetime.datetime.fromisoformat(
                     value.replace("Z", "+00:00")
                 )
@@ -307,15 +398,103 @@ def format_timestamp(value):
                 else:
                     dt = dt.astimezone(KST)
 
-                return dt.strftime("%Y-%m-%d %H:%M")
+        else:
+            return None
 
-            except ValueError:
-                return value
+        now = datetime.datetime.now(KST)
 
-    except Exception:
-        pass
+        # 2000년 이전 데이터 제외
+        if dt.year < 2000:
+            return None
 
-    return "-"
+        # 현재보다 2분 이상 미래인 시각 제외
+        if dt > now + datetime.timedelta(minutes=2):
+            return None
+
+        return dt
+
+    except (
+        ValueError,
+        TypeError,
+        OverflowError,
+        OSError,
+    ):
+        return None
+
+
+def find_candle_timestamps(value, results=None):
+    """
+    캔들 데이터 내부에서 시간 필드를 재귀적으로 탐색한다.
+
+    Toss 응답의 필드명이 확정되지 않은 상황을 고려해
+    일반적으로 사용되는 여러 시간 필드명을 탐색한다.
+    """
+
+    if results is None:
+        results = []
+
+    timestamp_keys = {
+        "timestamp",
+        "time",
+        "datetime",
+        "date",
+        "candleTime",
+        "candleDate",
+        "tradingTime",
+        "tradingDate",
+        "startTime",
+        "endTime",
+        "startDate",
+        "endDate",
+        "baseDateTime",
+        "localDateTime",
+        "tradeDate",
+        "chartTime",
+        "x",
+        "t",
+    }
+
+    if isinstance(value, dict):
+
+        for key, item in value.items():
+
+            if str(key) in timestamp_keys:
+                dt = parse_timestamp(item)
+
+                if dt is not None:
+                    results.append(dt)
+
+            if isinstance(item, (dict, list)):
+                find_candle_timestamps(
+                    item,
+                    results,
+                )
+
+    elif isinstance(value, list):
+
+        for item in value:
+
+            if isinstance(item, (dict, list)):
+                find_candle_timestamps(
+                    item,
+                    results,
+                )
+
+    return results
+
+
+def format_timestamp(value):
+    """
+    일반 날짜·시간 값을 KST 기준으로 변환한다.
+    확인할 수 없는 값은 확인 불가로 표시한다.
+    """
+
+    dt = parse_timestamp(value)
+
+    if dt is None:
+        return "확인 불가"
+
+    return dt.strftime("%Y-%m-%d %H:%M")
 
 
 def get_info_name(info):
@@ -340,13 +519,40 @@ def get_info_price(info):
 
 
 def get_info_timestamp(info):
+    """
+    실제 캔들 데이터의 마지막 유효 시각을 반환한다.
+
+    중요:
+    miniChart.tradingEnd는 거래 종료 예정 시각일 수 있으므로
+    실제 업데이트 시각으로 사용하지 않는다.
+
+    candles 내부에서 실제 시간 필드를 찾지 못하면
+    '확인 불가'로 표시한다.
+    """
+
     mini_chart = info.get("miniChart") or {}
 
     if not isinstance(mini_chart, dict):
-        return "-"
+        return "확인 불가"
 
-    return format_timestamp(mini_chart.get("tradingEnd"))
+    candles = mini_chart.get("candles")
 
+    if not isinstance(candles, list) or not candles:
+        return "확인 불가"
+
+    timestamps = find_candle_timestamps(candles)
+
+    if not timestamps:
+        return "확인 불가"
+
+    latest_timestamp = max(timestamps)
+
+    return latest_timestamp.strftime("%Y-%m-%d %H:%M")
+
+
+# ---------------------------------------------------------------
+# Toss 데이터 행 구성
+# ---------------------------------------------------------------
 
 def build_toss_rows(infos):
     """
@@ -357,6 +563,7 @@ def build_toss_rows(infos):
     by_code = {}
 
     for info in infos:
+
         if not isinstance(info, dict):
             continue
 
@@ -368,6 +575,7 @@ def build_toss_rows(infos):
     rows = []
 
     for label, code, digits, kind in TOSS_INDEX_ITEMS:
+
         info = by_code.get(code)
 
         if not info:
@@ -375,7 +583,7 @@ def build_toss_rows(infos):
                 "label": label,
                 "kind": kind,
                 "text": "확인 불가",
-                "date": "-",
+                "date": "확인 불가",
                 "note": "Toss 응답에서 해당 지수 미확인",
                 "code": code,
             })
@@ -385,14 +593,17 @@ def build_toss_rows(infos):
         date_text = get_info_timestamp(info)
 
         if latest is None:
+
             text = "확인 불가"
             note = "현재가 데이터 없음"
 
         elif base is None or base == 0:
+
             text = f"{latest:,.{digits}f} (등락 확인 불가)"
             note = "기준가 데이터 없음"
 
         else:
+
             change = latest - base
             pct = (change / base) * 100
 
@@ -406,6 +617,7 @@ def build_toss_rows(infos):
                 f"{latest:,.{digits}f} "
                 f"({change:+,.{digits}f}, {pct:+.2f}%) {arrow}"
             )
+
             note = ""
 
         rows.append({
@@ -418,9 +630,13 @@ def build_toss_rows(infos):
         })
 
     # 응답에 포함되어 있으나 고정 목록에는 없는 지표도 표시
-    known_codes = {item[1] for item in TOSS_INDEX_ITEMS}
+    known_codes = {
+        item[1]
+        for item in TOSS_INDEX_ITEMS
+    }
 
     for info in infos:
+
         if not isinstance(info, dict):
             continue
 
@@ -438,14 +654,17 @@ def build_toss_rows(infos):
         date_text = get_info_timestamp(info)
 
         if latest is None:
+
             text = "확인 불가"
             note = "현재가 데이터 없음"
 
         elif base is None or base == 0:
+
             text = f"{latest:,.2f} (등락 확인 불가)"
             note = "기준가 데이터 없음"
 
         else:
+
             change = latest - base
             pct = (change / base) * 100
 
@@ -459,6 +678,7 @@ def build_toss_rows(infos):
                 f"{latest:,.2f} "
                 f"({change:+,.2f}, {pct:+.2f}%) {arrow}"
             )
+
             note = ""
 
         rows.append({
@@ -490,20 +710,22 @@ def build_main_index_rows(rows):
         for row in rows
     }
 
-    # 코드 기반으로 이미 조회된 항목
     for label in MAIN_INDEX_LABELS:
+
         found = row_by_label.get(label)
 
         if found:
             result.append(found)
             continue
 
-        # API의 displayName이 고정 표시명과 다를 때 별칭으로 탐색
         aliases = INDEX_NAME_ALIASES.get(label, ())
         matched = None
 
         for row in rows:
-            row_name = str(row.get("label", "")).lower()
+
+            row_name = str(
+                row.get("label", "")
+            ).lower()
 
             if any(
                 alias.lower() == row_name
@@ -513,16 +735,19 @@ def build_main_index_rows(rows):
                 break
 
         if matched:
+
             result.append({
                 **matched,
                 "label": label,
             })
+
         else:
+
             result.append({
                 "label": label,
                 "kind": "index",
                 "text": "확인 불가",
-                "date": "-",
+                "date": "확인 불가",
                 "note": "Toss API 응답에서 해당 지수 미확인",
                 "code": "-",
             })
@@ -531,12 +756,14 @@ def build_main_index_rows(rows):
 
 
 def indices_markdown(rows):
+
     lines = [
         "| 구분 | 종가/현재가 (전일 대비) | 기준 시각 | 비고 |",
         "|---|---|---|---|",
     ]
 
     for row in rows:
+
         lines.append(
             f"| {row['label']} | {row['text']} | "
             f"{row['date']} | {row['note']} |"
@@ -546,9 +773,11 @@ def indices_markdown(rows):
 
 
 def fetch_indices():
+
     state = st.session_state
 
     try:
+
         infos = get_toss_indicators()
         rows = build_toss_rows(infos)
 
@@ -562,7 +791,10 @@ def fetch_indices():
         )
 
     except Exception as error:
-        state["pm_indices_note"] = f"Toss 지수 조회 실패: {error}"
+
+        state["pm_indices_note"] = (
+            f"Toss 지수 조회 실패: {error}"
+        )
 
 
 # ---------------------------------------------------------------
@@ -755,6 +987,7 @@ __SOURCE__
 # ---------------------------------------------------------------
 
 def call_claude(prompt, search=False, max_tokens=8000):
+
     key = secret("ANTHROPIC_API_KEY")
 
     if not key:
@@ -779,6 +1012,7 @@ def call_claude(prompt, search=False, max_tokens=8000):
     }
 
     if search:
+
         body["tools"] = [
             {
                 "type": "web_search_20250305",
@@ -790,6 +1024,7 @@ def call_claude(prompt, search=False, max_tokens=8000):
     texts = []
 
     for _ in range(4):
+
         response = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={
@@ -802,6 +1037,7 @@ def call_claude(prompt, search=False, max_tokens=8000):
         )
 
         if response.status_code != 200:
+
             raise RuntimeError(
                 f"HTTP {response.status_code}: "
                 f"{response.text[:400]}"
@@ -817,12 +1053,14 @@ def call_claude(prompt, search=False, max_tokens=8000):
         )
 
         if data.get("stop_reason") == "pause_turn":
+
             body["messages"] = body["messages"] + [
                 {
                     "role": "assistant",
                     "content": content,
                 }
             ]
+
             continue
 
         break
@@ -857,15 +1095,19 @@ def run_premarket(use_source_only=False):
     )
 
     try:
+
         pasted = state.get("pm_pasted", "").strip()
 
         if use_source_only and pasted:
+
             source = pasted
 
         else:
+
             rows = state.get("pm_indices")
 
             if not rows:
+
                 infos = get_toss_indicators()
                 rows = build_toss_rows(infos)
 
@@ -888,6 +1130,7 @@ def run_premarket(use_source_only=False):
             with st.spinner(
                 "① 웹검색으로 장전 시황 원본 작성 중... (1~3분)"
             ):
+
                 source = call_claude(
                     prompt,
                     search=True,
@@ -897,6 +1140,7 @@ def run_premarket(use_source_only=False):
             state["pm_long"] = source
 
         with st.spinner("② 한눈에 보이는 시황글로 압축 중..."):
+
             short = call_claude(
                 COMPRESS_PROMPT.replace("__SOURCE__", source),
                 search=False,
@@ -912,6 +1156,7 @@ def run_premarket(use_source_only=False):
         )
 
     except Exception as error:
+
         state["pm_note"] = f"생성 실패: {error}"
 
 
@@ -920,12 +1165,15 @@ def run_premarket(use_source_only=False):
 # ---------------------------------------------------------------
 
 def md_to_html(markdown):
+
     output = []
     in_table = False
     in_list = False
 
     def inline(text):
+
         safe = html.escape(text)
+
         return re.sub(
             r"\*\*(.*?)\*\*",
             r"<b>\1</b>",
@@ -933,9 +1181,11 @@ def md_to_html(markdown):
         )
 
     for line in markdown.splitlines():
+
         stripped = line.strip()
 
         if stripped.startswith("|"):
+
             cells = [
                 cell.strip()
                 for cell in stripped.split("|")[1:-1]
@@ -952,10 +1202,12 @@ def md_to_html(markdown):
                 in_list = False
 
             if not in_table:
+
                 output.append(
                     "<table border='1' cellpadding='6' cellspacing='0' "
                     "style='border-collapse:collapse'>"
                 )
+
                 in_table = True
 
             output.append(
@@ -966,6 +1218,7 @@ def md_to_html(markdown):
                 )
                 + "</tr>"
             )
+
             continue
 
         if in_table:
@@ -973,6 +1226,7 @@ def md_to_html(markdown):
             in_table = False
 
         if stripped.startswith("- "):
+
             if not in_list:
                 output.append("<ul>")
                 in_list = True
@@ -980,6 +1234,7 @@ def md_to_html(markdown):
             output.append(
                 f"<li>{inline(stripped[2:])}</li>"
             )
+
             continue
 
         if in_list:
@@ -987,26 +1242,31 @@ def md_to_html(markdown):
             in_list = False
 
         if stripped.startswith("### "):
+
             output.append(
                 f"<h3>{inline(stripped[4:])}</h3>"
             )
 
         elif stripped.startswith("## "):
+
             output.append(
                 f"<h2>{inline(stripped[3:])}</h2>"
             )
 
         elif stripped.startswith("# "):
+
             output.append(
                 f"<h1>{inline(stripped[2:])}</h1>"
             )
 
         elif stripped.startswith("> "):
+
             output.append(
                 f"<p>{inline(stripped[2:])}</p>"
             )
 
         elif stripped:
+
             output.append(
                 f"<p>{inline(stripped)}</p>"
             )
@@ -1021,6 +1281,7 @@ def md_to_html(markdown):
 
 
 def copy_buttons(markdown):
+
     payload = json.dumps(
         {
             "md": markdown,
@@ -1080,6 +1341,7 @@ def copy_buttons(markdown):
 # ---------------------------------------------------------------
 
 def main():
+
     state = st.session_state
 
     st.title("MTNW 장전 시황")
@@ -1094,6 +1356,7 @@ def main():
     st.markdown("### 🌎 ① 해외 지수·지표 확인")
 
     with st.container(border=True):
+
         col_btn, col_note = st.columns(
             [1.6, 5],
             vertical_alignment="center",
@@ -1106,6 +1369,7 @@ def main():
         )
 
         if state.get("pm_indices_note"):
+
             col_note.caption(
                 state["pm_indices_note"]
             )
@@ -1113,14 +1377,19 @@ def main():
         rows = state.get("pm_indices")
 
         if rows:
-            st.markdown(indices_markdown(rows))
+
+            st.markdown(
+                indices_markdown(rows)
+            )
 
             st.caption(
                 "※ Toss API에서 실제 반환된 값만 표시합니다. "
-                "응답에 없는 지수는 확인 불가로 표시됩니다."
+                "응답에 없는 지수는 확인 불가로 표시됩니다. "
+                "기준 시각은 캔들 데이터에서 확인되는 시간만 표시합니다."
             )
 
         else:
+
             st.caption(
                 "아직 조회 전입니다. "
                 "생성 버튼을 누르면 지수도 자동으로 먼저 조회합니다."
@@ -1130,6 +1399,7 @@ def main():
     st.markdown("### ✨ ② 장전 시황 생성")
 
     with st.container(border=True):
+
         st.text_area(
             "원문 직접 붙여넣기 (선택)",
             key="pm_pasted",
@@ -1162,6 +1432,7 @@ def main():
         )
 
         if state.get("pm_note"):
+
             col_c.caption(
                 state["pm_note"]
             )
@@ -1177,6 +1448,7 @@ def main():
     )
 
     with tab_short:
+
         st.text_area(
             "압축 시황글 (수정 가능 · 복사 버튼은 수정한 내용으로 복사됩니다)",
             key="pm_short",
@@ -1186,21 +1458,25 @@ def main():
         short = state.get("pm_short", "").strip()
 
         if short:
+
             copy_buttons(short)
 
             with st.container(border=True):
                 st.markdown(short)
 
     with tab_long:
+
         long_text = state.get("pm_long", "").strip()
 
         if long_text:
+
             copy_buttons(long_text)
 
             with st.container(border=True):
                 st.markdown(long_text)
 
         else:
+
             st.caption(
                 "원본 상세 리포트가 아직 없습니다. "
                 "직접 붙여넣은 원문만 압축한 경우에는 표시되지 않습니다."
