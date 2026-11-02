@@ -2942,6 +2942,89 @@ def fetch_strong_themes(limit=5):
     return fallback[:limit]
 
 
+def generate_core_keywords(snapshot=None):
+    """당일 시황 데이터에서 검색용 핵심 해시태그를 자동 구성합니다.
+
+    우선순위: 토스증권 강세 산업 → 급등·급락 주요 종목 → 이슈/뉴스에서
+    확인되는 산업 키워드 → 시장 기본 키워드. 실제 검색량 순위는 아닙니다.
+    """
+    state = st.session_state
+    snapshot = snapshot or state.get("snapshot", {}) or {}
+    tags = []
+    seen = set()
+
+    def add_tag(value):
+        value = re.sub(r"\s+", "", str(value or "")).strip("#")
+        if not value:
+            return
+        tag = "#" + value
+        key = tag.casefold()
+        if key not in seen and len(tags) < 12:
+            seen.add(key)
+            tags.append(tag)
+
+    # 시장 기본 키워드
+    add_tag("코스피")
+    add_tag("코스닥")
+
+    # 토스증권 강세 산업 상위 3개를 우선 반영
+    sector_items = [
+        item for item in (state.get("sector_items") or [])
+        if isinstance(item, dict) and item.get("name")
+    ]
+    sector_items.sort(
+        key=lambda row: (
+            num(row.get("rank")) if num(row.get("rank")) is not None else 10**9,
+            -(num(row.get("pct")) or 0),
+        )
+    )
+    for item in sector_items[:3]:
+        add_tag(item.get("name"))
+
+    # 당일 급등·급락 종목 중 상위 종목명
+    for key in ("gainers", "losers"):
+        for stock in (snapshot.get(key) or [])[:3]:
+            if isinstance(stock, dict):
+                add_tag(stock.get("name"))
+
+    # 주요 이슈 제목·내용과 종목 뉴스에서 실제 언급된 산업 테마 추출
+    source_texts = []
+    for i in range(1, 4):
+        source_texts.extend([
+            str(state.get(f"is{i}t", "")),
+            str(state.get(f"is{i}c", "")),
+        ])
+    for key in ("gainers", "losers"):
+        for stock in snapshot.get(key, []) or []:
+            if not isinstance(stock, dict):
+                continue
+            source_texts.append(str(stock.get("theme", "")))
+            for headline in stock.get("headlines", []) or []:
+                if isinstance(headline, dict):
+                    source_texts.append(str(headline.get("title", "")))
+
+    theme_scores = {}
+    combined = " ".join(source_texts)
+    for label, pattern in THEMES:
+        matches = pattern.findall(combined)
+        if matches:
+            theme_scores[label] = len(matches)
+
+    for label, _score in sorted(
+        theme_scores.items(), key=lambda item: (-item[1], item[0])
+    ):
+        add_tag(label)
+
+    # 검색 맥락을 보완하는 종목 유형 키워드
+    if snapshot.get("gainers"):
+        add_tag("급등주")
+    if snapshot.get("losers"):
+        add_tag("급락주")
+    add_tag("주식시황")
+
+    return " ".join(tags[:12])
+
+
 def theme_hashtag(name):
     """섹터명을 해시태그로. 공백·슬래시는 제거합니다."""
 
@@ -4511,6 +4594,13 @@ def main():
                         duration,
                         universe,
                     )
+                    # 시세를 새로 조회할 때 당일 데이터 기준 핵심 키워드도 갱신합니다.
+                    st.session_state["keywords"] = generate_core_keywords(
+                        st.session_state["snapshot"]
+                    )
+                    st.session_state["keywords_note"] = (
+                        "시세 조회 데이터 기준 자동 생성 · 필요하면 직접 수정하세요."
+                    )
 
                     st.session_state["duration"] = duration
                     st.session_state["universe"] = universe
@@ -4905,11 +4995,23 @@ def main():
                 key="checks",
             )
 
+            st.session_state.setdefault(
+                "keywords", "#코스피 #코스닥 #급등주 #급락주 #주식시황"
+            )
+            keyword_col, keyword_note_col = st.columns([1.6, 5], vertical_alignment="center")
+            if keyword_col.button("🔄 핵심 키워드 자동 생성", key="keywords_btn"):
+                st.session_state["keywords"] = generate_core_keywords(snapshot)
+                st.session_state["keywords_note"] = (
+                    "당일 강세 산업·급등/급락 종목·주요 이슈를 반영했습니다."
+                )
+            if st.session_state.get("keywords_note"):
+                keyword_note_col.caption(st.session_state["keywords_note"])
+
             st.text_area(
                 "핵심 키워드",
                 key="keywords",
-                value="#코스피 #코스닥 #급등주 #급락주 #주식시황",
                 height=68,
+                help="당일 시장 데이터로 자동 생성한 뒤 직접 수정할 수 있습니다.",
             )
 
         st.subheader("시황글 미리보기")
