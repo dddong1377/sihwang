@@ -9,11 +9,45 @@ from zoneinfo import ZoneInfo
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+from google import genai
 
 st.set_page_config(page_title="MTNW 장전 시황", layout="wide")
 
 KST = ZoneInfo("Asia/Seoul")
 WEEKDAYS = "월화수목금토일"
+
+# ---------------------------------------------------------------
+# Gemini API 설정
+# ---------------------------------------------------------------
+
+GEMINI_MODEL = "models/gemini-3.8-flash"
+
+
+def get_gemini_api_key():
+    api_key = ""
+
+    try:
+        api_key = st.secrets.get("GEMINI_API_KEY", "")
+    except Exception:
+        pass
+
+    if not api_key:
+        api_key = os.environ.get("GEMINI_API_KEY", "")
+
+    return str(api_key).strip()
+
+
+def get_gemini_client():
+    api_key = get_gemini_api_key()
+
+    if not api_key:
+        raise RuntimeError(
+            "Gemini API 키가 설정되지 않았습니다. "
+            "Streamlit Secrets에 GEMINI_API_KEY를 등록해 주세요."
+        )
+
+    return genai.Client(api_key=api_key)
+
 
 # ---------------------------------------------------------------
 # Toss 대시보드 지수 API 설정
@@ -39,34 +73,25 @@ TOSS_HEADERS = {
 # ---------------------------------------------------------------
 # 표시할 지수 목록
 # ---------------------------------------------------------------
-# 선물 지수는 전부 제외
-# S&P500은 현물 코드 SPX.CBI만 사용
-# 러셀 2000 선물도 제외
-# ---------------------------------------------------------------
 
 TOSS_INDEX_ITEMS = (
-    # 국내 증시 - 상단 배치
     ("코스피", "KGG01P", 2, "extra"),
     ("코스닥", "QGG01P", 2, "extra"),
 
-    # 미국 주요 지수
     ("다우존스", "DJI.DJI", 2, "index"),
     ("S&P500", "SPX.CBI", 2, "index"),
     ("나스닥", "COMP.NAI", 2, "index"),
 
-    # 기타 주요 지표
     ("필라델피아 반도체", "SOX.NAI", 2, "extra"),
     ("VIX", "RGI..VIX", 2, "extra"),
 )
 
-# 선물 지수 코드 차단 목록
 EXCLUDED_FUTURES_CODES = {
     "RFU.NQc1",
     "RFU.ESc1",
     "RFU.RTYc1",
 }
 
-# 해외 주요 지수 표에 표시할 항목
 MAIN_INDEX_LABELS = (
     "다우존스",
     "S&P500",
@@ -77,7 +102,6 @@ MAIN_INDEX_LABELS = (
     "유로스톡스50",
 )
 
-# API 응답에 추가 지표가 있을 때 이름을 연결하기 위한 별칭
 INDEX_NAME_ALIASES = {
     "다우존스": (
         "다우존스",
@@ -214,17 +238,6 @@ if not login():
 # ---------------------------------------------------------------
 
 def toss_session_headers():
-    """
-    Toss 웹 세션이 필요한 경우 Streamlit Secrets의 쿠키 등을 사용한다.
-
-    Secrets 설정 예시:
-    TOSS_INDICATOR_COOKIE = "브라우저에서 확인한 Cookie 값"
-    TOSS_INDICATOR_XSRF_TOKEN = "필요한 경우 XSRF 토큰"
-    TOSS_INDICATOR_APP_VERSION = "필요한 경우 앱 버전"
-    TOSS_INDICATOR_BROWSER_TAB_ID = "필요한 경우 브라우저 탭 ID"
-
-    쿠키나 인증값은 코드에 직접 입력하지 않는 것을 권장한다.
-    """
 
     headers = dict(TOSS_HEADERS)
 
@@ -273,20 +286,6 @@ def toss_session_headers():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_toss_indicators():
-    """
-    Toss 대시보드 지수 API 조회.
-
-    확인된 응답 구조:
-    result.majorIndicatorInfos[]
-
-    주요 필드:
-    code
-    name
-    displayName
-    price.latestPrice
-    price.basePrice
-    miniChart.candles[]
-    """
 
     response = requests.get(
         TOSS_INDICATOR_URL,
@@ -348,18 +347,6 @@ def safe_float(value):
 # ---------------------------------------------------------------
 
 def parse_timestamp(value):
-    """
-    다양한 형식의 날짜·시간 데이터를 KST로 변환한다.
-
-    지원 형식:
-    - Unix timestamp (초)
-    - Unix timestamp (밀리초)
-    - ISO 날짜 문자열
-    - YYYYMMDD
-    - YYYYMMDDHHMMSS
-
-    미래 시각은 실제 업데이트 시각으로 인정하지 않는다.
-    """
 
     if value is None or isinstance(value, bool):
         return None
@@ -511,12 +498,6 @@ def get_info_price(info):
 
 
 def get_info_timestamp(info):
-    """
-    실제 캔들 데이터의 마지막 유효 시각을 반환한다.
-
-    miniChart.tradingEnd는 거래 종료 예정 시각일 수 있으므로
-    실제 업데이트 시각으로 사용하지 않는다.
-    """
 
     mini_chart = info.get("miniChart") or {}
 
@@ -543,12 +524,6 @@ def get_info_timestamp(info):
 # ---------------------------------------------------------------
 
 def is_futures_index(info):
-    """
-    API가 고정 목록 외의 지수를 추가로 반환하더라도
-    선물 지수는 화면에 표시하지 않는다.
-
-    RFU 계열 코드 및 선물 명칭을 가진 지수 제외.
-    """
 
     code = str(info.get("code") or "").strip()
     name = get_info_name(info).lower()
@@ -576,11 +551,6 @@ def is_futures_index(info):
 # ---------------------------------------------------------------
 
 def build_toss_rows(infos):
-    """
-    API에서 실제로 반환된 지수만 데이터로 사용한다.
-
-    선물 지수는 고정 목록과 추가 응답 모두에서 제외한다.
-    """
 
     by_code = {}
 
@@ -658,8 +628,6 @@ def build_toss_rows(infos):
             "code": code,
         })
 
-    # 고정 목록에 없는 추가 지표 표시
-    # 단, 선물 지수는 제외
     known_codes = {
         item[1]
         for item in TOSS_INDEX_ITEMS
@@ -1013,97 +981,103 @@ __SOURCE__
 
 
 # ---------------------------------------------------------------
-# Claude 호출 (웹검색 도구 선택 사용)
+# Gemini 호출 (Google Search 선택 사용)
 # ---------------------------------------------------------------
 
-def call_claude(prompt, search=False, max_tokens=8000):
+def extract_interaction_text(interaction):
+    """
+    Gemini Interactions 응답에서 최종 텍스트를 가져온다.
+    """
 
-    key = secret("ANTHROPIC_API_KEY")
+    output_text = getattr(interaction, "output_text", None)
 
-    if not key:
-        raise RuntimeError(
-            "Streamlit Secrets에 ANTHROPIC_API_KEY를 설정하세요."
-        )
+    if output_text:
+        return str(output_text).strip()
 
-    model = (
-        secret("ANTHROPIC_MODEL_PREMARKET")
-        or "claude-sonnet-5-5"
-    )
+    steps = getattr(interaction, "steps", None)
 
-    body = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
+    if steps:
+        texts = []
+
+        for step in steps:
+
+            step_text = getattr(step, "text", None)
+
+            if step_text:
+                texts.append(str(step_text))
+
+            elif isinstance(step, dict):
+                value = step.get("text")
+
+                if value:
+                    texts.append(str(value))
+
+        if texts:
+            return "\n".join(texts).strip()
+
+    return ""
+
+
+def call_gemini(prompt, search=False, max_tokens=8000):
+
+    client = get_gemini_client()
+
+    generation_config = {
+        "max_output_tokens": max_tokens,
+        "thinking_level": "medium",
     }
 
-    if search:
+    tools = []
 
-        body["tools"] = [
+    if search:
+        tools = [
             {
-                "type": "web_search_20250305",
-                "name": "web_search",
-                "max_uses": 10,
+                "type": "google_search",
             }
         ]
 
-    texts = []
+    try:
 
-    for _ in range(4):
-
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json=body,
-            timeout=240,
+        interaction = client.interactions.create(
+            model=GEMINI_MODEL,
+            input=prompt,
+            tools=tools,
+            generation_config=generation_config,
         )
 
-        if response.status_code != 200:
+    except Exception as error:
 
+        error_text = str(error)
+
+        if "API_KEY_INVALID" in error_text or "invalid api key" in error_text.lower():
             raise RuntimeError(
-                f"HTTP {response.status_code}: "
-                f"{response.text[:400]}"
+                "Gemini API 키가 유효하지 않습니다. "
+                "Google AI Studio에서 새 API 키를 확인해 주세요."
             )
 
-        data = response.json()
-        content = data.get("content", [])
+        if "429" in error_text or "RESOURCE_EXHAUSTED" in error_text:
+            raise RuntimeError(
+                "Gemini 무료 API 사용 한도에 도달했거나 요청이 많습니다. "
+                "잠시 후 다시 시도해 주세요."
+            )
 
-        texts.extend(
-            block.get("text", "")
-            for block in content
-            if block.get("type") == "text"
+        if "403" in error_text or "PERMISSION_DENIED" in error_text:
+            raise RuntimeError(
+                "Gemini API 권한 오류입니다. "
+                "Google AI Studio의 API 키와 모델 사용 가능 여부를 확인해 주세요."
+            )
+
+        raise RuntimeError(
+            f"Gemini API 호출 실패: {error_text[:500]}"
         )
 
-        if data.get("stop_reason") == "pause_turn":
-
-            body["messages"] = body["messages"] + [
-                {
-                    "role": "assistant",
-                    "content": content,
-                }
-            ]
-
-            continue
-
-        break
-
-    result = "".join(texts).strip()
-
-    start = result.find("## 📅")
-
-    if start > 0:
-        result = result[start:]
+    result = extract_interaction_text(interaction)
 
     if not result:
-        raise RuntimeError("응답이 비어 있습니다.")
+        raise RuntimeError(
+            "Gemini 응답이 비어 있습니다. "
+            "모델 응답 또는 API 사용량을 확인해 주세요."
+        )
 
     return result
 
@@ -1156,10 +1130,10 @@ def run_premarket(use_source_only=False):
             )
 
             with st.spinner(
-                "① 웹검색으로 장전 시황 원본 작성 중... (1~3분)"
+                "① Gemini Google 검색으로 장전 시황 원본 작성 중... (1~3분)"
             ):
 
-                source = call_claude(
+                source = call_gemini(
                     prompt,
                     search=True,
                     max_tokens=8000,
@@ -1167,9 +1141,9 @@ def run_premarket(use_source_only=False):
 
             state["pm_long"] = source
 
-        with st.spinner("② 한눈에 보이는 시황글로 압축 중..."):
+        with st.spinner("② Gemini로 한눈에 보이는 시황글 압축 중..."):
 
-            short = call_claude(
+            short = call_gemini(
                 COMPRESS_PROMPT.replace("__SOURCE__", source),
                 search=False,
                 max_tokens=3000,
@@ -1180,7 +1154,7 @@ def run_premarket(use_source_only=False):
         state["pm_note"] = (
             f"생성 완료 · "
             f"{datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
-            "수치·종목·출처를 발행 전에 확인하세요."
+            "Gemini 3.8 Flash · 수치·종목·출처를 발행 전에 확인하세요."
         )
 
     except Exception as error:
