@@ -7,7 +7,6 @@ import os
 import re
 import time
 from collections import Counter
-from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -3281,299 +3280,216 @@ NEXT_DAY_LINE = re.compile(
     r"^(다음 영업일은 |\d{1,2}월 \d{1,2}일\([월화수목금토일]\) 정규장)"
 )
 
-
-class _ScheduleTextParser(HTMLParser):
-    """캘린더 페이지의 화면 텍스트를 줄 단위로 추출합니다."""
-    BLOCK_TAGS = {
-        "br", "p", "div", "section", "article", "li", "h1", "h2", "h3",
-        "h4", "tr", "td", "th", "header", "footer"
-    }
-
-    def __init__(self):
-        super().__init__()
-        self.parts = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag.lower() in self.BLOCK_TAGS:
-            self.parts.append("\n")
-
-    def handle_endtag(self, tag):
-        if tag.lower() in self.BLOCK_TAGS:
-            self.parts.append("\n")
-
-    def handle_data(self, data):
-        value = re.sub(r"\s+", " ", data).strip()
-        if value:
-            self.parts.append(value)
-
-    def text(self):
-        return "\n".join(part for part in self.parts if part.strip())
+TOSS_CALENDAR_BASE = "https://wts-cert-api.tossinvest.com"
+TOSS_CALENDAR_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Origin": "https://www.tossinvest.com",
+    "Referer": "https://www.tossinvest.com/calendar",
+}
 
 
-def _tomorrow_kst():
-    return datetime.datetime.now(KST).date() + datetime.timedelta(days=1)
+def kr_date_text(day):
+    """'11월 3일(화)' 형태."""
+    return f"{day.month}월 {day.day}일({WEEKDAYS[day.weekday()]})"
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_next_day_schedule(target_date_text):
-    """투넷 증시 일정 페이지에서 지정일의 실적·경제·정책 일정을 읽습니다.
-
-    개장·휴장·폐장 등 거래소 운영 정보는 의도적으로 제외합니다.
-    페이지 구조가 바뀌거나 조회에 실패하면 빈 목록을 반환합니다.
-    """
-    target = datetime.date.fromisoformat(target_date_text)
-    month_label = f"{target.month}월"
-    day_label = rf"{target.month}\s*월\s*{target.day}\s*일"
-    url = "https://web.tunet.co.kr/schedule"
-    response = requests.get(
-        url,
-        headers={"User-Agent": TOSS_WEB_HEADERS["User-Agent"]},
-        timeout=(5, 12),
-    )
-    response.raise_for_status()
-    parser = _ScheduleTextParser()
-    parser.feed(response.text)
-    lines = [re.sub(r"\s+", " ", x).strip() for x in parser.text().splitlines()]
-    lines = [x for x in lines if x]
-
-    # 대상 날짜의 섹션 시작점을 찾고 다음 날짜 제목 전까지만 확인합니다.
-    start = None
-    date_header = re.compile(day_label + r"\s*[（(]?[월화수목금토일]요일?[）)]?", re.I)
-    for i, line in enumerate(lines):
-        if date_header.search(line) and (month_label in line or line.startswith(str(target.day))):
-            start = i
-            break
-    if start is None:
-        # 일부 페이지는 날짜와 요일을 별도 텍스트 노드로 나눕니다.
-        for i, line in enumerate(lines):
-            if re.search(rf"{target.month}\s*월\s*{target.day}\s*일", line):
-                start = i
-                break
-    if start is None:
-        return []
-
-    section = []
-    next_header = re.compile(r"(?:\d{1,2}\s*월\s*)?\d{1,2}\s*일\s*[（(][월화수목금토일]요일?[）)]")
-    for line in lines[start + 1:]:
-        if next_header.search(line):
-            break
-        section.append(line)
-
-    excluded = re.compile(r"휴장|개장|폐장|정규장|장 운영|거래일|증시 운영|시장 운영|조기 폐장", re.I)
-    label_only = re.compile(r"^(경제일정|경제지표|실적발표|실적|IR|기타|행사·정책|공모주|권리일정|주요 일정|일정)$")
-    time_only = re.compile(r"^\d{1,2}[.:]\s*\d{1,2}(?:\s*\d{1,2}:\d{2})?$")
-    events = []
-    for line in section:
-        line = re.sub(r"^(?:경제일정|경제지표|실적발표|실적|IR|기타|행사·정책)\s*", "", line).strip()
-        line = re.sub(r"^\d{1,2}\.\s*\d{1,2}\.\s*(?:\d{1,2}:\d{2})?\s*", "", line).strip()
-        if not line or excluded.search(line) or label_only.match(line) or time_only.match(line):
-            continue
-        if len(line) < 5 or line in events:
-            continue
-        # 메뉴·범례·월 전체 집계 등 일정이 아닌 문구 제거
-        if any(x in line for x in ("전체 건", "월 전체", "필터 결과", "TODAY", "이전 달", "다음 달")):
-            continue
-        events.append(line)
-    return events[:12]
-
-
-def _news_is_today(item, today):
-    raw = str(item.get("published", "")).strip()
-    if not raw:
-        return None
-    # API의 createdAt은 ISO 문자열 또는 epoch일 수 있습니다.
+def next_business_info():
+    """(다음 영업일, 개장 시각, 캘린더 조회 성공 여부)"""
     try:
-        if raw.isdigit():
-            stamp = float(raw)
-            if stamp > 10**12:
-                stamp /= 1000
-            published = datetime.datetime.fromtimestamp(stamp, KST)
-        else:
-            normalized = raw.replace("Z", "+00:00")
-            published = datetime.datetime.fromisoformat(normalized)
-            if published.tzinfo is None:
-                published = published.replace(tzinfo=KST)
-            published = published.astimezone(KST)
-        return published.date() == today
+        result = api_get("/api/v1/market-calendar/KR")
+        nxt = result.get("nextBusinessDay") or {}
+        day = nxt.get("date")
+        regular = ((nxt.get("integrated") or {}).get("regularMarket") or {}).get("startTime")
+        open_time = str(regular)[11:16] if regular else "09:00"
+        if day:
+            return datetime.date.fromisoformat(day), open_time, True
     except Exception:
-        return None
+        pass
+
+    day = datetime.datetime.now(KST).date() + datetime.timedelta(days=1)
+    while day.weekday() >= 5:
+        day += datetime.timedelta(days=1)
+    return day, "09:00", False
 
 
-def _today_toss_news(limit=12):
-    items = fetch_toss_dashboard_news("ALL_HIGHLIGHT", limit=20)
-    today = datetime.datetime.now(KST).date()
-    dated = [(item, _news_is_today(item, today)) for item in items]
-    confirmed_today = [item for item, is_today in dated if is_today is True]
-    # 날짜 형식이 제공되지 않는 항목은 최신 주요 뉴스 피드에 한해 참고하되,
-    # 결과 안내에 날짜 미확인임을 명시합니다.
-    if confirmed_today:
-        return confirmed_today[:limit], "게시일 오늘 확인"
-    unknown = [item for item, is_today in dated if is_today is None]
-    return unknown[:limit], "게시일 미확인 · 토스 최신 주요 뉴스 기준"
+def fetch_toss_monthly_calendar(target_day):
+    """토스증권 공개 월별 캘린더에서 지정일의 원본 이벤트를 가져옵니다.
 
+    브라우저에서 확인한 POST 요청처럼 요청 본문은 비워 둡니다.
+    XSRF 토큰/쿠키는 사용자 세션에 종속되므로 코드에 고정하지 않습니다.
+    """
+    year_month = target_day.strftime("%Y-%m")
+    url = f"{TOSS_CALENDAR_BASE}/api/v4/calendar/monthly/{year_month}"
+    headers = dict(TOSS_CALENDAR_HEADERS)
+    # 필요할 때만 Streamlit Secrets에 저장한 최신 XSRF 토큰을 사용합니다.
+    # 토큰은 브라우저 세션에 따라 만료될 수 있으므로 코드에 직접 넣지 않습니다.
+    xsrf_token = secret("TOSS_CALENDAR_XSRF_TOKEN")
+    if xsrf_token:
+        headers["x-xsrf-token"] = xsrf_token
 
-def _fallback_next_day_brief(target, events, news_items, news_date_note):
-    lines = [f"【{kr_date_text(target)} 예정 주요 일정】"]
-    if events:
-        lines.extend(f"- {event}" for event in events[:8])
-    else:
-        lines.append("- 확인된 주요 일정이 없습니다. 일정 데이터 제공 여부를 별도로 확인해 주세요.")
-
-    lines.append("")
-    lines.append("【오늘 주요 뉴스 중 내일 확인할 내용】")
-    if news_items:
-        for item in news_items[:5]:
-            title = item.get("title", "").strip()
-            summary = item.get("summary", "").strip()
-            text = f"- {title}"
-            if summary:
-                text += f" — {summary[:150]}"
-            lines.append(text)
-    else:
-        lines.append("- 오늘 게시된 주요 뉴스 데이터를 확인하지 못했습니다.")
-    lines.append(f"  ※ 뉴스 기준: {news_date_note}")
-
-    # 확인된 일정·뉴스가 없을 때 일반론으로 내용을 채우지 않습니다.
-    # 실제 자료가 있는 경우에만 그 자료에서 파생되는 확인 항목을 안내합니다.
-    followups = []
-    if events:
-        followups.append("- 위 일정의 실제 발표 결과와 시장 반응 확인")
-    if news_items:
-        followups.append("- 위 뉴스의 후속 발표·공식 입장·추가 보도 여부 확인")
-    lines.append("")
-    lines.append("【내일 확인할 핵심 사항】")
-    if followups:
-        lines.extend(followups)
-    else:
-        lines.append("- 일정·뉴스 자료가 확보되지 않아 구체적인 확인 항목을 생성하지 못했습니다.")
-    return "\n".join(lines)
-
-
-def _ai_next_day_brief(target, events, news_items, news_date_note):
-    """AI 키가 있으면 일정과 뉴스의 중복을 줄여 내일 체크 항목을 구성합니다."""
-    event_text = "\n".join(f"- {x}" for x in events) or "확인된 일정 없음"
-    news_text = "\n".join(
-        f"- 제목: {x.get('title','')}\n  요약: {x.get('summary','') or '요약 없음'}\n  출처: {x.get('source','')} / 게시: {x.get('published','')}"
-        for x in news_items
-    ) or "확인된 뉴스 없음"
-    prompt = f"""당신은 국내 주식시장 콘텐츠팀의 데스크입니다. 아래 자료만 사용해 다음 거래일 투자자가 확인할 체크포인트를 한국어로 작성하세요.
-
-[대상 날짜]
-{target.isoformat()} ({WEEKDAYS[target.weekday()]})
-
-[해당 날짜 예정 일정]
-{event_text}
-
-[오늘 주요 뉴스]
-게시일 판정: {news_date_note}
-{news_text}
-
-[작성 규칙]
-- 장 개장·휴장·폐장 시각 및 거래소 운영 안내는 절대 넣지 마세요.
-- 일정은 경제지표, 기업 실적, 정책 발표, 국제 행사 등 투자 관련 내용만 남기세요.
-- 오늘 뉴스 중 내일 후속 발표·결과·추가 보도를 확인할 가치가 있는 것만 선택하세요.
-- 일정과 뉴스가 중복되면 하나로 합치세요.
-- 중요도가 낮거나 시장 연관성이 불분명한 항목은 제외하세요.
-- 자료에 없는 발표 시각, 결과, 전망, 인과관계를 만들지 마세요. 시간 정보가 없으면 시간을 쓰지 마세요.
-- 일정·뉴스·내일 확인 사항을 구분해 최대 8개 핵심 항목으로 정리하세요.
-- 확인할 내용이 부족하면 '확인된 주요 일정 없음' 또는 '후속 확인 자료 없음'이라고 명시하세요.
-- 매수·매도 추천이나 수익 전망은 쓰지 마세요.
-- 마크다운 목록으로 결과만 출력하세요.
-"""
-    response = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": secret("ANTHROPIC_API_KEY"),
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": secret("ANTHROPIC_MODEL", "claude-haiku-5-5"),
-            "max_tokens": 900,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=45,
-    )
-    if response.status_code != 200:
-        raise RuntimeError(f"AI 브리핑 HTTP {response.status_code}: {response.text[:250]}")
-    parts = response.json().get("content", [])
-    result = "\n".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
-    if not result:
-        raise RuntimeError("AI 브리핑 결과가 비어 있습니다.")
-    return result
-
-
-def build_next_day_brief():
-    """내일 일정 + 오늘의 주요 뉴스 기반 체크포인트를 생성합니다."""
-    target = _tomorrow_kst()
-    events = []
-    news_items = []
-    errors = []
     try:
-        events = fetch_next_day_schedule(target.isoformat())
-    except Exception as error:
-        errors.append(f"일정 조회 실패: {error}")
-    news_note = "뉴스 조회 전"
+        response = requests.post(
+            url,
+            data=b"",
+            headers=headers,
+            timeout=(5, 15),
+        )
+    except requests.RequestException as error:
+        raise RuntimeError(f"토스 캘린더 연결 실패: {error}") from error
+
+    if response.status_code in (401, 403, 429):
+        raise RuntimeError(
+            f"토스 캘린더 접근 제한(HTTP {response.status_code}). "
+            "브라우저 세션 인증이 필요한지 확인해야 합니다."
+        )
+    if not response.ok:
+        raise RuntimeError(
+            f"토스 캘린더 조회 실패(HTTP {response.status_code}): "
+            f"{response.text[:180]}"
+        )
     try:
-        news_items, news_note = _today_toss_news(limit=12)
-    except Exception as error:
-        errors.append(f"토스 뉴스 조회 실패: {error}")
+        payload = response.json()
+    except ValueError as error:
+        raise RuntimeError("토스 캘린더 응답이 JSON 형식이 아닙니다.") from error
 
-    if secret("ANTHROPIC_API_KEY") and (events or news_items):
-        try:
-            brief = _ai_next_day_brief(target, events, news_items, news_note)
-            method = "AI가 일정·뉴스 중요도를 정리했습니다."
-        except Exception as error:
-            brief = _fallback_next_day_brief(target, events, news_items, news_note)
-            method = f"AI 정리 실패로 수집 자료를 나열했습니다: {error}"
+    result = payload.get("result") or {}
+    events = result.get("events")
+    if not isinstance(events, list):
+        raise RuntimeError("토스 캘린더 응답에 result.events 배열이 없습니다.")
+
+    return [
+        event for event in events
+        if event.get("date") == target_day.isoformat()
+        and not event.get("excludeFromAll", False)
+        and (event.get("id") or {}).get("group") not in ("HOLIDAY", "ETC")
+        and (event.get("view") or {}).get("title") != "소식이 없어요"
+    ]
+
+
+def _calendar_country(country_type):
+    value = str(country_type or "").lower()
+    if value in ("kr", "korea", "kor"):
+        return "국내"
+    if value in ("us", "usa", "united_states"):
+        return "미국"
+    if value:
+        return value.upper()
+    return "국가 미표기"
+
+
+def _calendar_link(view):
+    option = (view or {}).get("landingOption") or {}
+    url = option.get("url")
+    if not url:
+        return ""
+    if str(url).startswith("http://") or str(url).startswith("https://"):
+        return str(url)
+    if str(url).startswith("/"):
+        return "https://www.tossinvest.com" + str(url)
+    return ""
+
+
+def format_toss_calendar_event(event):
+    """월별 캘린더 원본 이벤트를 투자자가 확인할 수 있는 한 줄로 변환."""
+    event_id = event.get("id") or {}
+    group = str(event_id.get("group") or "")
+    view = event.get("view") or {}
+    title = str(view.get("title") or "일정명 확인 불가").strip()
+    pieces = []
+
+    if group == "ECONOMIC":
+        indicator = view.get("economicIndicatorValue") or {}
+        country = _calendar_country(indicator.get("countryType"))
+        pieces.append(f"[경제지표·{country}] {title}")
+        raw_time = str(indicator.get("time") or "").strip()
+        # 00:00:00은 실제 발표시각이 아닌 기본값일 수 있어 표시하지 않습니다.
+        if raw_time and raw_time not in ("00:00:00", "00:00"):
+            pieces.append(f"표시 시각 {raw_time[:5]}")
+        forecast = indicator.get("forecast")
+        historical = indicator.get("historical")
+        unit = str(indicator.get("unit") or "").strip()
+        prefix = str(indicator.get("unitPrefix") or "").strip()
+        if forecast is not None:
+            pieces.append(f"예상 {prefix}{forecast}{unit}")
+        if historical is not None:
+            pieces.append(f"이전 {prefix}{historical}{unit}")
+    elif group in ("USD_EARNINGS_ANNOUNCEMENT", "KRX_EARNINGS_ANNOUNCEMENT"):
+        earnings = event.get("stockEarnings") or {}
+        country = _calendar_country(earnings.get("countryType"))
+        company = str(earnings.get("companyName") or title.replace(" 실적발표", "")).strip()
+        pieces.append(f"[기업 실적·{country}] {company} 실적 발표")
+        status = str(earnings.get("announceMarketStatusText") or "").strip()
+        if status:
+            pieces.append(status)
+        announce_at = str(earnings.get("announceDateTime") or "").strip()
+        if announce_at:
+            try:
+                dt = datetime.datetime.fromisoformat(announce_at.replace("Z", "+00:00"))
+                if dt.tzinfo:
+                    dt = dt.astimezone(KST)
+                pieces.append(f"발표시각 {dt.strftime('%H:%M')}")
+            except ValueError:
+                # 날짜 문자열만 있거나 시간대가 불명확하면 원문을 임의 변환하지 않습니다.
+                if "T" in announce_at:
+                    pieces.append(f"원본 발표시각 {announce_at.split('T', 1)[1][:5]}")
+        live = view.get("upcomingLive") or {}
+        live_at = str(live.get("liveAt") or "").strip()
+        if live_at:
+            try:
+                dt = datetime.datetime.fromisoformat(live_at.replace("Z", "+00:00"))
+                if dt.tzinfo:
+                    dt = dt.astimezone(KST)
+                pieces.append(f"어닝콜 {dt.strftime('%H:%M')}")
+            except ValueError:
+                pass
     else:
-        brief = _fallback_next_day_brief(target, events, news_items, news_note)
-        method = "AI 요약 키가 없어 확인된 일정과 뉴스 제목을 우선 정리했습니다."
+        # 알 수 없는 그룹은 제목만 노출하고 유형을 추정하지 않습니다.
+        pieces.append(f"[기타 일정] {title}")
 
-    if not events and not news_items:
-        method = "실제 일정과 오늘 주요 뉴스를 확보하지 못했습니다. 일반적인 문구로 대체하지 않았습니다."
-    if errors:
-        method += " / " + " / ".join(errors)
-    return brief, method
+    link = _calendar_link(view)
+    if link:
+        pieces.append(link)
+    return " · ".join(pieces)
+
+
+def build_next_day_line():
+    """다음 영업일 안내와 토스 캘린더에서 확인된 해당 날짜 일정을 반환."""
+    nxt, open_time, calendar_day_ok = next_business_info()
+    line = f"{kr_date_text(nxt)} 정규장 {open_time} 개장"
+
+    events = fetch_toss_monthly_calendar(nxt)
+    formatted = [format_toss_calendar_event(event) for event in events]
+    formatted = [item for item in formatted if item]
+    return line, formatted, nxt, calendar_day_ok
 
 
 def autofill_checks():
-    """내일 일정과 오늘 주요 뉴스를 불러와 체크포인트를 자동 작성합니다."""
+    """버튼 클릭 시 다음 영업일의 실제 토스증권 캘린더 일정을 불러옵니다."""
     state = st.session_state
-    with st.spinner("내일 일정과 오늘 주요 뉴스를 확인하는 중..."):
-        brief, note = build_next_day_brief()
+    try:
+        with st.spinner("토스증권 캘린더에서 다음 영업일 일정을 불러오는 중..."):
+            line, events, target_day, day_ok = build_next_day_line()
 
-    old_text = state.get("checks", "")
-    # 재실행 시 이전 자동 생성 구간만 교체하고 사용자가 직접 적은 메모는 보존합니다.
-    begin = "【자동 수집 브리핑 시작】"
-    finish = "【자동 수집 브리핑 끝】"
-    manual = old_text
-    if begin in old_text and finish in old_text:
-        before, remainder = old_text.split(begin, 1)
-        _, after = remainder.split(finish, 1)
-        manual = (before + after).strip()
-    else:
-        # 이전 버전에서 자동 삽입되던 거래소 운영 안내와 일반론 문구는
-        # 사용자가 직접 작성한 메모로 오인해 보존하지 않습니다.
-        obsolete_auto_lines = re.compile(
-            r"정규장\s*09:00\s*개장|다음 영업일은|"
-            r"급등 종목 상승 지속 여부|급락 종목 추가 하락 여부|"
-            r"시장 거래대금 변화|거래소 운영 안내|장 개장·휴장·폐장",
-            re.I,
+        rows = [line]
+        if events:
+            rows.extend(events)
+        else:
+            rows.append("확인된 주요 경제지표·기업 실적 일정 없음")
+
+        state["checks"] = "\n".join(rows)
+        state["checks_note"] = (
+            f"토스증권 월별 캘린더 조회 완료 · {target_day.isoformat()} · "
+            f"일정 {len(events)}건"
+            + ("" if day_ok else " · 다음 영업일은 평일 기준으로 계산")
         )
-        manual_lines = []
-        for row in old_text.splitlines():
-            clean = row.strip()
-            if not clean or NEXT_DAY_LINE.match(clean) or obsolete_auto_lines.search(clean):
-                continue
-            if clean in ("【오늘 주요 뉴스 중 내일 확인할 내용】", "【내일 확인할 핵심 사항】"):
-                continue
-            manual_lines.append(row)
-        manual = "\n".join(manual_lines).strip()
-
-    generated = f"{begin}\n{brief}\n{finish}"
-    state["checks"] = generated + (f"\n\n【직접 입력 메모】\n{manual}" if manual else "")
-    state["checks_note"] = note
+    except Exception as error:
+        # 이전 기본 체크 문구를 남기지 않고 실패 사실만 표시합니다.
+        state["checks"] = ""
+        state["checks_note"] = f"일정 자동 수집 실패: {error} · 직접 확인 후 입력해 주세요."
 
 
 def fmt(value, digits=2):
@@ -3809,7 +3725,7 @@ def build_markdown(snapshot, time_text="확인 불가"):
         (
             "👀 내일 체크 포인트",
             "checks",
-            "급등 종목 상승 지속 여부 / 급락 종목 추가 하락 여부",
+            "",
         ),
         (
             "🔍 핵심 키워드",
@@ -3823,21 +3739,14 @@ def build_markdown(snapshot, time_text="확인 불가"):
 
         if value:
             if key == "checks":
-                check_lines = []
-                for raw_line in value.splitlines():
-                    item = raw_line.strip()
-                    if not item or item in ("【자동 수집 브리핑 시작】", "【자동 수집 브리핑 끝】"):
-                        continue
-                    item = re.sub(r"^[-•·]\s*", "", item)
-                    if item.startswith("【") and item.endswith("】"):
-                        check_lines.extend([f"**{item.strip('【】')}**", ""])
-                    elif item.startswith("【직접 입력 메모】"):
-                        check_lines.extend(["**직접 입력 메모**", ""])
-                    else:
-                        # 자동 생성 구간 외에 사용자가 '/'로 구분해 적은 문장도 지원합니다.
-                        sub_items = [x.strip() for x in item.split("/") if x.strip()]
-                        check_lines.extend(f"- {x}" for x in sub_items)
-                body_text = "\n".join(check_lines).strip()
+                items = [
+                    re.sub(r"^[-•·]\s*", "", part.strip())
+                    for part in re.split(r"[/\n]", value)
+                ]
+
+                body_text = "\n".join(
+                    f"- {item}" for item in items if item
+                )
 
             elif key == "themes":
                 # 테마 입력 순서를 유지하면서 테마별 대표 종목과
@@ -4403,9 +4312,20 @@ def apply_label_style(theme_mode="라이트"):
 
 
 def main():
-    st.title("MTNW 오후 시황")
-    # 1차 UI의 라이트 스타일로 고정합니다. 미리보기 디자인은 별도 유지합니다.
-    apply_label_style("라이트")
+    st.session_state.setdefault("mtnw_theme_mode", "라이트")
+    title_col, theme_col = st.columns([4.5, 1.5], vertical_alignment="center")
+    with title_col:
+        st.title("MTNW 오후 시황")
+    with theme_col:
+        st.radio(
+            "화면 테마",
+            ["라이트", "블랙"],
+            horizontal=True,
+            key="mtnw_theme_mode",
+            label_visibility="collapsed",
+        )
+
+    apply_label_style(st.session_state.get("mtnw_theme_mode", "라이트"))
 
     # 시총 100위 모드를 기본값으로 시작합니다.
     st.session_state.setdefault("uni_all", False)
@@ -4686,309 +4606,271 @@ def main():
 
         with st.expander(
             "📝 시황글 추가 내용 편집 · 이슈·뉴스·테마·체크포인트",
-            expanded=True
+            expanded=False
         ):
-            # 편집 영역 전용 스타일: 라벨·입력 글자 대비와 크기를 높입니다.
-            st.markdown(
-                """
-                <style>
-                .st-key-editor_panel [data-testid="stWidgetLabel"] p,
-                .st-key-editor_panel [data-testid="stWidgetLabel"] span {
-                    color: #14243A !important;
-                    font-size: 1.12rem !important;
-                    font-weight: 850 !important;
-                    opacity: 1 !important;
-                }
-                .st-key-editor_panel [data-testid="stCaptionContainer"] p {
-                    color: #40516A !important;
-                    font-size: 1rem !important;
-                    font-weight: 600 !important;
-                }
-                .st-key-editor_panel textarea,
-                .st-key-editor_panel input {
-                    color: #14243A !important;
-                    font-size: 1.08rem !important;
-                    font-weight: 600 !important;
-                    line-height: 1.65 !important;
-                    background: #FFFFFF !important;
-                    border: 1.5px solid #AEBED2 !important;
-                }
-                .st-key-editor_panel textarea:focus,
-                .st-key-editor_panel input:focus {
-                    border-color: #174EA6 !important;
-                    box-shadow: 0 0 0 2px rgba(23,78,166,.12) !important;
-                }
-                .st-key-editor_panel .stButton > button {
-                    min-height: 3.1rem !important;
-                    font-size: 1.02rem !important;
-                    font-weight: 850 !important;
-                }
-                .st-key-editor_panel [data-testid="stExpander"] summary p {
-                    color: #14243A !important;
-                    font-size: 1.08rem !important;
-                    font-weight: 850 !important;
-                }
-                </style>
-                """,
-                unsafe_allow_html=True,
+            st.caption(
+                "이슈별로 기사 링크를 넣고 [기사 불러오기] → [핵심 정리]를 누르면 "
+                "'내용' 칸이 채워집니다. 기사 내용을 직접 붙여넣어도 됩니다. "
+                + (
+                    "요약 방식: AI"
+                    if secret("ANTHROPIC_API_KEY")
+                    else "요약 방식: 핵심 문장 자동 추출 (AI 요약은 ANTHROPIC_API_KEY 설정 시)"
+                )
             )
 
-            with st.container(key="editor_panel"):
-                st.markdown("### 🧭 편집 순서")
-                st.markdown(
-                    "1. 한 줄 요약 확인 → 2. 뉴스 선택 또는 기사 입력 → "
-                    "3. 이슈별 제목·내용 수정 → 4. 테마와 체크포인트 확인"
-                )
+            # 첫 화면에서만 자동 생성합니다. 이후에는 사용자의 수정 내용을 유지합니다.
+            if "summary" not in st.session_state:
+                st.session_state["summary"] = generate_market_summary(snapshot)
+
+            summary_btn_col, summary_note_col = st.columns([1.7, 5], vertical_alignment="center")
+            summary_btn_col.button(
+                "✨ 한 줄 요약 자동 생성 / 다시 생성",
+                key="summary_generate_btn",
+                on_click=autofill_summary,
+                use_container_width=True,
+            )
+            if st.session_state.get("summary_note"):
+                summary_note_col.caption(st.session_state["summary_note"])
+
+            st.text_area(
+                "한 줄 요약",
+                key="summary",
+                height=90,
+                help=(
+                    "기사가 없어도 현재 산업·종목·지수 데이터로 생성됩니다. "
+                    "기사 내용을 입력한 뒤 다시 생성하면 입력 기사까지 반영합니다. "
+                    "필요하면 직접 수정할 수 있습니다."
+                ),
+            )
+
+            with st.expander("📰 토스증권 주요 뉴스 불러오기", expanded=False):
                 st.caption(
-                    "각 입력칸은 직접 수정할 수 있습니다. 자동 생성 기능을 사용한 뒤에도 내용을 자유롭게 고쳐주세요."
+                    "토스증권 공개 대시보드 뉴스입니다. 개인화 추천 피드나 커뮤니티 댓글은 불러오지 않습니다. "
+                    "뉴스 제목/링크를 이슈 입력칸으로 옮긴 뒤 기사 본문을 확인할 수 있습니다."
+                )
+                news_type_labels = {
+                    "주요 뉴스": "ALL_HIGHLIGHT",
+                    "최신 뉴스": "HOT",
+                    "급등주 뉴스": "SOARING_STOCK",
+                }
+                news_type_label = st.selectbox(
+                    "뉴스 분류",
+                    list(news_type_labels.keys()),
+                    index=0,
+                    key="toss_news_type_label",
+                )
+                news_btn_col, news_note_col = st.columns([1.6, 5], vertical_alignment="center")
+                news_btn_col.button(
+                    "🔄 토스 뉴스 불러오기",
+                    key="toss_news_fetch_btn",
+                    on_click=load_toss_dashboard_news,
+                    args=(news_type_labels[st.session_state.get("toss_news_type_label", "최신 뉴스")],),
+                )
+                toss_news_error = st.session_state.get("toss_dashboard_news_error", "")
+                if toss_news_error:
+                    st.error(f"토스 뉴스 조회 실패: {toss_news_error}")
+                toss_news_items = st.session_state.get("toss_dashboard_news", []) or []
+                if toss_news_items:
+                    news_note_col.caption(f"{len(toss_news_items)}건 표시 · 조회 결과는 최대 3분간 캐시됩니다.")
+                    for news_idx, news_item in enumerate(toss_news_items):
+                        news_title = news_item.get("title", "")
+                        metadata = " · ".join(
+                            part for part in [news_item.get("source", ""), news_item.get("published", "")]
+                            if part
+                        )
+                        st.markdown(f"**{news_idx + 1}. {news_title}**")
+                        if metadata:
+                            st.caption(metadata)
+                        if news_item.get("summary"):
+                            st.write(news_item["summary"][:280])
+                        related = news_item.get("related_stocks") or []
+                        related_names = []
+                        for related_item in related:
+                            if isinstance(related_item, dict):
+                                related_name = related_item.get("name") or related_item.get("stockName") or related_item.get("symbol")
+                                if related_name:
+                                    related_names.append(str(related_name))
+                            elif related_item:
+                                related_names.append(str(related_item))
+                        if related_names:
+                            st.caption("관련 종목: " + " · ".join(related_names[:8]))
+                        if news_item.get("url"):
+                            st.markdown(f"[기사 링크 열기]({news_item['url']})")
+                        elif news_item.get("news_id"):
+                            st.caption("토스 뉴스 ID: " + news_item["news_id"] + " · API 응답에 기사 URL이 없어 직접 링크는 표시하지 않습니다.")
+                        pick_cols = st.columns([1, 1, 1, 4])
+                        for issue_num, pick_col in zip((1, 2, 3), pick_cols[:3]):
+                            pick_col.button(
+                                f"이슈 {issue_num}에 적용",
+                                key=f"toss_news_{news_idx}_issue_{issue_num}",
+                                on_click=use_toss_news_for_issue,
+                                args=(issue_num, news_item),
+                            )
+                        st.divider()
+                elif not toss_news_error:
+                    st.caption("아직 조회된 뉴스가 없습니다. ‘토스 뉴스 불러오기’를 눌러 주세요.")
+
+            issues = [
+                (1, "🔺", "당일 상승률 상위 종목 흐름"),
+                (2, "🔻", "당일 하락률 상위 종목 흐름"),
+                (3, "➖", "시장 변동성 확인"),
+            ]
+
+            for i, direction, title in issues:
+                st.session_state.setdefault(f"is{i}m", direction)
+                st.session_state.setdefault(f"is{i}t", title)
+
+                st.markdown(f"**이슈 {i}**")
+
+                a, b, c = st.columns([1, 3, 3])
+
+                a.selectbox(
+                    "방향",
+                    ["🔺", "🔻", "➖"],
+                    key=f"is{i}m",
                 )
 
-                if "summary" not in st.session_state:
-                    st.session_state["summary"] = generate_market_summary(snapshot)
+                b.text_area(
+                    "제목",
+                    key=f"is{i}t",
+                    height=68,
+                )
 
-                with st.container(border=True):
-                    st.markdown("### ① 오늘의 한 줄 요약")
-                    summary_btn_col, summary_note_col = st.columns([2.1, 4], vertical_alignment="center")
-                    summary_btn_col.button(
-                        "✨ 한 줄 요약 자동 생성 / 다시 생성",
-                        key="summary_generate_btn",
-                        on_click=autofill_summary,
-                        use_container_width=True,
+                c.text_area(
+                    "관련 종목",
+                    key=f"is{i}s",
+                    height=68,
+                )
+
+                l1, l2 = st.columns([5, 1.4], vertical_alignment="bottom")
+
+                l1.text_input(
+                    "기사 링크",
+                    key=f"is{i}link",
+                    placeholder="https://...",
+                )
+
+                l2.button(
+                    "기사 불러오기",
+                    key=f"is{i}fetch",
+                    on_click=load_article,
+                    args=(i,),
+                )
+
+                st.text_area(
+                    "기사 내용 (링크로 불러오거나 직접 붙여넣기)",
+                    key=f"is{i}src",
+                    height=110,
+                )
+
+                s1, s2 = st.columns([1.4, 5], vertical_alignment="center")
+
+                s1.button(
+                    "✨ 핵심 정리",
+                    key=f"is{i}sum",
+                    on_click=summarize_issue,
+                    args=(i,),
+                )
+
+                if st.session_state.get(f"is{i}note"):
+                    s2.caption(st.session_state[f"is{i}note"])
+
+                st.text_area(
+                    "내용",
+                    key=f"is{i}c",
+                    height=110,
+                )
+
+                st.text_area(
+                    "체크",
+                    key=f"is{i}k",
+                    height=68,
+                )
+
+            st.session_state.setdefault("themes", "AI 반도체 · 2차전지")
+
+            t1, t2 = st.columns([1.6, 5], vertical_alignment="center")
+
+            t1.button(
+                "🔄 강한 테마 자동 불러오기",
+                key="themes_btn",
+                on_click=autofill_themes,
+            )
+
+            if st.session_state.get("themes_note"):
+                t2.caption(st.session_state["themes_note"])
+
+            st.text_area(
+                "강한 테마 (#태그를 띄어쓰기로 구분)",
+                key="themes",
+                height=68,
+            )
+
+            sector_items_for_ui = st.session_state.get("sector_items", []) or []
+            sector_items_for_ui = sorted(
+                sector_items_for_ui,
+                key=lambda row: num(row.get("pct")) or 0,
+                reverse=True,
+            )
+            if sector_items_for_ui:
+                with st.expander("🏭 토스증권 산업별 주요 종목", expanded=False):
+                    st.caption(
+                        "토스증권 공개 산업 데이터 기준 · 대표 종목은 시가총액 내림차순 상위 최대 5개입니다. "
+                        "데이터는 조회 시점의 스냅샷이며, 실시간 체결 오버레이와 다를 수 있습니다."
                     )
-                    if st.session_state.get("summary_note"):
-                        summary_note_col.info(st.session_state["summary_note"])
-                    st.text_area(
-                        "한 줄 요약",
-                        key="summary",
-                        height=115,
-                        help=(
-                            "현재 산업·종목·지수 데이터로 생성됩니다. 기사 내용을 입력한 뒤 다시 생성할 수도 있고, "
-                            "생성된 문장은 직접 수정할 수 있습니다."
-                        ),
-                    )
-
-                with st.container(border=True):
-                    st.markdown("### ② 뉴스 자료")
-                    st.caption("토스증권 주요 뉴스를 불러와 각 이슈에 적용할 수 있습니다.")
-                    with st.expander("📰 토스증권 주요 뉴스 불러오기", expanded=False):
-                        st.caption(
-                            "토스증권 공개 대시보드 뉴스입니다. 뉴스 제목·링크를 이슈 입력칸으로 옮긴 뒤 기사 본문을 확인할 수 있습니다."
-                        )
-                        news_type_labels = {
-                            "주요 뉴스": "ALL_HIGHLIGHT",
-                            "최신 뉴스": "HOT",
-                            "급등주 뉴스": "SOARING_STOCK",
-                        }
-                        news_type_label = st.selectbox(
-                            "뉴스 분류",
-                            list(news_type_labels.keys()),
-                            index=0,
-                            key="toss_news_type_label",
-                        )
-                        news_btn_col, news_note_col = st.columns([1.8, 4], vertical_alignment="center")
-                        news_btn_col.button(
-                            "🔄 토스 뉴스 불러오기",
-                            key="toss_news_fetch_btn",
-                            on_click=load_toss_dashboard_news,
-                            args=(news_type_labels[st.session_state.get("toss_news_type_label", "주요 뉴스")],),
-                        )
-                        toss_news_error = st.session_state.get("toss_dashboard_news_error", "")
-                        if toss_news_error:
-                            st.error(f"토스 뉴스 조회 실패: {toss_news_error}")
-                        toss_news_items = st.session_state.get("toss_dashboard_news", []) or []
-                        if toss_news_items:
-                            news_note_col.success(f"{len(toss_news_items)}건 조회 · 결과는 최대 3분간 캐시됩니다.")
-                            for news_idx, news_item in enumerate(toss_news_items):
-                                with st.container(border=True):
-                                    news_title = news_item.get("title", "")
-                                    metadata = " · ".join(
-                                        part for part in [news_item.get("source", ""), news_item.get("published", "")]
-                                        if part
-                                    )
-                                    st.markdown(f"**{news_idx + 1}. {news_title}**")
-                                    if metadata:
-                                        st.caption(metadata)
-                                    if news_item.get("summary"):
-                                        st.write(news_item["summary"][:280])
-                                    related = news_item.get("related_stocks") or []
-                                    related_names = []
-                                    for related_item in related:
-                                        if isinstance(related_item, dict):
-                                            related_name = related_item.get("name") or related_item.get("stockName") or related_item.get("symbol")
-                                            if related_name:
-                                                related_names.append(str(related_name))
-                                        elif related_item:
-                                            related_names.append(str(related_item))
-                                    if related_names:
-                                        st.caption("관련 종목: " + " · ".join(related_names[:8]))
-                                    if news_item.get("url"):
-                                        st.markdown(f"[기사 링크 열기]({news_item['url']})")
-                                    elif news_item.get("news_id"):
-                                        st.caption("토스 뉴스 ID: " + news_item["news_id"] + " · API 응답에 기사 URL이 없어 직접 링크는 표시하지 않습니다.")
-                                    pick_cols = st.columns([1, 1, 1, 2])
-                                    for issue_num, pick_col in zip((1, 2, 3), pick_cols[:3]):
-                                        pick_col.button(
-                                            f"이슈 {issue_num}에 적용",
-                                            key=f"toss_news_{news_idx}_issue_{issue_num}",
-                                            on_click=use_toss_news_for_issue,
-                                            args=(issue_num, news_item),
-                                            use_container_width=True,
-                                        )
-                        elif not toss_news_error:
-                            st.info("아직 조회된 뉴스가 없습니다. ‘토스 뉴스 불러오기’를 눌러 주세요.")
-
-                st.markdown("### ③ 이슈별 내용 편집")
-                st.caption("각 이슈는 독립된 카드로 나눴습니다. 제목·관련 종목·기사·정리 내용을 순서대로 입력하세요.")
-                issues = [
-                    (1, "🔺", "당일 상승률 상위 종목 흐름"),
-                    (2, "🔻", "당일 하락률 상위 종목 흐름"),
-                    (3, "➖", "시장 변동성 확인"),
-                ]
-
-                for i, direction, title in issues:
-                    st.session_state.setdefault(f"is{i}m", direction)
-                    st.session_state.setdefault(f"is{i}t", title)
-                    with st.container(border=True):
-                        st.markdown(f"#### 이슈 {i}  ·  {direction}")
-                        top_left, top_right = st.columns([1.2, 4.8], vertical_alignment="top")
-                        top_left.selectbox(
-                            "방향 표시",
-                            ["🔺", "🔻", "➖"],
-                            key=f"is{i}m",
-                        )
-                        top_right.text_input(
-                            "이슈 제목",
-                            key=f"is{i}t",
-                            placeholder="예: 반도체 대형주 강세 및 관련주 확산",
-                        )
-                        st.text_input(
-                            "관련 종목",
-                            key=f"is{i}s",
-                            placeholder="종목명을 쉼표로 구분해 입력하세요. 예: 삼성전자, SK하이닉스",
-                        )
-                        link_col, fetch_col = st.columns([4.8, 1.2], vertical_alignment="bottom")
-                        link_col.text_input(
-                            "기사 URL",
-                            key=f"is{i}link",
-                            placeholder="https:// 기사 주소를 붙여넣으세요",
-                        )
-                        fetch_col.button(
-                            "기사 불러오기",
-                            key=f"is{i}fetch",
-                            on_click=load_article,
-                            args=(i,),
-                            use_container_width=True,
-                        )
-                        with st.expander(f"📄 이슈 {i} 기사 원문 입력 / 확인", expanded=False):
-                            st.text_area(
-                                "기사 내용",
-                                key=f"is{i}src",
-                                height=180,
-                                placeholder="기사 본문을 붙여넣거나 위 URL에서 불러오세요.",
+                    for sector_item in sector_items_for_ui[:5]:
+                        stock_rows = sector_item.get("stocks", []) or []
+                        stock_labels = []
+                        for stock in stock_rows[:5]:
+                            label = stock.get("name", "")
+                            pct = stock.get("pct")
+                            if pct is not None:
+                                label += f" ({pct:+.2f}%)"
+                            stock_labels.append(label)
+                        if not stock_labels and sector_item.get("leading_stock"):
+                            stock_labels = [sector_item["leading_stock"]]
+                        if stock_labels:
+                            st.markdown(
+                                f"**{sector_item['name']} ({sector_item.get('pct', 0):+.2f}%)**  \n"
+                                + " · ".join(stock_labels)
                             )
-                        action_col, note_col = st.columns([1.5, 4.5], vertical_alignment="center")
-                        action_col.button(
-                            "✨ 핵심 정리 생성",
-                            key=f"is{i}sum",
-                            on_click=summarize_issue,
-                            args=(i,),
-                            use_container_width=True,
-                        )
-                        if st.session_state.get(f"is{i}note"):
-                            note_col.info(st.session_state[f"is{i}note"])
-                        st.text_area(
-                            "시황글에 들어갈 핵심 내용",
-                            key=f"is{i}c",
-                            height=150,
-                            placeholder="이슈의 핵심 사실과 관련 종목 흐름을 입력하세요.",
-                        )
-                        st.text_area(
-                            "추가 체크 사항",
-                            key=f"is{i}k",
-                            height=95,
-                            placeholder="확인할 내용이 없다면 비워두셔도 됩니다.",
-                        )
-
-                st.markdown("### ④ 오늘의 테마")
-                with st.container(border=True):
-                    theme_btn_col, theme_note_col = st.columns([2.1, 3.9], vertical_alignment="center")
-                    theme_btn_col.button(
-                        "🔄 강한 테마 자동 불러오기",
-                        key="themes_btn",
-                        on_click=autofill_themes,
-                        use_container_width=True,
-                    )
-                    if st.session_state.get("themes_note"):
-                        theme_note_col.info(st.session_state["themes_note"])
-                    st.text_area(
-                        "강한 테마 (#태그를 띄어쓰기로 구분)",
-                        key="themes",
-                        height=100,
-                        placeholder="#반도체 #AI #전력기기",
-                    )
-
-                    sector_items_for_ui = st.session_state.get("sector_items", []) or []
-                    sector_items_for_ui = sorted(
-                        sector_items_for_ui,
-                        key=lambda row: num(row.get("pct")) or 0,
-                        reverse=True,
-                    )
-                    if sector_items_for_ui:
-                        with st.expander("🏭 토스증권 산업별 주요 종목 보기", expanded=False):
-                            st.caption(
-                                "토스증권 공개 산업 데이터 기준 · 대표 종목은 시가총액 내림차순 상위 최대 5개입니다. "
-                                "데이터는 조회 시점의 스냅샷이며 실시간 체결 오버레이와 다를 수 있습니다."
+                        else:
+                            st.markdown(
+                                f"**{sector_item['name']} ({sector_item.get('pct', 0):+.2f}%)**  \n"
+                                "주요 종목 데이터는 현재 확인되지 않았습니다."
                             )
-                            for sector_item in sector_items_for_ui[:5]:
-                                stock_rows = sector_item.get("stocks", []) or []
-                                stock_labels = []
-                                for stock in stock_rows[:5]:
-                                    label = stock.get("name", "")
-                                    pct = stock.get("pct")
-                                    if pct is not None:
-                                        label += f" ({pct:+.2f}%)"
-                                    stock_labels.append(label)
-                                if not stock_labels and sector_item.get("leading_stock"):
-                                    stock_labels = [sector_item["leading_stock"]]
-                                if stock_labels:
-                                    st.markdown(
-                                        f"**{sector_item['name']} ({sector_item.get('pct', 0):+.2f}%)**  \n"
-                                        + " · ".join(stock_labels)
-                                    )
-                                else:
-                                    st.markdown(
-                                        f"**{sector_item['name']} ({sector_item.get('pct', 0):+.2f}%)**  \n"
-                                        "주요 종목 데이터는 현재 확인되지 않았습니다."
-                                    )
-                                    if sector_item.get("stock_error"):
-                                        st.caption(f"종목 조회 응답: {sector_item['stock_error']}")
-                    else:
-                        st.info("산업별 주요 종목은 ‘강한 테마 자동 불러오기’를 실행하면 함께 조회됩니다.")
+                            if sector_item.get("stock_error"):
+                                st.caption(f"종목 조회 응답: {sector_item['stock_error']}")
+            else:
+                st.caption(
+                    "산업별 주요 종목은 ‘강한 테마 자동 불러오기’를 실행하면 함께 조회됩니다."
+                )
 
-                st.markdown("### ⑤ 다음 영업일 체크포인트")
-                with st.container(border=True):
-                    check_btn_col, check_note_col = st.columns([2.1, 3.9], vertical_alignment="center")
-                    check_btn_col.button(
-                        "🔄 내일 일정·주요 뉴스 자동 불러오기",
-                        key="checks_btn",
-                        on_click=autofill_checks,
-                        use_container_width=True,
-                    )
-                    if st.session_state.get("checks_note"):
-                        check_note_col.info(st.session_state["checks_note"])
-                    st.text_area(
-                        "내일 체크 포인트 · 자동 생성 내용을 확인하고 자유롭게 수정하세요",
-                        height=300,
-                        key="checks",
-                        placeholder="자동 불러오기를 실행하면 내일 예정 일정과 오늘 주요 뉴스가 여기에 정리됩니다. 직접 내용을 추가하거나 수정할 수 있습니다.",
-                    )
-                    st.text_area(
-                        "핵심 키워드",
-                        key="keywords",
-                        value="#코스피 #코스닥 #급등주 #급락주 #주식시황",
-                        height=85,
-                        placeholder="#코스피 #코스닥 #주식시황",
-                    )
+            st.session_state.setdefault("checks", "")
+
+            c1, c2 = st.columns([1.6, 5], vertical_alignment="center")
+
+            c1.button(
+                "🔄 다음 영업일 정보 넣기",
+                key="checks_btn",
+                on_click=autofill_checks,
+            )
+
+            if st.session_state.get("checks_note"):
+                c2.caption(st.session_state["checks_note"])
+
+            st.text_area(
+                "내일 체크 포인트 (줄바꿈 또는 /로 구분)",
+                height=110,
+                key="checks",
+            )
+
+            st.text_area(
+                "핵심 키워드",
+                key="keywords",
+                value="#코스피 #코스닥 #급등주 #급락주 #주식시황",
+                height=68,
+            )
 
         st.subheader("시황글 미리보기")
 
