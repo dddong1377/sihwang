@@ -36,23 +36,32 @@ TOSS_HEADERS = {
 }
 
 
-# Toss 응답에서 확인된 지수 코드
-# 표시 순서는 장전 리포트용으로 지정
+# ---------------------------------------------------------------
+# 표시할 지수 목록
+# ---------------------------------------------------------------
+# 선물 지수는 전부 제외
+# S&P500은 현물 코드 SPX.CBI만 사용
+# 러셀 2000 선물도 제외
+# ---------------------------------------------------------------
+
 TOSS_INDEX_ITEMS = (
     ("다우존스", "DJI.DJI", 2, "index"),
     ("S&P500", "SPX.CBI", 2, "index"),
     ("나스닥", "COMP.NAI", 2, "index"),
-    ("나스닥 100 선물", "RFU.NQc1", 2, "extra"),
-    ("S&P 500 선물", "RFU.ESc1", 2, "extra"),
-    ("러셀 2000 선물", "RFU.RTYc1", 2, "extra"),
     ("필라델피아 반도체", "SOX.NAI", 2, "extra"),
     ("VIX", "RGI..VIX", 2, "extra"),
     ("코스피", "KGG01P", 2, "extra"),
     ("코스닥", "QGG01P", 2, "extra"),
 )
 
-# 해외 주요 지수 표에 반드시 표시할 항목
-# API에서 값을 받지 못한 경우에도 확인 불가로 표시
+# 선물 지수 코드 차단 목록
+EXCLUDED_FUTURES_CODES = {
+    "RFU.NQc1",
+    "RFU.ESc1",
+    "RFU.RTYc1",
+}
+
+# 해외 주요 지수 표에 표시할 항목
 MAIN_INDEX_LABELS = (
     "다우존스",
     "S&P500",
@@ -64,7 +73,6 @@ MAIN_INDEX_LABELS = (
 )
 
 # API 응답에 추가 지표가 있을 때 이름을 연결하기 위한 별칭
-# 실제 응답에 해당 지표가 없으면 임의로 만들지 않음
 INDEX_NAME_ALIASES = {
     "다우존스": (
         "다우존스",
@@ -331,7 +339,7 @@ def safe_float(value):
 
 
 # ---------------------------------------------------------------
-# [수정] 실제 캔들 시간 추출
+# 실제 캔들 시간 추출
 # ---------------------------------------------------------------
 
 def parse_timestamp(value):
@@ -355,7 +363,6 @@ def parse_timestamp(value):
         if isinstance(value, (int, float)):
             timestamp = float(value)
 
-            # 밀리초 timestamp 대응
             if timestamp > 10_000_000_000:
                 timestamp /= 1000
 
@@ -370,18 +377,15 @@ def parse_timestamp(value):
             if not value:
                 return None
 
-            # 숫자형 timestamp 문자열
             if re.fullmatch(r"\d{10,13}", value):
                 return parse_timestamp(int(value))
 
-            # YYYYMMDD
             elif re.fullmatch(r"\d{8}", value):
                 dt = datetime.datetime.strptime(
                     value,
                     "%Y%m%d",
                 ).replace(tzinfo=KST)
 
-            # YYYYMMDDHHMMSS
             elif re.fullmatch(r"\d{14}", value):
                 dt = datetime.datetime.strptime(
                     value,
@@ -403,11 +407,9 @@ def parse_timestamp(value):
 
         now = datetime.datetime.now(KST)
 
-        # 2000년 이전 데이터 제외
         if dt.year < 2000:
             return None
 
-        # 현재보다 2분 이상 미래인 시각 제외
         if dt > now + datetime.timedelta(minutes=2):
             return None
 
@@ -423,12 +425,6 @@ def parse_timestamp(value):
 
 
 def find_candle_timestamps(value, results=None):
-    """
-    캔들 데이터 내부에서 시간 필드를 재귀적으로 탐색한다.
-
-    Toss 응답의 필드명이 확정되지 않은 상황을 고려해
-    일반적으로 사용되는 여러 시간 필드명을 탐색한다.
-    """
 
     if results is None:
         results = []
@@ -465,29 +461,19 @@ def find_candle_timestamps(value, results=None):
                     results.append(dt)
 
             if isinstance(item, (dict, list)):
-                find_candle_timestamps(
-                    item,
-                    results,
-                )
+                find_candle_timestamps(item, results)
 
     elif isinstance(value, list):
 
         for item in value:
 
             if isinstance(item, (dict, list)):
-                find_candle_timestamps(
-                    item,
-                    results,
-                )
+                find_candle_timestamps(item, results)
 
     return results
 
 
 def format_timestamp(value):
-    """
-    일반 날짜·시간 값을 KST 기준으로 변환한다.
-    확인할 수 없는 값은 확인 불가로 표시한다.
-    """
 
     dt = parse_timestamp(value)
 
@@ -507,6 +493,7 @@ def get_info_name(info):
 
 
 def get_info_price(info):
+
     price = info.get("price") or {}
 
     if not isinstance(price, dict):
@@ -522,12 +509,8 @@ def get_info_timestamp(info):
     """
     실제 캔들 데이터의 마지막 유효 시각을 반환한다.
 
-    중요:
     miniChart.tradingEnd는 거래 종료 예정 시각일 수 있으므로
     실제 업데이트 시각으로 사용하지 않는다.
-
-    candles 내부에서 실제 시간 필드를 찾지 못하면
-    '확인 불가'로 표시한다.
     """
 
     mini_chart = info.get("miniChart") or {}
@@ -551,13 +534,47 @@ def get_info_timestamp(info):
 
 
 # ---------------------------------------------------------------
+# 선물 지수 필터
+# ---------------------------------------------------------------
+
+def is_futures_index(info):
+    """
+    API가 고정 목록 외의 지수를 추가로 반환하더라도
+    선물 지수는 화면에 표시하지 않는다.
+
+    RFU 계열 코드 및 선물 명칭을 가진 지수 제외.
+    """
+
+    code = str(info.get("code") or "").strip()
+    name = get_info_name(info).lower()
+
+    if code in EXCLUDED_FUTURES_CODES:
+        return True
+
+    if code.upper().startswith("RFU."):
+        return True
+
+    futures_keywords = (
+        "선물",
+        "futures",
+        "future",
+    )
+
+    if any(keyword in name for keyword in futures_keywords):
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------
 # Toss 데이터 행 구성
 # ---------------------------------------------------------------
 
 def build_toss_rows(infos):
     """
     API에서 실제로 반환된 지수만 데이터로 사용한다.
-    응답에 없는 지수는 별도 처리에서 확인 불가로 표시한다.
+
+    선물 지수는 고정 목록과 추가 응답 모두에서 제외한다.
     """
 
     by_code = {}
@@ -569,8 +586,13 @@ def build_toss_rows(infos):
 
         code = str(info.get("code") or "").strip()
 
-        if code:
-            by_code[code] = info
+        if not code:
+            continue
+
+        if is_futures_index(info):
+            continue
+
+        by_code[code] = info
 
     rows = []
 
@@ -579,6 +601,7 @@ def build_toss_rows(infos):
         info = by_code.get(code)
 
         if not info:
+
             rows.append({
                 "label": label,
                 "kind": kind,
@@ -587,6 +610,7 @@ def build_toss_rows(infos):
                 "note": "Toss 응답에서 해당 지수 미확인",
                 "code": code,
             })
+
             continue
 
         latest, base = get_info_price(info)
@@ -629,7 +653,8 @@ def build_toss_rows(infos):
             "code": code,
         })
 
-    # 응답에 포함되어 있으나 고정 목록에는 없는 지표도 표시
+    # 고정 목록에 없는 추가 지표 표시
+    # 단, 선물 지수는 제외
     known_codes = {
         item[1]
         for item in TOSS_INDEX_ITEMS
@@ -643,6 +668,9 @@ def build_toss_rows(infos):
         code = str(info.get("code") or "").strip()
 
         if not code or code in known_codes:
+            continue
+
+        if is_futures_index(info):
             continue
 
         display_name = get_info_name(info)
@@ -698,10 +726,6 @@ def build_toss_rows(infos):
 # ---------------------------------------------------------------
 
 def build_main_index_rows(rows):
-    """
-    장전 리포트에 필요한 미국·유럽 7개 지수 표.
-    API에 없는 유럽 지수는 확인 불가로 표시한다.
-    """
 
     result = []
 
@@ -787,7 +811,7 @@ def fetch_indices():
         state["pm_indices_note"] = (
             f"Toss 조회 완료 · "
             f"{datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
-            f"응답 지표 {len(infos)}개"
+            f"응답 지표 {len(infos)}개 · 선물 지수 제외"
         )
 
     except Exception as error:
@@ -831,7 +855,8 @@ PREMARKET_PROMPT = """# 역할
 - 비고에 미확인 또는 데이터 없음으로 표시된 항목은 임의로 수치를 채우지 않는다.
 - 비고에 "휴장/미갱신 가능"이 있는 지수는 검색으로 휴장 여부를 확인해 사유를 표기한다.
 - 표기 형식: 지수명 : 지수값 (전일 대비 ±포인트, ±%) — 소수점 둘째 자리까지
-- 대상: 다우, S&P500, 나스닥, 영국 FTSE100, 프랑스 CAC40, 독일 DAX, 유로스톡스50
+- 대상: 다우, S&P500 현물, 나스닥 현물, 영국 FTSE100, 프랑스 CAC40, 독일 DAX, 유로스톡스50
+- 선물 지수는 사용하지 않는다. S&P500은 반드시 현물 지수만 사용한다.
 
 [확인된 Toss 지수 데이터]
 __INDEX_TABLE__
@@ -1067,7 +1092,6 @@ def call_claude(prompt, search=False, max_tokens=8000):
 
     result = "".join(texts).strip()
 
-    # 검색 과정 설명이 앞에 붙은 경우 리포트 제목부터 사용
     start = result.find("## 📅")
 
     if start > 0:
@@ -1084,7 +1108,6 @@ def call_claude(prompt, search=False, max_tokens=8000):
 # ---------------------------------------------------------------
 
 def run_premarket(use_source_only=False):
-    """원문 생성 → 압축. 결과를 session_state에 저장."""
 
     state = st.session_state
     now = datetime.datetime.now(KST)
@@ -1384,7 +1407,7 @@ def main():
 
             st.caption(
                 "※ Toss API에서 실제 반환된 값만 표시합니다. "
-                "응답에 없는 지수는 확인 불가로 표시됩니다. "
+                "선물 지수는 제외하며, 응답에 없는 지수는 확인 불가로 표시합니다. "
                 "기준 시각은 캔들 데이터에서 확인되는 시간만 표시합니다."
             )
 
