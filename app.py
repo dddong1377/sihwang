@@ -7,6 +7,7 @@ import os
 import re
 import time
 from collections import Counter
+from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -3281,81 +3282,278 @@ NEXT_DAY_LINE = re.compile(
 )
 
 
-def kr_date_text(day):
-    """'10월 30일(금)' 형태. 슬래시(/)는 체크 포인트 구분자와 겹쳐서 쓰지 않습니다."""
-    return f"{day.month}월 {day.day}일({WEEKDAYS[day.weekday()]})"
+class _ScheduleTextParser(HTMLParser):
+    """캘린더 페이지의 화면 텍스트를 줄 단위로 추출합니다."""
+    BLOCK_TAGS = {
+        "br", "p", "div", "section", "article", "li", "h1", "h2", "h3",
+        "h4", "tr", "td", "th", "header", "footer"
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() in self.BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag.lower() in self.BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        value = re.sub(r"\s+", " ", data).strip()
+        if value:
+            self.parts.append(value)
+
+    def text(self):
+        return "\n".join(part for part in self.parts if part.strip())
 
 
-def next_business_info():
-    """(다음 영업일, 개장 시각, 캘린더 조회 성공 여부)"""
+def _tomorrow_kst():
+    return datetime.datetime.now(KST).date() + datetime.timedelta(days=1)
 
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_next_day_schedule(target_date_text):
+    """투넷 증시 일정 페이지에서 지정일의 실적·경제·정책 일정을 읽습니다.
+
+    개장·휴장·폐장 등 거래소 운영 정보는 의도적으로 제외합니다.
+    페이지 구조가 바뀌거나 조회에 실패하면 빈 목록을 반환합니다.
+    """
+    target = datetime.date.fromisoformat(target_date_text)
+    month_label = f"{target.month}월"
+    day_label = rf"{target.month}\s*월\s*{target.day}\s*일"
+    url = "https://web.tunet.co.kr/schedule"
+    response = requests.get(
+        url,
+        headers={"User-Agent": TOSS_WEB_HEADERS["User-Agent"]},
+        timeout=(5, 12),
+    )
+    response.raise_for_status()
+    parser = _ScheduleTextParser()
+    parser.feed(response.text)
+    lines = [re.sub(r"\s+", " ", x).strip() for x in parser.text().splitlines()]
+    lines = [x for x in lines if x]
+
+    # 대상 날짜의 섹션 시작점을 찾고 다음 날짜 제목 전까지만 확인합니다.
+    start = None
+    date_header = re.compile(day_label + r"\s*[（(]?[월화수목금토일]요일?[）)]?", re.I)
+    for i, line in enumerate(lines):
+        if date_header.search(line) and (month_label in line or line.startswith(str(target.day))):
+            start = i
+            break
+    if start is None:
+        # 일부 페이지는 날짜와 요일을 별도 텍스트 노드로 나눕니다.
+        for i, line in enumerate(lines):
+            if re.search(rf"{target.month}\s*월\s*{target.day}\s*일", line):
+                start = i
+                break
+    if start is None:
+        return []
+
+    section = []
+    next_header = re.compile(r"(?:\d{1,2}\s*월\s*)?\d{1,2}\s*일\s*[（(][월화수목금토일]요일?[）)]")
+    for line in lines[start + 1:]:
+        if next_header.search(line):
+            break
+        section.append(line)
+
+    excluded = re.compile(r"휴장|개장|폐장|정규장|장 운영|거래일|증시 운영|시장 운영|조기 폐장", re.I)
+    label_only = re.compile(r"^(경제일정|경제지표|실적발표|실적|IR|기타|행사·정책|공모주|권리일정|주요 일정|일정)$")
+    time_only = re.compile(r"^\d{1,2}[.:]\s*\d{1,2}(?:\s*\d{1,2}:\d{2})?$")
+    events = []
+    for line in section:
+        line = re.sub(r"^(?:경제일정|경제지표|실적발표|실적|IR|기타|행사·정책)\s*", "", line).strip()
+        line = re.sub(r"^\d{1,2}\.\s*\d{1,2}\.\s*(?:\d{1,2}:\d{2})?\s*", "", line).strip()
+        if not line or excluded.search(line) or label_only.match(line) or time_only.match(line):
+            continue
+        if len(line) < 5 or line in events:
+            continue
+        # 메뉴·범례·월 전체 집계 등 일정이 아닌 문구 제거
+        if any(x in line for x in ("전체 건", "월 전체", "필터 결과", "TODAY", "이전 달", "다음 달")):
+            continue
+        events.append(line)
+    return events[:12]
+
+
+def _news_is_today(item, today):
+    raw = str(item.get("published", "")).strip()
+    if not raw:
+        return None
+    # API의 createdAt은 ISO 문자열 또는 epoch일 수 있습니다.
     try:
-        result = api_get("/api/v1/market-calendar/KR")
-
-        nxt = result.get("nextBusinessDay") or {}
-        day = nxt.get("date")
-
-        regular = (
-            (nxt.get("integrated") or {}).get("regularMarket") or {}
-        ).get("startTime")
-
-        open_time = str(regular)[11:16] if regular else "09:00"
-
-        if day:
-            return datetime.date.fromisoformat(day), open_time, True
-
+        if raw.isdigit():
+            stamp = float(raw)
+            if stamp > 10**12:
+                stamp /= 1000
+            published = datetime.datetime.fromtimestamp(stamp, KST)
+        else:
+            normalized = raw.replace("Z", "+00:00")
+            published = datetime.datetime.fromisoformat(normalized)
+            if published.tzinfo is None:
+                published = published.replace(tzinfo=KST)
+            published = published.astimezone(KST)
+        return published.date() == today
     except Exception:
-        pass
-
-    day = datetime.datetime.now(KST).date() + datetime.timedelta(days=1)
-
-    while day.weekday() >= 5:
-        day += datetime.timedelta(days=1)
-
-    return day, "09:00", False
+        return None
 
 
-def build_next_day_line():
-    """내일 체크 포인트의 첫 줄: 다음 영업일 안내(휴장 포함)."""
-
+def _today_toss_news(limit=12):
+    items = fetch_toss_dashboard_news("ALL_HIGHLIGHT", limit=20)
     today = datetime.datetime.now(KST).date()
+    dated = [(item, _news_is_today(item, today)) for item in items]
+    confirmed_today = [item for item, is_today in dated if is_today is True]
+    # 날짜 형식이 제공되지 않는 항목은 최신 주요 뉴스 피드에 한해 참고하되,
+    # 결과 안내에 날짜 미확인임을 명시합니다.
+    if confirmed_today:
+        return confirmed_today[:limit], "게시일 오늘 확인"
+    unknown = [item for item, is_today in dated if is_today is None]
+    return unknown[:limit], "게시일 미확인 · 토스 최신 주요 뉴스 기준"
 
-    nxt, open_time, ok = next_business_info()
 
-    # 오늘과 다음 영업일 사이의 평일 = 휴장일
-    closed = [
-        today + datetime.timedelta(days=d)
-        for d in range(1, max((nxt - today).days, 1))
-        if (today + datetime.timedelta(days=d)).weekday() < 5
-    ]
+def _fallback_next_day_brief(target, events, news_items, news_date_note):
+    lines = [f"【{kr_date_text(target)} 예정 주요 일정】"]
+    if events:
+        lines.extend(f"- {event}" for event in events[:8])
+    else:
+        lines.append("- 확인된 주요 일정이 없습니다. 일정 데이터 제공 여부를 별도로 확인해 주세요.")
 
-    if closed:
-        names = ", ".join(kr_date_text(day) for day in closed)
-        return f"다음 영업일은 {kr_date_text(nxt)}, {names} 휴장", ok
+    lines.append("")
+    lines.append("【오늘 주요 뉴스 중 내일 확인할 내용】")
+    if news_items:
+        for item in news_items[:5]:
+            title = item.get("title", "").strip()
+            summary = item.get("summary", "").strip()
+            text = f"- {title}"
+            if summary:
+                text += f" — {summary[:150]}"
+            lines.append(text)
+    else:
+        lines.append("- 오늘 게시된 주요 뉴스 데이터를 확인하지 못했습니다.")
+    lines.append(f"  ※ 뉴스 기준: {news_date_note}")
 
-    return f"{kr_date_text(nxt)} 정규장 {open_time} 개장", ok
+    lines.extend([
+        "",
+        "【내일 확인할 핵심 사항】",
+        "- 예정된 경제지표·기업 실적 발표 결과와 시장 반응",
+        "- 오늘 주요 뉴스의 후속 발표 및 정책·기업 관련 추가 공지",
+        "- 관련 업종·대표 종목의 거래량과 수급 변화",
+    ])
+    return "\n".join(lines)
+
+
+def _ai_next_day_brief(target, events, news_items, news_date_note):
+    """AI 키가 있으면 일정과 뉴스의 중복을 줄여 내일 체크 항목을 구성합니다."""
+    event_text = "\n".join(f"- {x}" for x in events) or "확인된 일정 없음"
+    news_text = "\n".join(
+        f"- 제목: {x.get('title','')}\n  요약: {x.get('summary','') or '요약 없음'}\n  출처: {x.get('source','')} / 게시: {x.get('published','')}"
+        for x in news_items
+    ) or "확인된 뉴스 없음"
+    prompt = f"""당신은 국내 주식시장 콘텐츠팀의 데스크입니다. 아래 자료만 사용해 다음 거래일 투자자가 확인할 체크포인트를 한국어로 작성하세요.
+
+[대상 날짜]
+{target.isoformat()} ({WEEKDAYS[target.weekday()]})
+
+[해당 날짜 예정 일정]
+{event_text}
+
+[오늘 주요 뉴스]
+게시일 판정: {news_date_note}
+{news_text}
+
+[작성 규칙]
+- 장 개장·휴장·폐장 시각 및 거래소 운영 안내는 절대 넣지 마세요.
+- 일정은 경제지표, 기업 실적, 정책 발표, 국제 행사 등 투자 관련 내용만 남기세요.
+- 오늘 뉴스 중 내일 후속 발표·결과·추가 보도를 확인할 가치가 있는 것만 선택하세요.
+- 일정과 뉴스가 중복되면 하나로 합치세요.
+- 중요도가 낮거나 시장 연관성이 불분명한 항목은 제외하세요.
+- 자료에 없는 발표 시각, 결과, 전망, 인과관계를 만들지 마세요. 시간 정보가 없으면 시간을 쓰지 마세요.
+- 일정·뉴스·내일 확인 사항을 구분해 최대 8개 핵심 항목으로 정리하세요.
+- 확인할 내용이 부족하면 '확인된 주요 일정 없음' 또는 '후속 확인 자료 없음'이라고 명시하세요.
+- 매수·매도 추천이나 수익 전망은 쓰지 마세요.
+- 마크다운 목록으로 결과만 출력하세요.
+"""
+    response = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": secret("ANTHROPIC_API_KEY"),
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": secret("ANTHROPIC_MODEL", "claude-haiku-5-5"),
+            "max_tokens": 900,
+            "messages": [{"role": "user", "content": prompt}],
+        },
+        timeout=45,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"AI 브리핑 HTTP {response.status_code}: {response.text[:250]}")
+    parts = response.json().get("content", [])
+    result = "\n".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+    if not result:
+        raise RuntimeError("AI 브리핑 결과가 비어 있습니다.")
+    return result
+
+
+def build_next_day_brief():
+    """내일 일정 + 오늘의 주요 뉴스 기반 체크포인트를 생성합니다."""
+    target = _tomorrow_kst()
+    events = []
+    news_items = []
+    errors = []
+    try:
+        events = fetch_next_day_schedule(target.isoformat())
+    except Exception as error:
+        errors.append(f"일정 조회 실패: {error}")
+    news_note = "뉴스 조회 전"
+    try:
+        news_items, news_note = _today_toss_news(limit=12)
+    except Exception as error:
+        errors.append(f"토스 뉴스 조회 실패: {error}")
+
+    if secret("ANTHROPIC_API_KEY") and (events or news_items):
+        try:
+            brief = _ai_next_day_brief(target, events, news_items, news_note)
+            method = "AI가 일정·뉴스 중요도를 정리했습니다."
+        except Exception as error:
+            brief = _fallback_next_day_brief(target, events, news_items, news_note)
+            method = f"AI 정리 실패로 수집 자료를 나열했습니다: {error}"
+    else:
+        brief = _fallback_next_day_brief(target, events, news_items, news_note)
+        method = "AI 요약 키가 없어 확인된 일정과 뉴스 제목을 우선 정리했습니다."
+
+    if errors:
+        method += " / " + " / ".join(errors)
+    return brief, method
 
 
 def autofill_checks():
-    """'내일 체크 포인트' 맨 위에 다음 영업일 안내 한 줄을 넣습니다 (기존 내용은 유지)."""
-
+    """내일 일정과 오늘 주요 뉴스를 불러와 체크포인트를 자동 작성합니다."""
     state = st.session_state
+    with st.spinner("내일 일정과 오늘 주요 뉴스를 확인하는 중..."):
+        brief, note = build_next_day_brief()
 
-    line, ok = build_next_day_line()
+    old_text = state.get("checks", "")
+    # 재실행 시 이전 자동 생성 구간만 교체하고 사용자가 직접 적은 메모는 보존합니다.
+    begin = "【자동 수집 브리핑 시작】"
+    finish = "【자동 수집 브리핑 끝】"
+    manual = old_text
+    if begin in old_text and finish in old_text:
+        before, remainder = old_text.split(begin, 1)
+        _, after = remainder.split(finish, 1)
+        manual = (before + after).strip()
+    else:
+        manual_lines = [
+            row for row in old_text.splitlines()
+            if row.strip() and not NEXT_DAY_LINE.match(row.strip())
+        ]
+        manual = "\n".join(manual_lines).strip()
 
-    rest = [
-        row
-        for row in state.get("checks", "").splitlines()
-        if row.strip() and not NEXT_DAY_LINE.match(row.strip())
-    ]
-
-    state["checks"] = "\n".join([line] + rest)
-
-    state["checks_note"] = (
-        "토스 장 캘린더 기준으로 첫 줄에 넣었습니다. 나머지 일정은 직접 이어서 적어 주세요."
-        if ok
-        else "캘린더 조회에 실패해 평일 기준으로 계산했습니다. 공휴일 여부는 직접 확인해 주세요."
-    )
+    generated = f"{begin}\n{brief}\n{finish}"
+    state["checks"] = generated + (f"\n\n【직접 입력 메모】\n{manual}" if manual else "")
+    state["checks_note"] = note
 
 
 def fmt(value, digits=2):
@@ -3605,14 +3803,21 @@ def build_markdown(snapshot, time_text="확인 불가"):
 
         if value:
             if key == "checks":
-                items = [
-                    re.sub(r"^[-•·]\s*", "", part.strip())
-                    for part in re.split(r"[/\n]", value)
-                ]
-
-                body_text = "\n".join(
-                    f"- {item}" for item in items if item
-                )
+                check_lines = []
+                for raw_line in value.splitlines():
+                    item = raw_line.strip()
+                    if not item or item in ("【자동 수집 브리핑 시작】", "【자동 수집 브리핑 끝】"):
+                        continue
+                    item = re.sub(r"^[-•·]\s*", "", item)
+                    if item.startswith("【") and item.endswith("】"):
+                        check_lines.extend([f"**{item.strip('【】')}**", ""])
+                    elif item.startswith("【직접 입력 메모】"):
+                        check_lines.extend(["**직접 입력 메모**", ""])
+                    else:
+                        # 자동 생성 구간 외에 사용자가 '/'로 구분해 적은 문장도 지원합니다.
+                        sub_items = [x.strip() for x in item.split("/") if x.strip()]
+                        check_lines.extend(f"- {x}" for x in sub_items)
+                body_text = "\n".join(check_lines).strip()
 
             elif key == "themes":
                 # 테마 입력 순서를 유지하면서 테마별 대표 종목과
@@ -4744,7 +4949,7 @@ def main():
                 with st.container(border=True):
                     check_btn_col, check_note_col = st.columns([2.1, 3.9], vertical_alignment="center")
                     check_btn_col.button(
-                        "🔄 다음 영업일 정보 넣기",
+                        "🔄 내일 일정·주요 뉴스 자동 불러오기",
                         key="checks_btn",
                         on_click=autofill_checks,
                         use_container_width=True,
@@ -4752,10 +4957,10 @@ def main():
                     if st.session_state.get("checks_note"):
                         check_note_col.info(st.session_state["checks_note"])
                     st.text_area(
-                        "내일 체크 포인트 (줄바꿈 또는 /로 구분)",
-                        height=130,
+                        "내일 체크 포인트 · 자동 생성 내용을 확인하고 자유롭게 수정하세요",
+                        height=300,
                         key="checks",
-                        placeholder="예: 미국 주요 경제지표 발표 / 반도체 업종 수급 / 원·달러 환율",
+                        placeholder="자동 불러오기를 실행하면 내일 예정 일정과 오늘 주요 뉴스가 여기에 정리됩니다. 직접 내용을 추가하거나 수정할 수 있습니다.",
                     )
                     st.text_area(
                         "핵심 키워드",
