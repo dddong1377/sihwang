@@ -3969,32 +3969,33 @@ def pick_universe(changed):
     st.session_state[other] = not st.session_state[changed]
 
 
-def apply_label_style():
-    """대시보드 전반의 가독성과 간격을 정리합니다. 미리보기 스타일은 별도 유지합니다."""
+def apply_label_style(theme_mode="라이트"):
+    """라이트/블랙 테마와 큰 글자 스타일을 적용합니다. 미리보기 내용 생성 로직은 유지합니다."""
 
-    theme = "light"
-    try:
-        theme = st.context.theme.type or "light"
-    except Exception:
-        try:
-            theme = st.get_option("theme.base") or "light"
-        except Exception:
-            pass
-
-    if theme == "dark":
-        page_bg = "#0E1117"
-        panel_bg = "#171B24"
-        panel_border = "#303744"
-        text_main = "#F3F5F8"
-        text_muted = "#AAB3C2"
-        input_bg = "#202633"
+    if theme_mode == "블랙":
+        page_bg = "#080D18"
+        panel_bg = "#111A2A"
+        panel_alt = "#172338"
+        panel_border = "#34445F"
+        text_main = "#F8FAFF"
+        text_muted = "#C0CBDA"
+        input_bg = "#0D1728"
+        accent = "#75A7FF"
+        positive = "#FF7777"
+        negative = "#69A7FF"
+        shadow = "rgba(0, 0, 0, .28)"
     else:
-        page_bg = "#F5F7FB"
+        page_bg = "#EEF3FA"
         panel_bg = "#FFFFFF"
-        panel_border = "#E3E8F0"
-        text_main = "#182230"
-        text_muted = "#667085"
+        panel_alt = "#F7F9FD"
+        panel_border = "#CBD6E5"
+        text_main = "#101B2D"
+        text_muted = "#45546A"
         input_bg = "#FFFFFF"
+        accent = "#174EA6"
+        positive = "#D92D20"
+        negative = "#175CD3"
+        shadow = "rgba(28, 48, 78, .08)"
 
     st.markdown(
         f"""
@@ -4002,53 +4003,76 @@ def apply_label_style():
         :root {{
             --mtnw-page: {page_bg};
             --mtnw-panel: {panel_bg};
+            --mtnw-panel-alt: {panel_alt};
             --mtnw-border: {panel_border};
             --mtnw-text: {text_main};
             --mtnw-muted: {text_muted};
             --mtnw-input: {input_bg};
+            --mtnw-accent: {accent};
+            --mtnw-positive: {positive};
+            --mtnw-negative: {negative};
+            color-scheme: {'dark' if theme_mode == '블랙' else 'light'};
         }}
 
-        /* 전체 화면: 여백과 본문 폭 */
-        .stApp {{ background: var(--mtnw-page); }}
+        .stApp {{ background: var(--mtnw-page); color: var(--mtnw-text); }}
         .main .block-container {{
-            max-width: 1480px;
-            padding-top: 1.7rem;
+            max-width: 1500px;
+            padding-top: 1.35rem;
             padding-bottom: 3rem;
             padding-left: clamp(1rem, 3vw, 2.8rem);
             padding-right: clamp(1rem, 3vw, 2.8rem);
         }}
+
+        /* 기본 글자: 크고 진하게 */
+        .stMarkdown, .stMarkdown p, .stMarkdown li,
+        [data-testid="stText"], [data-testid="stCaptionContainer"] p {{
+            color: var(--mtnw-text) !important;
+            font-size: 1.02rem !important;
+            font-weight: 550 !important;
+            line-height: 1.62 !important;
+        }}
         h1 {{
             color: var(--mtnw-text) !important;
-            font-size: clamp(1.7rem, 2.4vw, 2.25rem) !important;
-            font-weight: 800 !important;
-            letter-spacing: -0.045em !important;
-            margin-bottom: .35rem !important;
+            font-size: clamp(2rem, 2.8vw, 2.55rem) !important;
+            font-weight: 900 !important;
+            letter-spacing: -.045em !important;
+            margin-bottom: .5rem !important;
         }}
-        h2, h3 {{
+        h2 {{
             color: var(--mtnw-text) !important;
-            font-weight: 750 !important;
-            letter-spacing: -0.025em !important;
+            font-size: 1.62rem !important;
+            font-weight: 900 !important;
+            letter-spacing: -.03em !important;
+            margin-top: 1.65rem !important;
+            margin-bottom: .85rem !important;
         }}
-        h2 {{ margin-top: 1.5rem !important; margin-bottom: .8rem !important; }}
-        h3 {{ margin-top: 1.1rem !important; margin-bottom: .65rem !important; }}
-        p, li, label {{ color: var(--mtnw-text); }}
+        h3 {{
+            color: var(--mtnw-text) !important;
+            font-size: 1.32rem !important;
+            font-weight: 850 !important;
+            letter-spacing: -.02em !important;
+            margin-top: 1.2rem !important;
+            margin-bottom: .7rem !important;
+        }}
+        strong, b {{ color: var(--mtnw-text) !important; font-weight: 850 !important; }}
 
-        /* Streamlit 요소 간 간격 */
-        [data-testid="stVerticalBlock"] {{ gap: .8rem; }}
-        [data-testid="stHorizontalBlock"] {{ gap: .8rem; }}
+        [data-testid="stVerticalBlock"] {{ gap: .9rem; }}
+        [data-testid="stHorizontalBlock"] {{ gap: .9rem; }}
         [data-testid="stCaptionContainer"] p {{
             color: var(--mtnw-muted) !important;
-            font-size: .83rem !important;
-            line-height: 1.5 !important;
+            font-size: .94rem !important;
+            font-weight: 600 !important;
+            line-height: 1.55 !important;
         }}
 
-        /* 입력 영역 */
+        /* 라벨 및 입력 글자 */
         [data-testid="stWidgetLabel"] p,
         [data-testid="stWidgetLabel"] span,
-        [data-testid="stCheckbox"] label p {{
+        [data-testid="stCheckbox"] label p,
+        [data-testid="stRadio"] label p {{
             color: var(--mtnw-text) !important;
-            font-size: .94rem !important;
-            font-weight: 700 !important;
+            font-size: 1.04rem !important;
+            font-weight: 800 !important;
             opacity: 1 !important;
         }}
         [data-testid="stTextInput"] input,
@@ -4057,61 +4081,95 @@ def apply_label_style():
         [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
         [data-testid="stMultiSelect"] div[data-baseweb="select"] > div {{
             background: var(--mtnw-input) !important;
-            border-color: var(--mtnw-border) !important;
-            border-radius: 10px !important;
+            color: var(--mtnw-text) !important;
+            border: 1px solid var(--mtnw-border) !important;
+            border-radius: 11px !important;
+            font-size: 1.02rem !important;
+            font-weight: 650 !important;
         }}
-        [data-testid="stTextArea"] textarea {{ line-height: 1.55 !important; }}
+        [data-testid="stTextArea"] textarea {{ line-height: 1.65 !important; }}
 
         /* 버튼 */
         .stButton > button {{
-            min-height: 2.55rem;
-            border-radius: 10px;
+            min-height: 2.9rem;
+            border-radius: 11px;
             border: 1px solid var(--mtnw-border);
-            font-weight: 700;
+            color: var(--mtnw-text) !important;
+            font-size: 1rem !important;
+            font-weight: 850 !important;
+            background: var(--mtnw-panel) !important;
+            box-shadow: 0 2px 8px {shadow};
             transition: border-color .15s ease, transform .15s ease;
         }}
-        .stButton > button:hover {{ border-color: #7C91B5; transform: translateY(-1px); }}
+        .stButton > button:hover {{ border-color: var(--mtnw-accent); transform: translateY(-1px); }}
         .stButton > button[kind="primary"] {{
+            background: var(--mtnw-accent) !important;
+            color: #FFFFFF !important;
             border: 0;
-            box-shadow: 0 3px 10px rgba(35, 83, 160, .16);
+            box-shadow: 0 3px 12px {shadow};
         }}
 
-        /* 표 */
+        /* 데이터 표 / 카드 / 접이식 영역 */
         [data-testid="stDataFrame"], [data-testid="stTable"] {{
             border: 1px solid var(--mtnw-border);
-            border-radius: 12px;
+            border-radius: 13px;
             overflow: hidden;
             background: var(--mtnw-panel);
         }}
-
-        /* 접이식 영역과 사이드바 */
         [data-testid="stExpander"] {{
             border: 1px solid var(--mtnw-border) !important;
-            border-radius: 13px !important;
+            border-radius: 14px !important;
             background: var(--mtnw-panel) !important;
             overflow: hidden;
+            box-shadow: 0 3px 12px {shadow};
         }}
-        [data-testid="stExpander"] summary {{ padding: .8rem 1rem !important; }}
+        [data-testid="stExpander"] summary {{ padding: .95rem 1.1rem !important; }}
         [data-testid="stExpander"] summary p {{
             color: var(--mtnw-text) !important;
-            font-size: .98rem !important;
-            font-weight: 750 !important;
+            font-size: 1.12rem !important;
+            font-weight: 850 !important;
         }}
         [data-testid="stSidebar"] {{
             background: var(--mtnw-panel);
             border-right: 1px solid var(--mtnw-border);
         }}
-        [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {{ gap: .75rem; }}
+        [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {{ gap: .85rem; }}
+        [data-testid="stAlert"] {{ border-radius: 12px; }}
+        [data-testid="stAlert"] p {{ font-size: 1rem !important; font-weight: 650 !important; }}
 
-        /* 안내 메시지 */
-        [data-testid="stAlert"] {{ border-radius: 11px; }}
+        /* 상단 테마 선택 컨트롤 */
+        [data-testid="stRadio"] > div {{ gap: .45rem; }}
+        [data-testid="stRadio"] label {{
+            background: var(--mtnw-panel) !important;
+            border: 1px solid var(--mtnw-border) !important;
+            border-radius: 10px !important;
+            padding: .35rem .7rem !important;
+        }}
 
-        /* 모바일 */
+        /* 시황글 미리보기는 기존 글자 크기와 밀도를 유지 */
+        .st-key-preview_container .stMarkdown p,
+        .st-key-preview_container .stMarkdown li {{
+            font-size: 1rem !important;
+            font-weight: 400 !important;
+            line-height: 1.5 !important;
+        }}
+        .st-key-preview_container .stMarkdown h1 {{
+            font-size: clamp(1.7rem, 2.4vw, 2.25rem) !important;
+            font-weight: 800 !important;
+        }}
+        .st-key-preview_container .stMarkdown h2,
+        .st-key-preview_container .stMarkdown h3 {{
+            font-size: revert !important;
+            font-weight: 750 !important;
+        }}
+
         @media (max-width: 760px) {{
             .main .block-container {{ padding: 1rem .8rem 2rem .8rem; }}
-            [data-testid="stHorizontalBlock"] {{ gap: .45rem; }}
-            h1 {{ font-size: 1.55rem !important; }}
-            [data-testid="stWidgetLabel"] p {{ font-size: .88rem !important; }}
+            [data-testid="stHorizontalBlock"] {{ gap: .5rem; }}
+            h1 {{ font-size: 1.8rem !important; }}
+            h2 {{ font-size: 1.4rem !important; }}
+            h3 {{ font-size: 1.2rem !important; }}
+            [data-testid="stWidgetLabel"] p {{ font-size: .98rem !important; }}
         }}
         </style>
         """,
@@ -4121,8 +4179,8 @@ def apply_label_style():
 
 def main():
     st.title("MTNW 오후 시황")
-
-    apply_label_style()
+    # 1차 UI의 라이트 스타일로 고정합니다. 미리보기 디자인은 별도 유지합니다.
+    apply_label_style("라이트")
 
     # 시총 100위 모드를 기본값으로 시작합니다.
     st.session_state.setdefault("uni_all", False)
@@ -4403,276 +4461,309 @@ def main():
 
         with st.expander(
             "📝 시황글 추가 내용 편집 · 이슈·뉴스·테마·체크포인트",
-            expanded=False
+            expanded=True
         ):
-            st.caption(
-                "이슈별로 기사 링크를 넣고 [기사 불러오기] → [핵심 정리]를 누르면 "
-                "'내용' 칸이 채워집니다. 기사 내용을 직접 붙여넣어도 됩니다. "
-                + (
-                    "요약 방식: AI"
-                    if secret("ANTHROPIC_API_KEY")
-                    else "요약 방식: 핵심 문장 자동 추출 (AI 요약은 ANTHROPIC_API_KEY 설정 시)"
-                )
-            )
-
-            # 첫 화면에서만 자동 생성합니다. 이후에는 사용자의 수정 내용을 유지합니다.
-            if "summary" not in st.session_state:
-                st.session_state["summary"] = generate_market_summary(snapshot)
-
-            summary_btn_col, summary_note_col = st.columns([1.7, 5], vertical_alignment="center")
-            summary_btn_col.button(
-                "✨ 한 줄 요약 자동 생성 / 다시 생성",
-                key="summary_generate_btn",
-                on_click=autofill_summary,
-                use_container_width=True,
-            )
-            if st.session_state.get("summary_note"):
-                summary_note_col.caption(st.session_state["summary_note"])
-
-            st.text_area(
-                "한 줄 요약",
-                key="summary",
-                height=90,
-                help=(
-                    "기사가 없어도 현재 산업·종목·지수 데이터로 생성됩니다. "
-                    "기사 내용을 입력한 뒤 다시 생성하면 입력 기사까지 반영합니다. "
-                    "필요하면 직접 수정할 수 있습니다."
-                ),
-            )
-
-            with st.expander("📰 토스증권 주요 뉴스 불러오기", expanded=False):
-                st.caption(
-                    "토스증권 공개 대시보드 뉴스입니다. 개인화 추천 피드나 커뮤니티 댓글은 불러오지 않습니다. "
-                    "뉴스 제목/링크를 이슈 입력칸으로 옮긴 뒤 기사 본문을 확인할 수 있습니다."
-                )
-                news_type_labels = {
-                    "주요 뉴스": "ALL_HIGHLIGHT",
-                    "최신 뉴스": "HOT",
-                    "급등주 뉴스": "SOARING_STOCK",
+            # 편집 영역 전용 스타일: 라벨·입력 글자 대비와 크기를 높입니다.
+            st.markdown(
+                """
+                <style>
+                .st-key-editor_panel [data-testid="stWidgetLabel"] p,
+                .st-key-editor_panel [data-testid="stWidgetLabel"] span {
+                    color: #14243A !important;
+                    font-size: 1.12rem !important;
+                    font-weight: 850 !important;
+                    opacity: 1 !important;
                 }
-                news_type_label = st.selectbox(
-                    "뉴스 분류",
-                    list(news_type_labels.keys()),
-                    index=0,
-                    key="toss_news_type_label",
-                )
-                news_btn_col, news_note_col = st.columns([1.6, 5], vertical_alignment="center")
-                news_btn_col.button(
-                    "🔄 토스 뉴스 불러오기",
-                    key="toss_news_fetch_btn",
-                    on_click=load_toss_dashboard_news,
-                    args=(news_type_labels[st.session_state.get("toss_news_type_label", "최신 뉴스")],),
-                )
-                toss_news_error = st.session_state.get("toss_dashboard_news_error", "")
-                if toss_news_error:
-                    st.error(f"토스 뉴스 조회 실패: {toss_news_error}")
-                toss_news_items = st.session_state.get("toss_dashboard_news", []) or []
-                if toss_news_items:
-                    news_note_col.caption(f"{len(toss_news_items)}건 표시 · 조회 결과는 최대 3분간 캐시됩니다.")
-                    for news_idx, news_item in enumerate(toss_news_items):
-                        news_title = news_item.get("title", "")
-                        metadata = " · ".join(
-                            part for part in [news_item.get("source", ""), news_item.get("published", "")]
-                            if part
-                        )
-                        st.markdown(f"**{news_idx + 1}. {news_title}**")
-                        if metadata:
-                            st.caption(metadata)
-                        if news_item.get("summary"):
-                            st.write(news_item["summary"][:280])
-                        related = news_item.get("related_stocks") or []
-                        related_names = []
-                        for related_item in related:
-                            if isinstance(related_item, dict):
-                                related_name = related_item.get("name") or related_item.get("stockName") or related_item.get("symbol")
-                                if related_name:
-                                    related_names.append(str(related_name))
-                            elif related_item:
-                                related_names.append(str(related_item))
-                        if related_names:
-                            st.caption("관련 종목: " + " · ".join(related_names[:8]))
-                        if news_item.get("url"):
-                            st.markdown(f"[기사 링크 열기]({news_item['url']})")
-                        elif news_item.get("news_id"):
-                            st.caption("토스 뉴스 ID: " + news_item["news_id"] + " · API 응답에 기사 URL이 없어 직접 링크는 표시하지 않습니다.")
-                        pick_cols = st.columns([1, 1, 1, 4])
-                        for issue_num, pick_col in zip((1, 2, 3), pick_cols[:3]):
-                            pick_col.button(
-                                f"이슈 {issue_num}에 적용",
-                                key=f"toss_news_{news_idx}_issue_{issue_num}",
-                                on_click=use_toss_news_for_issue,
-                                args=(issue_num, news_item),
-                            )
-                        st.divider()
-                elif not toss_news_error:
-                    st.caption("아직 조회된 뉴스가 없습니다. ‘토스 뉴스 불러오기’를 눌러 주세요.")
-
-            issues = [
-                (1, "🔺", "당일 상승률 상위 종목 흐름"),
-                (2, "🔻", "당일 하락률 상위 종목 흐름"),
-                (3, "➖", "시장 변동성 확인"),
-            ]
-
-            for i, direction, title in issues:
-                st.session_state.setdefault(f"is{i}m", direction)
-                st.session_state.setdefault(f"is{i}t", title)
-
-                st.markdown(f"**이슈 {i}**")
-
-                a, b, c = st.columns([1, 3, 3])
-
-                a.selectbox(
-                    "방향",
-                    ["🔺", "🔻", "➖"],
-                    key=f"is{i}m",
-                )
-
-                b.text_area(
-                    "제목",
-                    key=f"is{i}t",
-                    height=68,
-                )
-
-                c.text_area(
-                    "관련 종목",
-                    key=f"is{i}s",
-                    height=68,
-                )
-
-                l1, l2 = st.columns([5, 1.4], vertical_alignment="bottom")
-
-                l1.text_input(
-                    "기사 링크",
-                    key=f"is{i}link",
-                    placeholder="https://...",
-                )
-
-                l2.button(
-                    "기사 불러오기",
-                    key=f"is{i}fetch",
-                    on_click=load_article,
-                    args=(i,),
-                )
-
-                st.text_area(
-                    "기사 내용 (링크로 불러오거나 직접 붙여넣기)",
-                    key=f"is{i}src",
-                    height=110,
-                )
-
-                s1, s2 = st.columns([1.4, 5], vertical_alignment="center")
-
-                s1.button(
-                    "✨ 핵심 정리",
-                    key=f"is{i}sum",
-                    on_click=summarize_issue,
-                    args=(i,),
-                )
-
-                if st.session_state.get(f"is{i}note"):
-                    s2.caption(st.session_state[f"is{i}note"])
-
-                st.text_area(
-                    "내용",
-                    key=f"is{i}c",
-                    height=110,
-                )
-
-                st.text_area(
-                    "체크",
-                    key=f"is{i}k",
-                    height=68,
-                )
-
-            st.session_state.setdefault("themes", "AI 반도체 · 2차전지")
-
-            t1, t2 = st.columns([1.6, 5], vertical_alignment="center")
-
-            t1.button(
-                "🔄 강한 테마 자동 불러오기",
-                key="themes_btn",
-                on_click=autofill_themes,
+                .st-key-editor_panel [data-testid="stCaptionContainer"] p {
+                    color: #40516A !important;
+                    font-size: 1rem !important;
+                    font-weight: 600 !important;
+                }
+                .st-key-editor_panel textarea,
+                .st-key-editor_panel input {
+                    color: #14243A !important;
+                    font-size: 1.08rem !important;
+                    font-weight: 600 !important;
+                    line-height: 1.65 !important;
+                    background: #FFFFFF !important;
+                    border: 1.5px solid #AEBED2 !important;
+                }
+                .st-key-editor_panel textarea:focus,
+                .st-key-editor_panel input:focus {
+                    border-color: #174EA6 !important;
+                    box-shadow: 0 0 0 2px rgba(23,78,166,.12) !important;
+                }
+                .st-key-editor_panel .stButton > button {
+                    min-height: 3.1rem !important;
+                    font-size: 1.02rem !important;
+                    font-weight: 850 !important;
+                }
+                .st-key-editor_panel [data-testid="stExpander"] summary p {
+                    color: #14243A !important;
+                    font-size: 1.08rem !important;
+                    font-weight: 850 !important;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
             )
 
-            if st.session_state.get("themes_note"):
-                t2.caption(st.session_state["themes_note"])
-
-            st.text_area(
-                "강한 테마 (#태그를 띄어쓰기로 구분)",
-                key="themes",
-                height=68,
-            )
-
-            sector_items_for_ui = st.session_state.get("sector_items", []) or []
-            sector_items_for_ui = sorted(
-                sector_items_for_ui,
-                key=lambda row: num(row.get("pct")) or 0,
-                reverse=True,
-            )
-            if sector_items_for_ui:
-                with st.expander("🏭 토스증권 산업별 주요 종목", expanded=False):
-                    st.caption(
-                        "토스증권 공개 산업 데이터 기준 · 대표 종목은 시가총액 내림차순 상위 최대 5개입니다. "
-                        "데이터는 조회 시점의 스냅샷이며, 실시간 체결 오버레이와 다를 수 있습니다."
-                    )
-                    for sector_item in sector_items_for_ui[:5]:
-                        stock_rows = sector_item.get("stocks", []) or []
-                        stock_labels = []
-                        for stock in stock_rows[:5]:
-                            label = stock.get("name", "")
-                            pct = stock.get("pct")
-                            if pct is not None:
-                                label += f" ({pct:+.2f}%)"
-                            stock_labels.append(label)
-                        if not stock_labels and sector_item.get("leading_stock"):
-                            stock_labels = [sector_item["leading_stock"]]
-                        if stock_labels:
-                            st.markdown(
-                                f"**{sector_item['name']} ({sector_item.get('pct', 0):+.2f}%)**  \n"
-                                + " · ".join(stock_labels)
-                            )
-                        else:
-                            st.markdown(
-                                f"**{sector_item['name']} ({sector_item.get('pct', 0):+.2f}%)**  \n"
-                                "주요 종목 데이터는 현재 확인되지 않았습니다."
-                            )
-                            if sector_item.get("stock_error"):
-                                st.caption(f"종목 조회 응답: {sector_item['stock_error']}")
-            else:
+            with st.container(key="editor_panel"):
+                st.markdown("### 🧭 편집 순서")
+                st.markdown(
+                    "1. 한 줄 요약 확인 → 2. 뉴스 선택 또는 기사 입력 → "
+                    "3. 이슈별 제목·내용 수정 → 4. 테마와 체크포인트 확인"
+                )
                 st.caption(
-                    "산업별 주요 종목은 ‘강한 테마 자동 불러오기’를 실행하면 함께 조회됩니다."
+                    "각 입력칸은 직접 수정할 수 있습니다. 자동 생성 기능을 사용한 뒤에도 내용을 자유롭게 고쳐주세요."
                 )
 
-            st.session_state.setdefault(
-                "checks",
-                "급등 종목 상승 지속 여부 / "
-                "급락 종목 추가 하락 여부 / "
-                "시장 거래대금 변화",
-            )
+                if "summary" not in st.session_state:
+                    st.session_state["summary"] = generate_market_summary(snapshot)
 
-            c1, c2 = st.columns([1.6, 5], vertical_alignment="center")
+                with st.container(border=True):
+                    st.markdown("### ① 오늘의 한 줄 요약")
+                    summary_btn_col, summary_note_col = st.columns([2.1, 4], vertical_alignment="center")
+                    summary_btn_col.button(
+                        "✨ 한 줄 요약 자동 생성 / 다시 생성",
+                        key="summary_generate_btn",
+                        on_click=autofill_summary,
+                        use_container_width=True,
+                    )
+                    if st.session_state.get("summary_note"):
+                        summary_note_col.info(st.session_state["summary_note"])
+                    st.text_area(
+                        "한 줄 요약",
+                        key="summary",
+                        height=115,
+                        help=(
+                            "현재 산업·종목·지수 데이터로 생성됩니다. 기사 내용을 입력한 뒤 다시 생성할 수도 있고, "
+                            "생성된 문장은 직접 수정할 수 있습니다."
+                        ),
+                    )
 
-            c1.button(
-                "🔄 다음 영업일 정보 넣기",
-                key="checks_btn",
-                on_click=autofill_checks,
-            )
+                with st.container(border=True):
+                    st.markdown("### ② 뉴스 자료")
+                    st.caption("토스증권 주요 뉴스를 불러와 각 이슈에 적용할 수 있습니다.")
+                    with st.expander("📰 토스증권 주요 뉴스 불러오기", expanded=False):
+                        st.caption(
+                            "토스증권 공개 대시보드 뉴스입니다. 뉴스 제목·링크를 이슈 입력칸으로 옮긴 뒤 기사 본문을 확인할 수 있습니다."
+                        )
+                        news_type_labels = {
+                            "주요 뉴스": "ALL_HIGHLIGHT",
+                            "최신 뉴스": "HOT",
+                            "급등주 뉴스": "SOARING_STOCK",
+                        }
+                        news_type_label = st.selectbox(
+                            "뉴스 분류",
+                            list(news_type_labels.keys()),
+                            index=0,
+                            key="toss_news_type_label",
+                        )
+                        news_btn_col, news_note_col = st.columns([1.8, 4], vertical_alignment="center")
+                        news_btn_col.button(
+                            "🔄 토스 뉴스 불러오기",
+                            key="toss_news_fetch_btn",
+                            on_click=load_toss_dashboard_news,
+                            args=(news_type_labels[st.session_state.get("toss_news_type_label", "주요 뉴스")],),
+                        )
+                        toss_news_error = st.session_state.get("toss_dashboard_news_error", "")
+                        if toss_news_error:
+                            st.error(f"토스 뉴스 조회 실패: {toss_news_error}")
+                        toss_news_items = st.session_state.get("toss_dashboard_news", []) or []
+                        if toss_news_items:
+                            news_note_col.success(f"{len(toss_news_items)}건 조회 · 결과는 최대 3분간 캐시됩니다.")
+                            for news_idx, news_item in enumerate(toss_news_items):
+                                with st.container(border=True):
+                                    news_title = news_item.get("title", "")
+                                    metadata = " · ".join(
+                                        part for part in [news_item.get("source", ""), news_item.get("published", "")]
+                                        if part
+                                    )
+                                    st.markdown(f"**{news_idx + 1}. {news_title}**")
+                                    if metadata:
+                                        st.caption(metadata)
+                                    if news_item.get("summary"):
+                                        st.write(news_item["summary"][:280])
+                                    related = news_item.get("related_stocks") or []
+                                    related_names = []
+                                    for related_item in related:
+                                        if isinstance(related_item, dict):
+                                            related_name = related_item.get("name") or related_item.get("stockName") or related_item.get("symbol")
+                                            if related_name:
+                                                related_names.append(str(related_name))
+                                        elif related_item:
+                                            related_names.append(str(related_item))
+                                    if related_names:
+                                        st.caption("관련 종목: " + " · ".join(related_names[:8]))
+                                    if news_item.get("url"):
+                                        st.markdown(f"[기사 링크 열기]({news_item['url']})")
+                                    elif news_item.get("news_id"):
+                                        st.caption("토스 뉴스 ID: " + news_item["news_id"] + " · API 응답에 기사 URL이 없어 직접 링크는 표시하지 않습니다.")
+                                    pick_cols = st.columns([1, 1, 1, 2])
+                                    for issue_num, pick_col in zip((1, 2, 3), pick_cols[:3]):
+                                        pick_col.button(
+                                            f"이슈 {issue_num}에 적용",
+                                            key=f"toss_news_{news_idx}_issue_{issue_num}",
+                                            on_click=use_toss_news_for_issue,
+                                            args=(issue_num, news_item),
+                                            use_container_width=True,
+                                        )
+                        elif not toss_news_error:
+                            st.info("아직 조회된 뉴스가 없습니다. ‘토스 뉴스 불러오기’를 눌러 주세요.")
 
-            if st.session_state.get("checks_note"):
-                c2.caption(st.session_state["checks_note"])
+                st.markdown("### ③ 이슈별 내용 편집")
+                st.caption("각 이슈는 독립된 카드로 나눴습니다. 제목·관련 종목·기사·정리 내용을 순서대로 입력하세요.")
+                issues = [
+                    (1, "🔺", "당일 상승률 상위 종목 흐름"),
+                    (2, "🔻", "당일 하락률 상위 종목 흐름"),
+                    (3, "➖", "시장 변동성 확인"),
+                ]
 
-            st.text_area(
-                "내일 체크 포인트 (줄바꿈 또는 /로 구분)",
-                height=110,
-                key="checks",
-            )
+                for i, direction, title in issues:
+                    st.session_state.setdefault(f"is{i}m", direction)
+                    st.session_state.setdefault(f"is{i}t", title)
+                    with st.container(border=True):
+                        st.markdown(f"#### 이슈 {i}  ·  {direction}")
+                        top_left, top_right = st.columns([1.2, 4.8], vertical_alignment="top")
+                        top_left.selectbox(
+                            "방향 표시",
+                            ["🔺", "🔻", "➖"],
+                            key=f"is{i}m",
+                        )
+                        top_right.text_input(
+                            "이슈 제목",
+                            key=f"is{i}t",
+                            placeholder="예: 반도체 대형주 강세 및 관련주 확산",
+                        )
+                        st.text_input(
+                            "관련 종목",
+                            key=f"is{i}s",
+                            placeholder="종목명을 쉼표로 구분해 입력하세요. 예: 삼성전자, SK하이닉스",
+                        )
+                        link_col, fetch_col = st.columns([4.8, 1.2], vertical_alignment="bottom")
+                        link_col.text_input(
+                            "기사 URL",
+                            key=f"is{i}link",
+                            placeholder="https:// 기사 주소를 붙여넣으세요",
+                        )
+                        fetch_col.button(
+                            "기사 불러오기",
+                            key=f"is{i}fetch",
+                            on_click=load_article,
+                            args=(i,),
+                            use_container_width=True,
+                        )
+                        with st.expander(f"📄 이슈 {i} 기사 원문 입력 / 확인", expanded=False):
+                            st.text_area(
+                                "기사 내용",
+                                key=f"is{i}src",
+                                height=180,
+                                placeholder="기사 본문을 붙여넣거나 위 URL에서 불러오세요.",
+                            )
+                        action_col, note_col = st.columns([1.5, 4.5], vertical_alignment="center")
+                        action_col.button(
+                            "✨ 핵심 정리 생성",
+                            key=f"is{i}sum",
+                            on_click=summarize_issue,
+                            args=(i,),
+                            use_container_width=True,
+                        )
+                        if st.session_state.get(f"is{i}note"):
+                            note_col.info(st.session_state[f"is{i}note"])
+                        st.text_area(
+                            "시황글에 들어갈 핵심 내용",
+                            key=f"is{i}c",
+                            height=150,
+                            placeholder="이슈의 핵심 사실과 관련 종목 흐름을 입력하세요.",
+                        )
+                        st.text_area(
+                            "추가 체크 사항",
+                            key=f"is{i}k",
+                            height=95,
+                            placeholder="확인할 내용이 없다면 비워두셔도 됩니다.",
+                        )
 
-            st.text_area(
-                "핵심 키워드",
-                key="keywords",
-                value="#코스피 #코스닥 #급등주 #급락주 #주식시황",
-                height=68,
-            )
+                st.markdown("### ④ 오늘의 테마")
+                with st.container(border=True):
+                    theme_btn_col, theme_note_col = st.columns([2.1, 3.9], vertical_alignment="center")
+                    theme_btn_col.button(
+                        "🔄 강한 테마 자동 불러오기",
+                        key="themes_btn",
+                        on_click=autofill_themes,
+                        use_container_width=True,
+                    )
+                    if st.session_state.get("themes_note"):
+                        theme_note_col.info(st.session_state["themes_note"])
+                    st.text_area(
+                        "강한 테마 (#태그를 띄어쓰기로 구분)",
+                        key="themes",
+                        height=100,
+                        placeholder="#반도체 #AI #전력기기",
+                    )
+
+                    sector_items_for_ui = st.session_state.get("sector_items", []) or []
+                    sector_items_for_ui = sorted(
+                        sector_items_for_ui,
+                        key=lambda row: num(row.get("pct")) or 0,
+                        reverse=True,
+                    )
+                    if sector_items_for_ui:
+                        with st.expander("🏭 토스증권 산업별 주요 종목 보기", expanded=False):
+                            st.caption(
+                                "토스증권 공개 산업 데이터 기준 · 대표 종목은 시가총액 내림차순 상위 최대 5개입니다. "
+                                "데이터는 조회 시점의 스냅샷이며 실시간 체결 오버레이와 다를 수 있습니다."
+                            )
+                            for sector_item in sector_items_for_ui[:5]:
+                                stock_rows = sector_item.get("stocks", []) or []
+                                stock_labels = []
+                                for stock in stock_rows[:5]:
+                                    label = stock.get("name", "")
+                                    pct = stock.get("pct")
+                                    if pct is not None:
+                                        label += f" ({pct:+.2f}%)"
+                                    stock_labels.append(label)
+                                if not stock_labels and sector_item.get("leading_stock"):
+                                    stock_labels = [sector_item["leading_stock"]]
+                                if stock_labels:
+                                    st.markdown(
+                                        f"**{sector_item['name']} ({sector_item.get('pct', 0):+.2f}%)**  \n"
+                                        + " · ".join(stock_labels)
+                                    )
+                                else:
+                                    st.markdown(
+                                        f"**{sector_item['name']} ({sector_item.get('pct', 0):+.2f}%)**  \n"
+                                        "주요 종목 데이터는 현재 확인되지 않았습니다."
+                                    )
+                                    if sector_item.get("stock_error"):
+                                        st.caption(f"종목 조회 응답: {sector_item['stock_error']}")
+                    else:
+                        st.info("산업별 주요 종목은 ‘강한 테마 자동 불러오기’를 실행하면 함께 조회됩니다.")
+
+                st.markdown("### ⑤ 다음 영업일 체크포인트")
+                with st.container(border=True):
+                    check_btn_col, check_note_col = st.columns([2.1, 3.9], vertical_alignment="center")
+                    check_btn_col.button(
+                        "🔄 다음 영업일 정보 넣기",
+                        key="checks_btn",
+                        on_click=autofill_checks,
+                        use_container_width=True,
+                    )
+                    if st.session_state.get("checks_note"):
+                        check_note_col.info(st.session_state["checks_note"])
+                    st.text_area(
+                        "내일 체크 포인트 (줄바꿈 또는 /로 구분)",
+                        height=130,
+                        key="checks",
+                        placeholder="예: 미국 주요 경제지표 발표 / 반도체 업종 수급 / 원·달러 환율",
+                    )
+                    st.text_area(
+                        "핵심 키워드",
+                        key="keywords",
+                        value="#코스피 #코스닥 #급등주 #급락주 #주식시황",
+                        height=85,
+                        placeholder="#코스피 #코스닥 #주식시황",
+                    )
 
         st.subheader("시황글 미리보기")
 
@@ -4682,7 +4773,7 @@ def main():
 
         copy_buttons(build_markdown(snapshot, NOW_TOKEN))
 
-        with st.container(border=True):
+        with st.container(border=True, key="preview_container"):
             st.markdown(markdown)
 
         with st.expander("마크다운 원문 보기"):
