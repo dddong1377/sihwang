@@ -3433,13 +3433,19 @@ def _fallback_next_day_brief(target, events, news_items, news_date_note):
         lines.append("- 오늘 게시된 주요 뉴스 데이터를 확인하지 못했습니다.")
     lines.append(f"  ※ 뉴스 기준: {news_date_note}")
 
-    lines.extend([
-        "",
-        "【내일 확인할 핵심 사항】",
-        "- 예정된 경제지표·기업 실적 발표 결과와 시장 반응",
-        "- 오늘 주요 뉴스의 후속 발표 및 정책·기업 관련 추가 공지",
-        "- 관련 업종·대표 종목의 거래량과 수급 변화",
-    ])
+    # 확인된 일정·뉴스가 없을 때 일반론으로 내용을 채우지 않습니다.
+    # 실제 자료가 있는 경우에만 그 자료에서 파생되는 확인 항목을 안내합니다.
+    followups = []
+    if events:
+        followups.append("- 위 일정의 실제 발표 결과와 시장 반응 확인")
+    if news_items:
+        followups.append("- 위 뉴스의 후속 발표·공식 입장·추가 보도 여부 확인")
+    lines.append("")
+    lines.append("【내일 확인할 핵심 사항】")
+    if followups:
+        lines.extend(followups)
+    else:
+        lines.append("- 일정·뉴스 자료가 확보되지 않아 구체적인 확인 항목을 생성하지 못했습니다.")
     return "\n".join(lines)
 
 
@@ -3524,6 +3530,8 @@ def build_next_day_brief():
         brief = _fallback_next_day_brief(target, events, news_items, news_note)
         method = "AI 요약 키가 없어 확인된 일정과 뉴스 제목을 우선 정리했습니다."
 
+    if not events and not news_items:
+        method = "실제 일정과 오늘 주요 뉴스를 확보하지 못했습니다. 일반적인 문구로 대체하지 않았습니다."
     if errors:
         method += " / " + " / ".join(errors)
     return brief, method
@@ -3545,10 +3553,22 @@ def autofill_checks():
         _, after = remainder.split(finish, 1)
         manual = (before + after).strip()
     else:
-        manual_lines = [
-            row for row in old_text.splitlines()
-            if row.strip() and not NEXT_DAY_LINE.match(row.strip())
-        ]
+        # 이전 버전에서 자동 삽입되던 거래소 운영 안내와 일반론 문구는
+        # 사용자가 직접 작성한 메모로 오인해 보존하지 않습니다.
+        obsolete_auto_lines = re.compile(
+            r"정규장\s*09:00\s*개장|다음 영업일은|"
+            r"급등 종목 상승 지속 여부|급락 종목 추가 하락 여부|"
+            r"시장 거래대금 변화|거래소 운영 안내|장 개장·휴장·폐장",
+            re.I,
+        )
+        manual_lines = []
+        for row in old_text.splitlines():
+            clean = row.strip()
+            if not clean or NEXT_DAY_LINE.match(clean) or obsolete_auto_lines.search(clean):
+                continue
+            if clean in ("【오늘 주요 뉴스 중 내일 확인할 내용】", "【내일 확인할 핵심 사항】"):
+                continue
+            manual_lines.append(row)
         manual = "\n".join(manual_lines).strip()
 
     generated = f"{begin}\n{brief}\n{finish}"
