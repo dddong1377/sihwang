@@ -3948,23 +3948,91 @@ def build_markdown(snapshot, time_text="확인 불가"):
 
 def md_to_html(markdown):
     """마크다운을 간단한 HTML로 변환.
-    - 표의 첫 줄(머리글)은 연한 회색 배경으로 구분합니다.
-    - 빈 줄 없이 이어진 글줄은 한 문단(<p>) 안에서 <br>로만 줄바꿈해,
-      게시판에 올렸을 때 줄마다 문단 여백이 생기지 않게 합니다."""
+    - 표 머리글(첫 줄)은 연한 회색 배경.
+    - 표의 열 너비는 칸 안 글자 길이에 비례해 첫 줄에 직접(width 속성) 지정합니다.
+      (게시판이 열 너비를 고정(table-layout: fixed)해도 첫 줄 너비를 따르므로
+       긴 종목명이 옆 칸을 덮지 않습니다.)
+    - 빈 줄 없이 이어진 글줄은 한 문단 안에서 <br>로 줄바꿈합니다."""
+
+    import unicodedata
 
     output = []
-    in_table = False
-    first_row = False
+    table_rows = []
     para = []
 
     def inline(text):
         safe = html.escape(text)
         return re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", safe)
 
+    def visual_width(text):
+        text = text.replace("*", "")
+        return sum(
+            2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+            for ch in text
+        )
+
     def flush_para():
         if para:
             output.append("<p style='margin:0 0 10px'>" + "<br>".join(para) + "</p>")
             para.clear()
+
+    def flush_table():
+        if not table_rows:
+            return
+
+        columns = max(len(row) for row in table_rows)
+
+        # 열별 가장 긴 글자 폭(한글=2) 기준으로 너비 비율 계산
+        weights = []
+
+        for index in range(columns):
+            longest = max(
+                visual_width(row[index]) if index < len(row) else 0
+                for row in table_rows
+            )
+            weights.append(max(longest, 6) + 3)
+
+        total = sum(weights)
+        widths = [round(weight * 100 / total) for weight in weights]
+        widths[-1] = 100 - sum(widths[:-1])  # 합계가 정확히 100%가 되도록
+
+        output.append(
+            "<table border='1' cellpadding='4' cellspacing='0' "
+            "style='border-collapse:collapse;margin:0 0 10px;width:100%'>"
+        )
+
+        for row_index, row in enumerate(table_rows):
+            cells_html = []
+
+            for col_index in range(columns):
+                cell = row[col_index] if col_index < len(row) else ""
+                safe = inline(cell)
+
+                numeric = bool(
+                    re.fullmatch(r"[\s\d,.+\-%원🔺🔻➖▲▼]+", cell.replace("*", ""))
+                )
+
+                wrap_style = (
+                    "white-space:nowrap" if numeric
+                    else "word-break:break-all;overflow-wrap:anywhere"
+                )
+
+                if row_index == 0:
+                    cells_html.append(
+                        f"<th width='{widths[col_index]}%' "
+                        f"style='width:{widths[col_index]}%;"
+                        f"background-color:#F2F3F5;font-weight:normal;"
+                        f"text-align:left;{wrap_style}'>{safe}</th>"
+                    )
+                else:
+                    cells_html.append(
+                        f"<td style='{wrap_style}'>{safe}</td>"
+                    )
+
+            output.append("<tr>" + "".join(cells_html) + "</tr>")
+
+        output.append("</table>")
+        table_rows.clear()
 
     for line in markdown.splitlines():
         if line.startswith("|"):
@@ -3981,51 +4049,11 @@ def md_to_html(markdown):
             ):
                 continue
 
-            if not in_table:
-                output.append(
-                    "<table border='1' cellpadding='6' "
-                    "cellspacing='0' "
-                    "style='border-collapse:collapse;margin:0 0 10px;"
-                    "width:100%;table-layout:auto'>"
-                )
-                in_table = True
-                first_row = True
-
-            rendered_cells = []
-
-            for cell in cells:
-                safe = inline(cell)
-
-                numeric = bool(
-                    re.fullmatch(r"[\s\d,.+\-%원🔺🔻➖▲▼]+", cell.replace("*", ""))
-                )
-
-                wrap_style = (
-                    "white-space:nowrap" if numeric
-                    else "word-break:break-all;overflow-wrap:anywhere"
-                )
-
-                if first_row:
-                    rendered_cells.append(
-                        f"<th style='background-color:#F2F3F5;font-weight:normal;"
-                        f"text-align:left;{wrap_style}'>{safe}</th>"
-                    )
-                else:
-                    rendered_cells.append(
-                        f"<td style='{wrap_style}'>{safe}</td>"
-                    )
-
-            output.append(
-                "<tr>" + "".join(rendered_cells) + "</tr>"
-            )
-
-            first_row = False
+            table_rows.append(cells)
 
             continue
 
-        if in_table:
-            output.append("</table>")
-            in_table = False
+        flush_table()
 
         if line.startswith("# "):
             flush_para()
@@ -4048,12 +4076,9 @@ def md_to_html(markdown):
             flush_para()
 
     flush_para()
-
-    if in_table:
-        output.append("</table>")
+    flush_table()
 
     return "\n".join(output)
-
 
 def copy_buttons(markdown):
     """서식 포함 복사 및 마크다운 복사 버튼."""
