@@ -3947,10 +3947,15 @@ def build_markdown(snapshot, time_text="확인 불가"):
 
 
 def md_to_html(markdown):
-    """마크다운을 간단한 HTML로 변환."""
+    """마크다운을 간단한 HTML로 변환. 표의 첫 줄(머리글)은 연한 회색 배경으로 구분합니다."""
 
     output = []
     in_table = False
+    first_row = False
+
+    header_style = (
+        " style='background-color:#F2F3F5;font-weight:normal;text-align:left'"
+    )
 
     for line in markdown.splitlines():
         if line.startswith("|"):
@@ -3972,6 +3977,7 @@ def md_to_html(markdown):
                     "style='border-collapse:collapse'>"
                 )
                 in_table = True
+                first_row = True
 
             rendered_cells = []
 
@@ -3982,11 +3988,17 @@ def md_to_html(markdown):
                     r"<b>\1</b>",
                     safe
                 )
-                rendered_cells.append(f"<td>{safe}</td>")
+
+                if first_row:
+                    rendered_cells.append(f"<th{header_style}>{safe}</th>")
+                else:
+                    rendered_cells.append(f"<td>{safe}</td>")
 
             output.append(
                 "<tr>" + "".join(rendered_cells) + "</tr>"
             )
+
+            first_row = False
 
             continue
 
