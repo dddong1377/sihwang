@@ -1,17 +1,19 @@
-
 import datetime
+import email.utils
 import hmac
 import html
 import json
 import os
 import re
 import time
+import xml.etree.ElementTree as ET
+from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
-from google import genai
+
 
 st.set_page_config(page_title="MTNW 장전 시황", layout="wide")
 
@@ -19,40 +21,208 @@ KST = ZoneInfo("Asia/Seoul")
 WEEKDAYS = "월화수목금토일"
 
 # ---------------------------------------------------------------
-# Gemini API 설정
+# Groq 무료 API 설정
 # ---------------------------------------------------------------
 
-# Gemini 2.5 Flash 사용
-GEMINI_MODEL = "models/gemini-3.8-flash"
+GROQ_MODEL = "openai/gpt-oss-120b"
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# 일시적인 요청 제한일 때만 재시도
-GEMINI_RETRY_WAIT = 20
+GROQ_MAX_TOKENS = 6000
+GROQ_TIMEOUT = 180
 
 
-def get_gemini_api_key():
+def get_groq_api_key():
     api_key = ""
 
     try:
-        api_key = st.secrets.get("GEMINI_API_KEY", "")
+        api_key = st.secrets.get("GROQ_API_KEY", "")
     except Exception:
         pass
 
     if not api_key:
-        api_key = os.environ.get("GEMINI_API_KEY", "")
+        api_key = os.environ.get("GROQ_API_KEY", "")
 
     return str(api_key).strip()
 
 
-def get_gemini_client():
-    api_key = get_gemini_api_key()
+def get_groq_headers():
+    api_key = get_groq_api_key()
 
     if not api_key:
         raise RuntimeError(
-            "Gemini API 키가 설정되지 않았습니다. "
-            "Streamlit Secrets에 GEMINI_API_KEY를 등록해 주세요."
+            "Groq API 키가 설정되지 않았습니다. "
+            "Streamlit Secrets에 GROQ_API_KEY를 등록해 주세요."
         )
 
-    return genai.Client(api_key=api_key)
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+
+# ---------------------------------------------------------------
+# 무료 뉴스 RSS 설정
+# ---------------------------------------------------------------
+
+GOOGLE_NEWS_RSS_URL = (
+    "https://news.google.com/rss/search"
+)
+
+NEWS_QUERIES = [
+    ("국내 증시", "한국 증시 코스피 코스닥 주식 시장"),
+    ("반도체", "삼성전자 SK하이닉스 반도체 HBM"),
+    ("미국 증시", "미국 증시 나스닥 S&P500 다우존스"),
+    ("글로벌 경제", "미국 금리 연준 달러 환율 국제유가"),
+    ("기업·산업", "국내 기업 실적 공시 산업 주식"),
+    ("해외 경제", "중국 일본 유럽 경제 증시"),
+]
+
+NEWS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/156.0.0.0 Safari/537.36"
+    )
+}
+
+
+def parse_news_date(value):
+    if not value:
+        return None
+
+    try:
+        dt = email.utils.parsedate_to_datetime(value)
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=KST)
+        else:
+            dt = dt.astimezone(KST)
+
+        return dt
+
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_google_news_rss(query, display_name):
+    params = {
+        "q": f"{query} when:1d",
+        "hl": "ko",
+        "gl": "KR",
+        "ceid": "KR:ko",
+    }
+
+    response = requests.get(
+        GOOGLE_NEWS_RSS_URL,
+        params=params,
+        headers=NEWS_HEADERS,
+        timeout=20,
+    )
+
+    if response.status_code != 200:
+        return []
+
+    try:
+        root = ET.fromstring(response.content)
+    except ET.ParseError:
+        return []
+
+    now = datetime.datetime.now(KST)
+    cutoff = now - datetime.timedelta(hours=24)
+
+    results = []
+
+    for item in root.findall(".//item"):
+        title = item.findtext("title", default="").strip()
+        link = item.findtext("link", default="").strip()
+        pub_date = item.findtext("pubDate", default="").strip()
+        source_element = item.find("source")
+
+        publisher = ""
+
+        if source_element is not None:
+            publisher = (source_element.text or "").strip()
+
+        published = parse_news_date(pub_date)
+
+        if not title or not link:
+            continue
+
+        if published is None:
+            continue
+
+        if published < cutoff or published > now:
+            continue
+
+        results.append({
+            "category": display_name,
+            "title": title,
+            "publisher": publisher or "언론사 확인 불가",
+            "published": published.strftime("%Y-%m-%d %H:%M"),
+            "link": link,
+        })
+
+    return results
+
+
+def collect_news():
+    all_news = []
+    seen = set()
+    errors = []
+
+    for display_name, query in NEWS_QUERIES:
+        try:
+            items = fetch_google_news_rss(
+                query,
+                display_name,
+            )
+
+            for item in items:
+                key = re.sub(
+                    r"\s+",
+                    "",
+                    item["title"].lower(),
+                )
+
+                if key in seen:
+                    continue
+
+                seen.add(key)
+                all_news.append(item)
+
+        except Exception as error:
+            errors.append(
+                f"{display_name}: {str(error)[:120]}"
+            )
+
+    all_news.sort(
+        key=lambda x: x["published"],
+        reverse=True,
+    )
+
+    return all_news, errors
+
+
+def news_to_text(news):
+    if not news:
+        return (
+            "최근 24시간 이내 수집된 뉴스가 없습니다. "
+            "뉴스 관련 사실은 임의로 작성하지 말고 확인 불가로 표시하세요."
+        )
+
+    lines = []
+
+    for index, item in enumerate(news[:60], start=1):
+        lines.append(
+            f"[{index}] [{item['category']}] "
+            f"{item['title']}\n"
+            f"언론사: {item['publisher']}\n"
+            f"게시 시각: {item['published']}\n"
+            f"링크: {item['link']}"
+        )
+
+    return "\n\n".join(lines)
 
 
 # ---------------------------------------------------------------
@@ -706,30 +876,37 @@ PREMARKET_PROMPT = """# 역할
 - 오늘 날짜: __TODAY__
 
 # 조사 원칙
-1. 오늘 날짜 기준 최근 24시간 이내 기사만 사용한다.
-2. 아래 출처 중 최소 10개 이상을 교차 검증한다.
-   - 국내: 연합뉴스, 한국경제, 매일경제, 머니투데이, 서울경제, 뉴스1, 이데일리, 아시아경제
-   - 해외: Reuters, Bloomberg, CNBC, WSJ, FT, AP
-   - 공시·지표: DART, 한국거래소, FOMC, CPI, PPI, PCE,
-     미국 국채금리, 달러인덱스, 국제유가, VIX
-3. 같은 뉴스는 하나로 통합한다. 기사 문장을 그대로 복사하지 않는다.
-4. 확인되지 않은 루머, 증시와 무관한 정치 뉴스는 제외한다.
-5. 확인 불가한 수치는 추정하지 말고 "확인 불가"로 표기한다.
-6. 한국 개인투자자 관점에서 우선순위를 정한다.
+1. 제공된 뉴스 자료와 지수 자료를 최우선으로 사용한다.
+2. 뉴스는 게시 시각이 오늘 기준 최근 24시간 이내인 자료만 사용한다.
+3. RSS에 수집되지 않은 기사의 내용은 확인된 사실처럼 작성하지 않는다.
+4. 기사 제목만 확인된 경우 세부 내용은 추정하지 않는다.
+5. 같은 뉴스는 하나로 통합한다. 기사 문장을 그대로 복사하지 않는다.
+6. 확인되지 않은 루머, 증시와 무관한 정치 뉴스는 제외한다.
+7. 확인 불가한 수치는 추정하지 말고 "확인 불가"로 표기한다.
+8. 한국 개인투자자 관점에서 우선순위를 정한다.
+9. 출처 링크는 제공된 뉴스 자료에 있는 링크만 사용한다.
+10. 수급 데이터가 제공되지 않으면 외국인·기관·개인 수급을 확인 불가로 표시한다.
+11. 실시간 검색 순위 데이터가 없으면 검색량 순위인 것처럼 꾸며내지 않는다.
+12. 키워드 순위는 실제 검색량 데이터가 아니라 뉴스 노출 기반 후보라고 명시한다.
 
 # 지수 데이터 규칙
 - 아래 [확인된 Toss 지수 데이터]를 기준 수치로 사용한다.
-- Toss 데이터에 없는 지수는 검색으로 별도 확인한다.
-- 검색으로도 확인되지 않으면 "확인 불가"로 표기한다.
+- Toss 데이터에 없는 지수는 임의로 채우지 않는다.
 - 기준 시각을 확인하고 최신 종가인지 실시간 지표인지 구분한다.
 - 비고에 미확인 또는 데이터 없음으로 표시된 항목은 임의로 채우지 않는다.
-- 휴장/미갱신 가능 지수는 검색으로 휴장 여부를 확인한다.
 - 표기 형식: 지수명 : 지수값 (전일 대비 ±포인트, ±%)
 - 대상: 다우, S&P500 현물, 나스닥 현물, FTSE100, CAC40, DAX, 유로스톡스50
 - 선물 지수는 사용하지 않는다. S&P500은 반드시 현물 지수만 사용한다.
 
 [확인된 Toss 지수 데이터]
 __INDEX_TABLE__
+
+# 최근 24시간 뉴스 자료
+아래는 Google News RSS에서 수집한 기사 목록이다.
+제목·언론사·게시 시각·링크를 근거로 작성하라.
+기사 본문을 확인하지 못한 경우 세부 사실을 만들어내지 마라.
+
+__NEWS_CONTEXT__
 
 # 작성 원칙
 - 전체 분량: 모바일 스크롤 기준 3~4화면 내외
@@ -746,7 +923,7 @@ __INDEX_TABLE__
 ### 1. 🌎 해외 증시
 | 지수 | 종가/현재가 | 전일 대비 |
 |---|---|---|
-(7개 지수, 휴장 사유 표기)
+(7개 지수, 확인 불가 시 사유 표기)
 
 ### 2. 🔥 핵심 이슈 TOP5
 각 이슈는 아래 4줄:
@@ -756,21 +933,24 @@ __INDEX_TABLE__
 - 향후 일정/리스크: 1문장 [출처번호]
 
 ### 3. 🔍 검색 키워드
-**실시간 TOP20**
+**뉴스 기반 관심 키워드 TOP20**
 | 순위 | 키워드 | 검색 의도 | 광고/SEO 활용 |
 
-**급상승 TOP10**
-| 순위 | 키워드 | 급상승 이유 |
+**주요 급상승 후보 TOP10**
+| 순위 | 키워드 | 뉴스 노출 이유 |
+
+※ 실제 검색량 순위가 아닌 뉴스 노출 기반 후보라고 표시한다.
 
 ### 4. 📈 종목·테마·수급
 - **언급 TOP10 종목**: 종목 | 이유 | 방송 적합도
 - **강세 테마 TOP5**: 테마 | 관련 종목 | 지속 가능성
-- **돈 몰리는 업종 TOP5**: 업종 | 이유
+- **관심 업종 TOP5**: 업종 | 이유
 - **수급**: 외국인 / 기관 / 개인 순매수·순매도 요약
+  - 실제 수급 데이터가 없으면 확인 불가
 
 ### 5. 🌐 글로벌 이슈
 미국·중국·일본·유럽·원자재·환율 관련 내용을 각 2~3문장.
-금리, 달러인덱스, 유가, VIX 등 확인 가능한 수치 포함.
+제공된 자료에 없는 수치는 확인 불가로 표기한다.
 
 ### 6. 📆 오늘 체크 일정
 | 시간 | 일정 | 시장 영향 |
@@ -792,17 +972,19 @@ __INDEX_TABLE__
 | 종목 | 이유 | 주의점 |
 
 ### 11. 🔄 전일 대비 변화
+전일 자료가 없으면 비교 불가라고 표시한다.
 새로 등장 / 사라진 키워드, 강해진·약해진 테마
 
 ### 12. 📎 출처
 | 번호 | 언론사 | 기사 제목 | 링크 |
-(최소 10개, 24시간 이내)
+수집된 기사 중 실제 사용한 자료를 출처로 연결한다.
 
 # 최종 점검
-- 지수 수치와 휴장 여부를 재확인했는가?
+- 지수 수치와 기준 시각을 재확인했는가?
 - 24시간 초과 기사나 미확인 루머가 없는가?
-- 지정 개수 이내로 간결한가?
-- 키워드가 전부 단어형인가?
+- 실제 검색량이 없는 키워드를 검색량 순위로 오인하게 하지 않았는가?
+- 수급 데이터가 없으면 확인 불가로 처리했는가?
+- 확인되지 않은 종목·일정·수치를 만들지 않았는가?
 
 =========================================================
 # 추가 출력 지시: 상세 리포트와 압축본을 한 번에 작성
@@ -829,7 +1011,6 @@ __INDEX_TABLE__
 상세 리포트와 압축본의 내용이 서로 모순되지 않도록 한다.
 
 # 압축본 작성 규칙
-
 - 원문 상세 리포트에 있는 사실만 사용한다.
 - 새로운 수치·종목·뉴스를 추가하지 않는다.
 - "확인 불가", "추정", "후보"는 단정하지 않는다.
@@ -930,7 +1111,6 @@ COMPRESS_PROMPT = """# 역할
 원문에 등장한 단어형 키워드
 
 ### ⚠️ 한 줄 주의
-오늘 가장 큰 리스크 1문장
 
 # 원문 시황글
 __SOURCE__
@@ -938,160 +1118,155 @@ __SOURCE__
 
 
 # ---------------------------------------------------------------
-# Gemini 응답 텍스트 추출
+# Groq 오류 구분
 # ---------------------------------------------------------------
 
-def extract_interaction_text(interaction):
-    output_text = getattr(interaction, "output_text", None)
-
-    if output_text:
-        return str(output_text).strip()
-
-    steps = getattr(interaction, "steps", None)
-
-    if steps:
-        texts = []
-
-        for step in steps:
-            step_text = getattr(step, "text", None)
-
-            if step_text:
-                texts.append(str(step_text))
-
-            elif isinstance(step, dict):
-                value = step.get("text")
-
-                if value:
-                    texts.append(str(value))
-
-        if texts:
-            return "\n".join(texts).strip()
-
-    return ""
-
-
-# ---------------------------------------------------------------
-# Gemini 오류 구분
-# ---------------------------------------------------------------
-
-def classify_gemini_error(error):
-    message = str(error)
-    lower = message.lower()
+def classify_groq_error(error):
+    message = str(error).lower()
 
     if (
-        "API_KEY_INVALID" in message
-        or "invalid api key" in lower
-        or "api key not valid" in lower
+        "invalid_api_key" in message
+        or "invalid api key" in message
+        or "authentication" in message
+        or "401" in message
     ):
         return "invalid_key"
 
     if (
-        "quota" in lower
-        or "limit: 0" in lower
-        or "daily" in lower
-        or "per day" in lower
-        or "resource_exhausted" in lower
+        "429" in message
+        or "rate_limit" in message
+        or "rate limit" in message
+        or "quota" in message
+        or "tokens per minute" in message
     ):
         return "quota"
 
-    if (
-        "429" in message
-        or "rate limit" in lower
-        or "too many requests" in lower
-    ):
-        return "rate_limit"
+    if "model_decommissioned" in message:
+        return "model"
 
-    if "403" in message or "permission_denied" in lower:
+    if "model_not_found" in message or "404" in message:
+        return "model"
+
+    if "403" in message or "permission" in message:
         return "permission"
 
     return "other"
 
 
-def friendly_gemini_error(error):
-    error_type = classify_gemini_error(error)
+def friendly_groq_error(error):
+    error_type = classify_groq_error(error)
 
     if error_type == "invalid_key":
         return (
-            "Gemini API 키가 유효하지 않습니다. "
-            "Google AI Studio에서 API 키를 확인해 주세요."
+            "Groq API 키가 유효하지 않습니다. "
+            "Groq Console에서 API 키를 확인해 주세요."
         )
 
     if error_type == "quota":
         return (
-            "Gemini 무료 API의 사용량 한도에 도달했습니다. "
-            "일일 또는 분당 할당량이 초기화된 후 다시 시도해 주세요. "
-            "이 오류는 자동 재시도하지 않습니다."
+            "Groq 무료 API 사용량 한도에 도달했습니다. "
+            "분당 또는 일일 사용량 초기화 후 다시 시도해 주세요. "
+            "유료 API로 자동 전환하지 않습니다."
         )
 
-    if error_type == "rate_limit":
+    if error_type == "model":
         return (
-            "Gemini 요청이 일시적으로 집중되어 제한되었습니다. "
-            "잠시 기다린 후 다시 시도해 주세요."
+            "Groq 모델을 찾을 수 없거나 사용이 중단되었습니다. "
+            "Groq 공식 모델 목록에서 현재 사용 가능한 무료 모델을 확인해 주세요."
         )
 
     if error_type == "permission":
         return (
-            "Gemini API 권한 오류입니다. "
-            "API 키와 모델 사용 가능 여부를 확인해 주세요."
+            "Groq API 권한 오류입니다. "
+            "API 키와 모델 접근 권한을 확인해 주세요."
         )
 
-    return f"Gemini API 호출 실패: {str(error)[:500]}"
+    return f"Groq API 호출 실패: {str(error)[:500]}"
 
 
 # ---------------------------------------------------------------
-# Gemini 호출
+# Groq 호출
 # ---------------------------------------------------------------
 
-def call_gemini(prompt, search=False, max_tokens=8000):
-    client = get_gemini_client()
+def call_groq(prompt, max_tokens=4000):
+    headers = get_groq_headers()
 
-    generation_config = {
-        "max_output_tokens": max_tokens,
-        "thinking_level": "medium",
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "당신은 한국 주식시장 전문 시황 에디터입니다. "
+                    "제공된 자료에 없는 사실이나 수치를 만들어내지 마세요. "
+                    "확인할 수 없는 정보는 확인 불가라고 표시하세요."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        "temperature": 0.2,
+        "max_tokens": max_tokens,
     }
 
-    tools = []
+    try:
+        response = requests.post(
+            GROQ_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=GROQ_TIMEOUT,
+        )
 
-    if search:
-        tools = [{"type": "google_search"}]
-
-    last_error = None
-
-    for attempt in range(2):
-        try:
-            interaction = client.interactions.create(
-                model=GEMINI_MODEL,
-                input=prompt,
-                tools=tools,
-                generation_config=generation_config,
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"HTTP {response.status_code}: "
+                f"{response.text[:1000]}"
             )
 
-            result = extract_interaction_text(interaction)
+        data = response.json()
 
-            if not result:
-                raise RuntimeError(
-                    "Gemini 응답이 비어 있습니다. "
-                    "모델 응답 또는 API 사용량을 확인해 주세요."
-                )
+        choices = data.get("choices") or []
 
-            return result
+        if not choices:
+            raise RuntimeError(
+                "Groq 응답에 choices 항목이 없습니다."
+            )
 
-        except Exception as error:
-            last_error = error
-            error_type = classify_gemini_error(error)
+        message = choices[0].get("message") or {}
+        result = message.get("content")
 
-            # 일일 할당량 초과는 재시도해도 해결되지 않으므로 중단
-            if error_type == "quota":
-                raise RuntimeError(friendly_gemini_error(error))
+        if isinstance(result, list):
+            result = "\n".join(
+                str(item.get("text", ""))
+                for item in result
+                if isinstance(item, dict)
+            )
 
-            # 일시적인 분당 요청 제한에 한해서만 한 번 재시도
-            if error_type == "rate_limit" and attempt == 0:
-                time.sleep(GEMINI_RETRY_WAIT)
-                continue
+        result = str(result or "").strip()
 
-            raise RuntimeError(friendly_gemini_error(error))
+        if not result:
+            raise RuntimeError(
+                "Groq 응답이 비어 있습니다. "
+                "사용량 또는 모델 응답을 확인해 주세요."
+            )
 
-    raise RuntimeError(friendly_gemini_error(last_error))
+        return result
+
+    except requests.exceptions.Timeout:
+        raise RuntimeError(
+            "Groq API 응답 시간이 초과되었습니다. "
+            "잠시 후 다시 시도해 주세요."
+        )
+
+    except requests.exceptions.RequestException as error:
+        raise RuntimeError(
+            f"Groq 네트워크 요청 실패: {str(error)[:300]}"
+        )
+
+    except Exception as error:
+        raise RuntimeError(friendly_groq_error(error))
 
 
 # ---------------------------------------------------------------
@@ -1144,7 +1319,7 @@ def run_premarket(use_source_only=False):
 
     try:
         # -------------------------------------------------------
-        # 직접 붙여넣은 원문: 압축만 실행 (Gemini 1회)
+        # 직접 붙여넣은 원문: 압축만 실행
         # -------------------------------------------------------
 
         if use_source_only:
@@ -1154,14 +1329,13 @@ def run_premarket(use_source_only=False):
                 )
                 return
 
-            with st.spinner("Gemini로 원문을 압축하는 중..."):
-                short = call_gemini(
+            with st.spinner("Groq 무료 API로 원문을 압축하는 중..."):
+                short = call_groq(
                     COMPRESS_PROMPT.replace(
                         "__SOURCE__",
                         pasted,
                     ),
-                    search=False,
-                    max_tokens=3000,
+                    max_tokens=2500,
                 )
 
             state["pm_short"] = short
@@ -1169,13 +1343,13 @@ def run_premarket(use_source_only=False):
             state["pm_note"] = (
                 f"압축 완료 · "
                 f"{datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
-                "Gemini API 1회 호출"
+                "Groq API 1회 호출"
             )
 
             return
 
         # -------------------------------------------------------
-        # 장전 시황: 상세 리포트 + 압축본을 한 번에 생성
+        # Toss 지수 데이터 확보
         # -------------------------------------------------------
 
         rows = state.get("pm_indices")
@@ -1194,27 +1368,34 @@ def run_premarket(use_source_only=False):
 
         index_table = indices_markdown(main_rows)
 
+        # -------------------------------------------------------
+        # 최근 24시간 뉴스 RSS 수집
+        # -------------------------------------------------------
+
+        with st.spinner("최근 24시간 국내외 뉴스 RSS 수집 중..."):
+            news, news_errors = collect_news()
+
+        news_context = news_to_text(news)
+
         prompt = (
             PREMARKET_PROMPT
             .replace("__TODAY__", today)
             .replace("__INDEX_TABLE__", index_table)
+            .replace("__NEWS_CONTEXT__", news_context)
         )
 
         with st.spinner(
-            "Gemini가 웹검색으로 상세 리포트와 압축본을 함께 작성 중입니다... "
-            "(약 1~3분)"
+            "Groq 무료 API가 상세 리포트와 압축본을 작성 중입니다..."
         ):
-            raw_result = call_gemini(
+            raw_result = call_groq(
                 prompt,
-                search=True,
-                max_tokens=12000,
+                max_tokens=GROQ_MAX_TOKENS,
             )
 
         detail, short = extract_dual_output(raw_result)
 
         # -------------------------------------------------------
         # 구분자 누락 등으로 응답 파싱에 실패한 경우
-        # 상세 결과를 보존하고 오류 안내
         # -------------------------------------------------------
 
         if detail is None or short is None:
@@ -1223,7 +1404,7 @@ def run_premarket(use_source_only=False):
             state["pm_note"] = (
                 "상세 리포트는 생성됐지만 압축본 구분에 실패했습니다. "
                 "원본 상세 리포트 탭에서 결과를 확인해 주세요. "
-                "불필요한 추가 API 호출은 실행하지 않았습니다."
+                "추가 API 호출은 실행하지 않았습니다."
             )
 
             return
@@ -1231,10 +1412,19 @@ def run_premarket(use_source_only=False):
         state["pm_long"] = detail
         state["pm_short"] = short
 
+        error_note = ""
+
+        if news_errors:
+            error_note = (
+                f" · RSS 일부 수집 실패 {len(news_errors)}건"
+            )
+
         state["pm_note"] = (
             f"생성 완료 · "
             f"{datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
-            "Gemini API 1회 호출 · 상세 리포트 + 압축본"
+            f"뉴스 {len(news)}건 수집 · "
+            "Groq API 1회 호출"
+            f"{error_note}"
         )
 
     except Exception as error:
@@ -1412,8 +1602,8 @@ def main():
     st.title("MTNW 장전 시황")
 
     st.caption(
-        "해외 지수를 먼저 확인한 뒤, 웹검색으로 장전 브리핑 원본과 "
-        "압축본을 한 번에 생성합니다. "
+        "Toss 지수와 최근 24시간 뉴스 RSS를 수집한 뒤, "
+        "Groq 무료 API로 장전 브리핑 원본과 압축본을 생성합니다. "
         "오후 시황은 왼쪽 메뉴의 'app'에서 작성합니다."
     )
 
@@ -1462,7 +1652,7 @@ def main():
             height=140,
             help=(
                 "이미 만들어 둔 긴 시황글이 있으면 붙여넣고 "
-                "'압축만 실행'을 누르세요. 웹검색 단계를 건너뜁니다."
+                "'압축만 실행'을 누르세요. 뉴스 수집 단계를 건너뜁니다."
             ),
         )
 
@@ -1472,7 +1662,7 @@ def main():
         )
 
         col_a.button(
-            "✨ 장전 시황 생성 (웹검색 + 압축)",
+            "✨ 장전 시황 생성 (뉴스 수집 + 압축)",
             type="primary",
             on_click=run_premarket,
             args=(False,),
