@@ -4442,8 +4442,8 @@ def main():
 st.session_state.setdefault("uni_all", False)
 st.session_state.setdefault("uni_cap100", True)
 
-    with st.sidebar:
-        st.header("설정")
+with st.sidebar:
+    st.header("설정")
 
         auto = st.selectbox(
             "자동 갱신 (지수·환율 등 전체)",
