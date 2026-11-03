@@ -5046,6 +5046,18 @@ def apply_label_style(theme_mode="라이트"):
         html, body, .stApp, [class*="st-"] {{
             font-family: 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
         }}
+        /* 화살표 등 아이콘은 아이콘 전용 글꼴을 유지해야 글자가 겹치지 않습니다 */
+        [data-testid="stIconMaterial"],
+        span[class*="material-symbols"],
+        .material-icons {{
+            font-family: "Material Symbols Rounded", "Material Symbols Outlined", "Material Icons" !important;
+            font-weight: 400 !important;
+            font-style: normal !important;
+            letter-spacing: normal !important;
+            text-transform: none !important;
+            line-height: 1 !important;
+        }}
+
         .stApp {{ background: var(--bg); color: var(--text); }}
         header[data-testid="stHeader"] {{ background: var(--bg); border-bottom: 1px solid var(--hair); }}
         .main .block-container {{
