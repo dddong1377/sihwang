@@ -4660,7 +4660,7 @@ def main():
             st.warning(snapshot["note"])
 
         st.markdown("### 시장 지표")
-          render_market_cards(snapshot)
+        render_market_cards(snapshot)
 
         st.markdown("### 🔎 오늘의 급등·급락 종목")
         with st.container(border=True):
