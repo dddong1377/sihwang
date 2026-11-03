@@ -5,9 +5,7 @@ import html
 import json
 import os
 import re
-import time
 import xml.etree.ElementTree as ET
-from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
 import requests
@@ -20,15 +18,23 @@ st.set_page_config(page_title="MTNW 장전 시황", layout="wide")
 KST = ZoneInfo("Asia/Seoul")
 WEEKDAYS = "월화수목금토일"
 
+
 # ---------------------------------------------------------------
-# Groq 무료 API 설정
+# Groq API 설정 및 진단
 # ---------------------------------------------------------------
 
 GROQ_MODEL = "openai/gpt-oss-120b"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-GROQ_MAX_TOKENS = 6000
+# 우선 출력 토큰을 낮춰 API 사용량을 진단
+GROQ_MAX_TOKENS = 4000
 GROQ_TIMEOUT = 180
+
+# 한 번의 API 요청에 전달할 최대 뉴스 개수
+MAX_NEWS_ITEMS = 30
+
+# 실제 토큰 수가 아닌 입력량 추정용
+CHARS_PER_TOKEN_ESTIMATE = 3
 
 
 def get_groq_api_key():
@@ -57,6 +63,45 @@ def get_groq_headers():
     return {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
+    }
+
+
+def estimate_tokens(text):
+    """
+    정확한 토큰 수가 아닌 대략적인 입력량 추정치.
+    실제 사용량은 API 응답의 usage 값을 기준으로 확인한다.
+    """
+    if not text:
+        return 0
+
+    return max(
+        1,
+        len(text) // CHARS_PER_TOKEN_ESTIMATE,
+    )
+
+
+def get_rate_limit_info(headers):
+    """Groq 응답 헤더에서 제한 정보를 추출한다."""
+
+    header_map = {
+        key.lower(): value
+        for key, value in headers.items()
+    }
+
+    keys = [
+        "x-ratelimit-limit-requests",
+        "x-ratelimit-remaining-requests",
+        "x-ratelimit-reset-requests",
+        "x-ratelimit-limit-tokens",
+        "x-ratelimit-remaining-tokens",
+        "x-ratelimit-reset-tokens",
+        "retry-after",
+        "x-request-id",
+    ]
+
+    return {
+        key: header_map.get(key, "응답에 없음")
+        for key in keys
     }
 
 
@@ -213,7 +258,10 @@ def news_to_text(news):
 
     lines = []
 
-    for index, item in enumerate(news[:60], start=1):
+    # API 입력량 관리를 위해 최대 30건만 전달
+    selected_news = news[:MAX_NEWS_ITEMS]
+
+    for index, item in enumerate(selected_news, start=1):
         lines.append(
             f"[{index}] [{item['category']}] "
             f"{item['title']}\n"
@@ -1118,78 +1166,144 @@ __SOURCE__
 
 
 # ---------------------------------------------------------------
-# Groq 오류 구분
+# Groq 오류 분석
 # ---------------------------------------------------------------
 
-def classify_groq_error(error):
-    message = str(error).lower()
+def parse_groq_error(response):
+    try:
+        data = response.json()
+    except Exception:
+        data = {}
 
-    if (
-        "invalid_api_key" in message
-        or "invalid api key" in message
-        or "authentication" in message
-        or "401" in message
-    ):
+    error_data = data.get("error", {})
+
+    if isinstance(error_data, dict):
+        error_code = str(error_data.get("code", ""))
+        error_type = str(error_data.get("type", ""))
+        error_message = str(error_data.get("message", ""))
+    else:
+        error_code = ""
+        error_type = ""
+        error_message = str(error_data)
+
+    return {
+        "http_status": response.status_code,
+        "error_code": error_code,
+        "error_type": error_type,
+        "error_message": error_message,
+        "raw_response": response.text[:3000],
+    }
+
+
+def classify_groq_error(status_code, error_code="", error_message=""):
+    message = f"{error_code} {error_message}".lower()
+
+    if status_code == 401:
         return "invalid_key"
 
-    if (
-        "429" in message
-        or "rate_limit" in message
-        or "rate limit" in message
-        or "quota" in message
-        or "tokens per minute" in message
-    ):
-        return "quota"
-
-    if "model_decommissioned" in message:
-        return "model"
-
-    if "model_not_found" in message or "404" in message:
-        return "model"
-
-    if "403" in message or "permission" in message:
+    if status_code == 403:
         return "permission"
+
+    if status_code == 404:
+        return "model"
+
+    if status_code == 429:
+        if "tokens per minute" in message or "tpm" in message:
+            return "tpm"
+
+        if "requests per minute" in message or "rpm" in message:
+            return "rpm"
+
+        if "daily" in message or "per day" in message:
+            return "daily"
+
+        if "quota" in message:
+            return "quota"
+
+        return "rate_limit_unknown"
+
+    if status_code >= 500:
+        return "server"
 
     return "other"
 
 
-def friendly_groq_error(error):
-    error_type = classify_groq_error(error)
+def friendly_groq_error(error_info):
+    error_type = classify_groq_error(
+        error_info.get("http_status", 0),
+        error_info.get("error_code", ""),
+        error_info.get("error_message", ""),
+    )
 
-    if error_type == "invalid_key":
-        return (
-            "Groq API 키가 유효하지 않습니다. "
+    messages = {
+        "invalid_key": (
+            "Groq API 인증 오류입니다. "
             "Groq Console에서 API 키를 확인해 주세요."
-        )
-
-    if error_type == "quota":
-        return (
-            "Groq 무료 API 사용량 한도에 도달했습니다. "
-            "분당 또는 일일 사용량 초기화 후 다시 시도해 주세요. "
-            "유료 API로 자동 전환하지 않습니다."
-        )
-
-    if error_type == "model":
-        return (
-            "Groq 모델을 찾을 수 없거나 사용이 중단되었습니다. "
-            "Groq 공식 모델 목록에서 현재 사용 가능한 무료 모델을 확인해 주세요."
-        )
-
-    if error_type == "permission":
-        return (
+        ),
+        "permission": (
             "Groq API 권한 오류입니다. "
             "API 키와 모델 접근 권한을 확인해 주세요."
-        )
+        ),
+        "model": (
+            "요청한 Groq 모델을 찾을 수 없거나 사용이 중단되었습니다. "
+            "모델명을 확인해 주세요."
+        ),
+        "tpm": (
+            "분당 토큰 제한(TPM)에 도달했습니다. "
+            "입력량 또는 출력량을 줄인 뒤 다시 시도해 주세요."
+        ),
+        "rpm": (
+            "분당 요청 횟수 제한(RPM)에 도달했습니다. "
+            "제한 시간이 지난 뒤 다시 시도해 주세요."
+        ),
+        "daily": (
+            "일일 API 사용량 제한에 도달했을 가능성이 있습니다. "
+            "Groq Console에서 사용량을 확인해 주세요."
+        ),
+        "quota": (
+            "API 사용량 또는 할당량 제한에 도달했습니다. "
+            "Groq Console의 사용량 정보를 확인해 주세요."
+        ),
+        "rate_limit_unknown": (
+            "HTTP 429 제한 오류입니다. "
+            "오류 원문과 제한 헤더를 확인해 주세요."
+        ),
+        "server": (
+            "Groq 서버 오류입니다. 잠시 후 다시 시도해 주세요."
+        ),
+        "other": (
+            "Groq API 요청 중 오류가 발생했습니다."
+        ),
+    }
 
-    return f"Groq API 호출 실패: {str(error)[:500]}"
+    return messages.get(error_type, messages["other"])
 
 
 # ---------------------------------------------------------------
-# Groq 호출
+# Groq API 호출 및 사용량 진단
 # ---------------------------------------------------------------
 
 def call_groq(prompt, max_tokens=4000):
     headers = get_groq_headers()
+
+    diagnostic = {
+        "model": GROQ_MODEL,
+        "input_characters": len(prompt),
+        "estimated_input_tokens": estimate_tokens(prompt),
+        "max_output_tokens": max_tokens,
+        "actual_prompt_tokens": None,
+        "actual_completion_tokens": None,
+        "actual_total_tokens": None,
+        "finish_reason": None,
+        "request_id": None,
+        "rate_limits": {},
+        "error": None,
+        "called_at": datetime.datetime.now(KST).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+    }
+
+    st.session_state["pm_api_diagnostic"] = diagnostic
 
     payload = {
         "model": GROQ_MODEL,
@@ -1219,13 +1333,49 @@ def call_groq(prompt, max_tokens=4000):
             timeout=GROQ_TIMEOUT,
         )
 
+        diagnostic["rate_limits"] = get_rate_limit_info(
+            response.headers
+        )
+
+        diagnostic["request_id"] = (
+            response.headers.get("x-request-id")
+            or response.headers.get("request-id")
+        )
+
         if response.status_code != 200:
+            error_info = parse_groq_error(response)
+
+            diagnostic["error"] = error_info
+
+            st.session_state["pm_api_diagnostic"] = diagnostic
+
             raise RuntimeError(
-                f"HTTP {response.status_code}: "
-                f"{response.text[:1000]}"
+                friendly_groq_error(error_info)
+                + "\n\n"
+                + f"HTTP 상태: {error_info['http_status']}"
+                + "\n"
+                + f"오류 코드: {error_info['error_code'] or '없음'}"
+                + "\n"
+                + f"오류 유형: {error_info['error_type'] or '없음'}"
+                + "\n"
+                + f"오류 원문: {error_info['error_message'] or error_info['raw_response']}"
             )
 
         data = response.json()
+
+        usage = data.get("usage") or {}
+
+        diagnostic["actual_prompt_tokens"] = usage.get(
+            "prompt_tokens"
+        )
+
+        diagnostic["actual_completion_tokens"] = usage.get(
+            "completion_tokens"
+        )
+
+        diagnostic["actual_total_tokens"] = usage.get(
+            "total_tokens"
+        )
 
         choices = data.get("choices") or []
 
@@ -1234,7 +1384,13 @@ def call_groq(prompt, max_tokens=4000):
                 "Groq 응답에 choices 항목이 없습니다."
             )
 
-        message = choices[0].get("message") or {}
+        choice = choices[0]
+
+        diagnostic["finish_reason"] = choice.get(
+            "finish_reason"
+        )
+
+        message = choice.get("message") or {}
         result = message.get("content")
 
         if isinstance(result, list):
@@ -1248,25 +1404,53 @@ def call_groq(prompt, max_tokens=4000):
 
         if not result:
             raise RuntimeError(
-                "Groq 응답이 비어 있습니다. "
-                "사용량 또는 모델 응답을 확인해 주세요."
+                "Groq 응답이 비어 있습니다."
             )
+
+        if diagnostic["finish_reason"] == "length":
+            diagnostic["error"] = {
+                "message": (
+                    "출력 토큰 제한으로 응답이 중간에 종료됐습니다."
+                )
+            }
+
+            st.session_state["pm_api_diagnostic"] = diagnostic
+
+            raise RuntimeError(
+                "출력 토큰 제한으로 응답이 중간에 종료됐습니다. "
+                "상세 리포트와 압축본이 모두 생성되지 않았을 수 있습니다."
+            )
+
+        st.session_state["pm_api_diagnostic"] = diagnostic
 
         return result
 
     except requests.exceptions.Timeout:
+        diagnostic["error"] = {
+            "message": "API 요청 시간 초과",
+        }
+
+        st.session_state["pm_api_diagnostic"] = diagnostic
+
         raise RuntimeError(
             "Groq API 응답 시간이 초과되었습니다. "
-            "잠시 후 다시 시도해 주세요."
+            "자동 재시도는 실행하지 않았습니다."
         )
 
     except requests.exceptions.RequestException as error:
+        diagnostic["error"] = {
+            "message": str(error)[:1000],
+        }
+
+        st.session_state["pm_api_diagnostic"] = diagnostic
+
         raise RuntimeError(
             f"Groq 네트워크 요청 실패: {str(error)[:300]}"
         )
 
-    except Exception as error:
-        raise RuntimeError(friendly_groq_error(error))
+    except Exception:
+        st.session_state["pm_api_diagnostic"] = diagnostic
+        raise
 
 
 # ---------------------------------------------------------------
@@ -1308,16 +1492,27 @@ def extract_dual_output(raw_text):
 
 def run_premarket(use_source_only=False):
     state = st.session_state
-    now = datetime.datetime.now(KST)
 
-    today = (
-        f"{now.year}년 {now.month:02d}월 "
-        f"{now.day:02d}일 ({WEEKDAYS[now.weekday()]})"
-    )
+    # 중복 실행 방지
+    if state.get("pm_api_running", False):
+        state["pm_note"] = (
+            "이미 작업이 진행 중입니다. "
+            "현재 작업이 끝난 후 다시 실행해 주세요."
+        )
+        return
 
-    pasted = state.get("pm_pasted", "").strip()
+    state["pm_api_running"] = True
 
     try:
+        now = datetime.datetime.now(KST)
+
+        today = (
+            f"{now.year}년 {now.month:02d}월 "
+            f"{now.day:02d}일 ({WEEKDAYS[now.weekday()]})"
+        )
+
+        pasted = state.get("pm_pasted", "").strip()
+
         # -------------------------------------------------------
         # 직접 붙여넣은 원문: 압축만 실행
         # -------------------------------------------------------
@@ -1329,12 +1524,24 @@ def run_premarket(use_source_only=False):
                 )
                 return
 
-            with st.spinner("Groq 무료 API로 원문을 압축하는 중..."):
+            prompt = COMPRESS_PROMPT.replace(
+                "__SOURCE__",
+                pasted,
+            )
+
+            state["pm_request_preview"] = {
+                "news_count": 0,
+                "news_sent": 0,
+                "prompt_characters": len(prompt),
+                "estimated_input_tokens": estimate_tokens(prompt),
+                "max_output_tokens": 2500,
+            }
+
+            with st.spinner(
+                "Groq API로 원문을 압축하는 중..."
+            ):
                 short = call_groq(
-                    COMPRESS_PROMPT.replace(
-                        "__SOURCE__",
-                        pasted,
-                    ),
+                    prompt,
                     max_tokens=2500,
                 )
 
@@ -1372,7 +1579,9 @@ def run_premarket(use_source_only=False):
         # 최근 24시간 뉴스 RSS 수집
         # -------------------------------------------------------
 
-        with st.spinner("최근 24시간 국내외 뉴스 RSS 수집 중..."):
+        with st.spinner(
+            "최근 24시간 국내외 뉴스 RSS 수집 중..."
+        ):
             news, news_errors = collect_news()
 
         news_context = news_to_text(news)
@@ -1384,8 +1593,17 @@ def run_premarket(use_source_only=False):
             .replace("__NEWS_CONTEXT__", news_context)
         )
 
+        # 호출 전 입력량 진단
+        state["pm_request_preview"] = {
+            "news_count": len(news),
+            "news_sent": min(len(news), MAX_NEWS_ITEMS),
+            "prompt_characters": len(prompt),
+            "estimated_input_tokens": estimate_tokens(prompt),
+            "max_output_tokens": GROQ_MAX_TOKENS,
+        }
+
         with st.spinner(
-            "Groq 무료 API가 상세 리포트와 압축본을 작성 중입니다..."
+            "Groq API가 상세 리포트와 압축본을 작성 중입니다..."
         ):
             raw_result = call_groq(
                 prompt,
@@ -1402,7 +1620,8 @@ def run_premarket(use_source_only=False):
             state["pm_long"] = raw_result
 
             state["pm_note"] = (
-                "상세 리포트는 생성됐지만 압축본 구분에 실패했습니다. "
+                "응답은 생성됐지만 상세 리포트와 압축본의 "
+                "구분자를 확인하지 못했습니다. "
                 "원본 상세 리포트 탭에서 결과를 확인해 주세요. "
                 "추가 API 호출은 실행하지 않았습니다."
             )
@@ -1429,6 +1648,9 @@ def run_premarket(use_source_only=False):
 
     except Exception as error:
         state["pm_note"] = f"생성 실패: {error}"
+
+    finally:
+        state["pm_api_running"] = False
 
 
 # ---------------------------------------------------------------
@@ -1593,6 +1815,126 @@ def copy_buttons(markdown):
 
 
 # ---------------------------------------------------------------
+# API 진단 정보 표시
+# ---------------------------------------------------------------
+
+def show_api_diagnostics():
+    state = st.session_state
+
+    st.markdown("### 🔧 ④ API 사용량 및 진단")
+
+    with st.expander(
+        "API 요청 및 사용량 상세 정보",
+        expanded=True,
+    ):
+        preview = state.get("pm_request_preview")
+        diagnostic = state.get("pm_api_diagnostic")
+
+        if preview:
+            st.markdown("#### 요청 전 정보")
+
+            col1, col2, col3 = st.columns(3)
+
+            col1.metric(
+                "수집 뉴스",
+                f"{preview.get('news_count', 0)}건",
+            )
+
+            col2.metric(
+                "실제 전달 뉴스",
+                f"{preview.get('news_sent', 0)}건",
+            )
+
+            col3.metric(
+                "프롬프트 글자 수",
+                f"{preview.get('prompt_characters', 0):,}",
+            )
+
+            st.caption(
+                "예상 입력 토큰: "
+                f"{preview.get('estimated_input_tokens', 0):,}개 "
+                "(정확한 토큰 수가 아닌 참고값)"
+            )
+
+            st.caption(
+                "최대 출력 토큰: "
+                f"{preview.get('max_output_tokens', 0):,}개"
+            )
+
+        if diagnostic:
+            st.divider()
+            st.markdown("#### API 응답 정보")
+
+            col1, col2, col3 = st.columns(3)
+
+            prompt_tokens = diagnostic.get(
+                "actual_prompt_tokens"
+            )
+
+            completion_tokens = diagnostic.get(
+                "actual_completion_tokens"
+            )
+
+            total_tokens = diagnostic.get(
+                "actual_total_tokens"
+            )
+
+            col1.metric(
+                "실제 입력 토큰",
+                f"{prompt_tokens:,}" if prompt_tokens is not None else "미확인",
+            )
+
+            col2.metric(
+                "실제 출력 토큰",
+                f"{completion_tokens:,}" if completion_tokens is not None else "미확인",
+            )
+
+            col3.metric(
+                "전체 사용 토큰",
+                f"{total_tokens:,}" if total_tokens is not None else "미확인",
+            )
+
+            st.write(
+                "모델:",
+                diagnostic.get("model", "확인 불가"),
+            )
+
+            st.write(
+                "호출 시각:",
+                diagnostic.get("called_at", "확인 불가"),
+            )
+
+            st.write(
+                "응답 종료 사유:",
+                diagnostic.get("finish_reason") or "확인 불가",
+            )
+
+            st.write(
+                "요청 ID:",
+                diagnostic.get("request_id") or "확인 불가",
+            )
+
+            st.markdown("#### API 제한 헤더")
+
+            st.json(
+                diagnostic.get("rate_limits", {})
+            )
+
+            if diagnostic.get("error"):
+                st.markdown("#### 오류 상세 정보")
+                st.error("API 요청에 오류가 발생했습니다.")
+
+                st.json(
+                    diagnostic["error"]
+                )
+
+        if not preview and not diagnostic:
+            st.caption(
+                "아직 API 실행 기록이 없습니다."
+            )
+
+
+# ---------------------------------------------------------------
 # 화면
 # ---------------------------------------------------------------
 
@@ -1667,6 +2009,7 @@ def main():
             on_click=run_premarket,
             args=(False,),
             use_container_width=True,
+            disabled=state.get("pm_api_running", False),
         )
 
         col_b.button(
@@ -1675,6 +2018,7 @@ def main():
             args=(True,),
             use_container_width=True,
             help="붙여넣은 원문만 압축합니다.",
+            disabled=state.get("pm_api_running", False),
         )
 
         if state.get("pm_note"):
@@ -1719,6 +2063,9 @@ def main():
                 "원본 상세 리포트가 아직 없습니다. "
                 "직접 붙여넣은 원문만 압축한 경우에는 표시되지 않습니다."
             )
+
+    # 4) API 진단
+    show_api_diagnostics()
 
 
 main()
