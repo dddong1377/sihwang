@@ -4659,48 +4659,8 @@ def main():
         if snapshot.get("note"):
             st.warning(snapshot["note"])
 
-        st.markdown("### 📊 주요 시장 지표")
-        with st.container(border=True):
-            c1, c2 = st.columns(2)
-
-            for col, key, label in (
-            (c1, "kospi", "코스피"),
-            (c2, "kosdaq", "코스닥"),
-            ):
-                data = snapshot["indices"].get(key, {})
-
-                col.markdown(
-                    f"**{label}**  \n### {fmt(data.get('price'))}"
-                )
-
-                col.markdown(
-                    f"{arrow(data.get('pct'))} "
-                    f"{pct_text(data.get('pct'))}"
-                )
-
-                if data.get("pct") is None:
-                    col.caption(
-                        "전일 종가를 확인할 수 없어 "
-                        "등락률은 표시하지 않았습니다."
-                    )
-
-        st.markdown("### 🌐 해외 지표 및 환율")
-        with st.container(border=True):
-            g_cols = st.columns(3)
-
-            for col, (key, label, unit) in zip(g_cols, GLOBAL_ITEMS):
-                data = snapshot.get("global", {}).get(key, {})
-                price = data.get("price")
-
-                col.markdown(
-                    f"**{label}**  \n### "
-                    f"{fmt(price)}{unit if price is not None else ''}"
-                )
-
-                col.markdown(
-                    f"{arrow(data.get('pct'))} "
-                    f"{pct_text(data.get('pct'))}"
-                )
+                  st.markdown("### 시장 지표")
+          render_market_cards(snapshot)
 
         st.markdown("### 🔎 오늘의 급등·급락 종목")
         with st.container(border=True):
@@ -5030,5 +4990,260 @@ def main():
 
     body()
 
+# ===============================================================
+# 네이버페이 증권 스타일 패치 (app.py에 붙여넣기) — 2단계로 끝납니다
+#
+# [1단계] 이 파일의 내용(이 주석 아래 전부)을 복사해서
+#         app.py 맨 아래, 마지막 줄 `main()` 바로 위에 붙여넣기.
+#         (파이썬은 같은 이름 함수를 나중에 정의하면 덮어쓰므로
+#          기존 apply_label_style은 지울 필요 없습니다.)
+#
+# [2단계] app.py에서 Ctrl+F 로  주요 시장 지표  를 검색.
+#         `st.markdown("### 📊 주요 시장 지표")` 줄부터
+#         `st.markdown("### 🔎 오늘의 급등·급락 종목")` 줄 "바로 위"까지
+#         (지표 박스 2개, 약 45줄)를 지우고 아래 두 줄로 교체:
+#
+#             st.markdown("### 시장 지표")
+#             render_market_cards(snapshot)
+#
+#         들여쓰기는 주변 st.markdown 줄과 똑같이(공백 8칸) 맞추세요.
+# ===============================================================
 
+
+def apply_label_style(theme_mode="라이트"):
+    """네이버페이 증권 느낌의 화이트 카드 UI. 상승=빨강, 하락=파랑(국내 증권 관례)."""
+
+    dark = theme_mode == "블랙"
+
+    if dark:
+        page_bg, card_bg, card_alt = "#101215", "#1A1D21", "#23272D"
+        border, text, muted = "#2E343B", "#F2F4F6", "#9AA4AF"
+        up, down = "#FF6B6B", "#5B9BFF"
+        hair = "#2E343B"
+    else:
+        page_bg, card_bg, card_alt = "#FFFFFF", "#FFFFFF", "#F5F6F8"
+        border, text, muted = "#E3E6EA", "#191F28", "#8B95A1"
+        up, down = "#F04452", "#1B64DA"
+        hair = "#EEF0F3"
+
+    green = "#03C75A"  # 네이버 그린: 포인트(주요 버튼·배지)에만 사용
+
+    st.markdown(
+        f"""
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&display=swap');
+
+        :root {{
+            --bg: {page_bg}; --card: {card_bg}; --alt: {card_alt};
+            --line: {border}; --hair: {hair};
+            --text: {text}; --muted: {muted};
+            --up: {up}; --down: {down}; --green: {green};
+            color-scheme: {'dark' if dark else 'light'};
+        }}
+
+        html, body, .stApp, [class*="st-"] {{
+            font-family: 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+        }}
+        .stApp {{ background: var(--bg); color: var(--text); }}
+        header[data-testid="stHeader"] {{ background: var(--bg); border-bottom: 1px solid var(--hair); }}
+        .main .block-container {{
+            max-width: 1240px;
+            padding: 1.4rem clamp(1rem, 3vw, 2.4rem) 3rem;
+        }}
+
+        /* 글자 */
+        .stMarkdown, .stMarkdown p, .stMarkdown li,
+        [data-testid="stText"] {{
+            color: var(--text) !important;
+            font-size: .95rem !important;
+            font-weight: 500 !important;
+            line-height: 1.6 !important;
+        }}
+        [data-testid="stCaptionContainer"] p {{
+            color: var(--muted) !important;
+            font-size: .82rem !important;
+            font-weight: 400 !important;
+        }}
+        h1 {{ font-size: 1.7rem !important; font-weight: 800 !important; letter-spacing: -.03em !important; color: var(--text) !important; }}
+        h2 {{ font-size: 1.3rem !important; font-weight: 800 !important; letter-spacing: -.02em !important; color: var(--text) !important; }}
+        h3 {{ font-size: 1.12rem !important; font-weight: 800 !important; letter-spacing: -.02em !important; color: var(--text) !important; margin: 1.4rem 0 .6rem !important; }}
+        strong, b {{ color: var(--text) !important; font-weight: 700 !important; }}
+
+        /* 카드: 테두리 있는 컨테이너·접이식 영역 */
+        [data-testid="stVerticalBlockBorderWrapper"] {{
+            background: var(--card);
+            border: 1px solid var(--line) !important;
+            border-radius: 16px !important;
+        }}
+        [data-testid="stExpander"] {{
+            background: var(--card) !important;
+            border: 1px solid var(--line) !important;
+            border-radius: 16px !important;
+            box-shadow: none !important;
+        }}
+        [data-testid="stExpander"] summary p {{ font-size: 1rem !important; font-weight: 700 !important; }}
+
+        /* 입력창: 얇은 회색 테두리, 포커스 시 그린 */
+        [data-testid="stWidgetLabel"] p, [data-testid="stCheckbox"] label p {{
+            color: var(--text) !important; font-size: .88rem !important; font-weight: 600 !important;
+        }}
+        [data-testid="stTextInput"] input,
+        [data-testid="stTextArea"] textarea,
+        [data-testid="stNumberInput"] input,
+        [data-testid="stSelectbox"] div[data-baseweb="select"] > div {{
+            background: var(--alt) !important;
+            color: var(--text) !important;
+            border: 1px solid transparent !important;
+            border-radius: 10px !important;
+            font-size: .93rem !important;
+            font-weight: 500 !important;
+        }}
+        [data-testid="stTextInput"] input:focus,
+        [data-testid="stTextArea"] textarea:focus {{
+            border-color: var(--green) !important;
+            box-shadow: none !important;
+        }}
+
+        /* 버튼: 기본은 흰 바탕 얇은 테두리, primary는 네이버 그린 */
+        .stButton > button {{
+            min-height: 2.5rem;
+            border-radius: 10px;
+            border: 1px solid var(--line);
+            background: var(--card) !important;
+            color: var(--text) !important;
+            font-size: .9rem !important;
+            font-weight: 700 !important;
+            box-shadow: none;
+        }}
+        .stButton > button:hover {{ border-color: var(--green); color: var(--green) !important; }}
+        .stButton > button[kind="primary"] {{
+            background: var(--green) !important;
+            border-color: var(--green);
+            color: #FFFFFF !important;
+        }}
+        .stButton > button[kind="primary"]:hover {{ filter: brightness(.95); color: #FFFFFF !important; }}
+
+        /* 상단 테마 토글: 작은 알약 */
+        [data-testid="stRadio"] label {{
+            background: var(--alt) !important;
+            border: 0 !important;
+            border-radius: 999px !important;
+            padding: .2rem .8rem !important;
+        }}
+        [data-testid="stRadio"] label p {{ font-size: .82rem !important; font-weight: 700 !important; }}
+
+        [data-testid="stSidebar"] {{ background: var(--card); border-right: 1px solid var(--hair); }}
+        [data-testid="stAlert"] {{ border-radius: 12px; }}
+        [data-testid="stTable"], [data-testid="stDataFrame"] {{ border-radius: 12px; }}
+
+        /* ---------- 지수 카드 줄 (네이버 증권 상단) ---------- */
+        .mk-row {{
+            display: flex; gap: 10px; overflow-x: auto;
+            padding: 2px 2px 8px; scrollbar-width: thin;
+        }}
+        .mk-card {{
+            flex: 0 0 auto; min-width: 176px;
+            background: var(--alt);
+            border: 1.5px solid transparent;
+            border-radius: 12px;
+            padding: 12px 14px 12px;
+        }}
+        .mk-card.sel {{ background: var(--card); border-color: var(--text); }}
+        .mk-name {{ font-size: .8rem; font-weight: 600; color: var(--muted); }}
+        .mk-name b {{ color: var(--text) !important; font-weight: 700 !important; margin-right: 4px; }}
+        .mk-price {{
+            margin-top: 6px; font-size: 1.45rem; font-weight: 800;
+            letter-spacing: -.02em; color: var(--text); font-variant-numeric: tabular-nums;
+        }}
+        .mk-chg {{ margin-top: 2px; font-size: .8rem; font-weight: 600; font-variant-numeric: tabular-nums; }}
+        .mk-up {{ color: var(--up); }}
+        .mk-down {{ color: var(--down); }}
+        .mk-flat {{ color: var(--muted); }}
+
+        /* 시황글 미리보기는 읽기 편한 기본 크기 유지 */
+        .st-key-preview_container .stMarkdown p,
+        .st-key-preview_container .stMarkdown li {{
+            font-size: .95rem !important; font-weight: 400 !important; line-height: 1.6 !important;
+        }}
+        .st-key-preview_container table {{ border-collapse: collapse; width: 100%; }}
+        .st-key-preview_container th {{
+            background: var(--alt); color: var(--muted); font-size: .8rem; font-weight: 600;
+            border-bottom: 1px solid var(--line);
+        }}
+        .st-key-preview_container td {{ border-bottom: 1px solid var(--hair); }}
+
+        @media (max-width: 760px) {{
+            .main .block-container {{ padding: 1rem .8rem 2rem; }}
+            .mk-card {{ min-width: 150px; }}
+            .mk-price {{ font-size: 1.25rem; }}
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def index_card_html(label, status, price, pct, unit="", selected=False):
+    """네이버 증권식 지수 카드 1장. 전일비는 현재가와 등락률로 계산합니다."""
+
+    if price is None:
+        price_text, chg_text, cls = "확인 불가", "", "mk-flat"
+    else:
+        price_text = f"{fmt(price)}{unit}"
+
+        if pct is None:
+            chg_text, cls = "등락률 확인 불가", "mk-flat"
+        else:
+            diff = price - price / (1 + pct / 100) if pct > -100 else 0
+            sign = "▲" if pct > 0 else "▼" if pct < 0 else "−"
+            cls = "mk-up" if pct > 0 else "mk-down" if pct < 0 else "mk-flat"
+            chg_text = f"{sign} {abs(diff):,.2f}({pct:+.2f}%)"
+
+    return (
+        f"<div class='mk-card{' sel' if selected else ''}'>"
+        f"<div class='mk-name'><b>{html.escape(label)}</b>{html.escape(status)}</div>"
+        f"<div class='mk-price'>{price_text}</div>"
+        f"<div class='mk-chg {cls}'>{chg_text}</div>"
+        "</div>"
+    )
+
+
+def render_market_cards(snapshot):
+    """코스피·코스닥·나스닥·S&P500·원/달러를 한 줄 카드로 표시."""
+
+    indices = snapshot.get("indices", {})
+    world = snapshot.get("global", {})
+
+    open_now = krx_regular_open()
+
+    cards = [
+        index_card_html(
+            "코스피", "장중" if open_now else "장마감",
+            indices.get("kospi", {}).get("price"),
+            indices.get("kospi", {}).get("pct"),
+            selected=True,
+        ),
+        index_card_html(
+            "코스닥", "장중" if open_now else "장마감",
+            indices.get("kosdaq", {}).get("price"),
+            indices.get("kosdaq", {}).get("pct"),
+        ),
+    ]
+
+    for key, label, unit in GLOBAL_ITEMS:
+        data = world.get(key, {})
+
+        cards.append(
+            index_card_html(label, "", data.get("price"), data.get("pct"), unit)
+        )
+
+    st.markdown(
+        "<div class='mk-row'>" + "".join(cards) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    if any(
+        indices.get(k, {}).get("pct") is None for k in ("kospi", "kosdaq")
+    ):
+        st.caption("전일 종가를 확인할 수 없는 지수는 등락률을 표시하지 않았습니다.")
 main()
