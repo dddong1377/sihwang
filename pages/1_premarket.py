@@ -1683,6 +1683,117 @@ def insert_compact_index_table(short, table_md):
     )
 
 
+# ---------------------------------------------------------------
+# 스타 기자 헤드라인
+# ---------------------------------------------------------------
+
+# 창의성을 위해 일반 호출(0.2)보다 높게 설정
+GROQ_HEADLINE_TEMPERATURE = 0.8
+
+# 추론 토큰이 출력 한도를 소진하지 않도록 여유 있게 설정
+GROQ_HEADLINE_MAX_TOKENS = 900
+
+# 법적·윤리적 위험이 있는 표현: 포함된 헤드라인은 코드가 버림
+BANNED_HEADLINE_WORDS = (
+    "무조건", "반드시", "100%", "수익 보장", "수익보장",
+    "원금 보장", "확정 수익", "지금 사라", "당장 사라",
+    "지금 팔라", "당장 팔라", "사야", "팔아야", "담아야",
+    "대박", "폭망", "패닉", "떡상 확정", "급등 확정",
+    "100배", "인생역전",
+)
+
+HEADLINE_PROMPT = """# 역할
+너는 경제·금융 담당 스타 기자다.
+네가 쓴 헤드라인은 독자의 호기심을 자극해서, 안 누르고는 못 배기게 만든다.
+단, 법적으로 문제 될 표현은 절대 쓰지 않는다.
+
+# 임무
+아래 장전 시황 요약을 읽고, 시황글 맨 위에 올릴 한 줄 헤드라인 3개를 쓴다.
+
+# 헤드라인 기법 (3개가 서로 다른 각도가 되게 골고루 쓴다)
+- 호기심 간극: 결과나 원인의 일부만 보여주고 나머지는 궁금하게 남긴다
+- 대비·반전: 어제와 오늘, 미국과 한국, 기대와 현실의 엇갈림을 짚는다
+- 구체적 숫자: 원문에 있는 숫자를 하나만 콕 집어 쓴다
+- 질문·여운: 독자가 스스로 답을 찾고 싶어지는 의문이나 말줄임
+- 짧고 리듬감 있게, 입말처럼 쓴다. 뻔한 요약("~ 마감", "~ 혼조")은 피한다
+
+# 법적·윤리 안전 규칙 (반드시 지킨다)
+1. 원문에 있는 사실·수치·종목명만 쓴다. 새로 지어내지 않는다.
+2. 상승·하락을 단정해 예측하지 않는다. "무조건", "반드시", "확정" 같은 표현을 쓰지 않는다.
+3. 특정 종목의 매수·매도·보유를 권유하지 않는다. 수익 보장, "지금 사라/팔아라" 류는 금지한다.
+4. 공포나 패닉을 부추기지 않는다. "폭망", "붕괴 임박" 같은 선동 표현은 쓰지 않고, 원문에서 확인된 하락은 사실 그대로 쓴다.
+5. 특정 기업·인물을 비방하거나 근거 없는 의혹을 제기하지 않는다.
+6. "확인 불가"인 항목은 헤드라인에 쓰지 않는다.
+7. 낚시가 되면 안 된다. 헤드라인이 던진 궁금증은 시황 본문에서 풀려야 한다.
+
+# 출력 형식
+- 헤드라인 3개, 한 줄에 하나씩
+- 각 15~35자 내외
+- 번호·따옴표·설명·머리말 없이 헤드라인 문장만 출력
+- 이모지는 많아야 1개, 없어도 된다
+
+# 장전 시황 요약
+__SOURCE__
+"""
+
+
+def build_headline_prompt(short_text):
+    return HEADLINE_PROMPT.replace("__SOURCE__", short_text)
+
+
+def parse_headlines(text):
+    """AI 응답에서 헤드라인을 뽑고, 금칙어가 들어간 줄은 제외합니다."""
+
+    headlines = []
+
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        line = re.sub(r"^(?:[-*•]|\d+[.)])\s*", "", line)
+        line = line.strip(" \t\"'“”‘’「」*")
+
+        if len(line) < 5:
+            continue
+
+        if any(word in line for word in BANNED_HEADLINE_WORDS):
+            continue
+
+        headlines.append(line)
+
+    return headlines[:3]
+
+
+def apply_headline(text, headline):
+    """시황글의 '한 줄 요약' 줄을 헤드라인으로 바꿉니다."""
+
+    if not text or not headline:
+        return text
+
+    pattern = re.compile(
+        r"^(>\s*📌\s*\*\*[^\n*]*한 줄 요약[^\n*]*\*\*\s*[:：]?)[^\n]*",
+        re.M,
+    )
+
+    def replace(match):
+        base = match.group(1).rstrip()
+
+        if not base.endswith((":", "：")):
+            base += ":"
+
+        return f"{base} {headline}"
+
+    if pattern.search(text):
+        return pattern.sub(replace, text, count=1)
+
+    # 한 줄 요약 줄이 없으면 제목 바로 아래에 넣음
+    return re.sub(
+        r"^(##[^\n]*\n)",
+        lambda m: m.group(1) + f"\n> 📌 **한 줄 요약**: {headline}\n",
+        text,
+        count=1,
+        flags=re.M,
+    )
+
+
 def choose_news_count(selected, today, index_table):
     """모든 파트가 토큰 예산 안에 들어가는 가장 큰 뉴스 개수를 찾습니다."""
 
@@ -1838,6 +1949,7 @@ def call_groq(
     prompt,
     max_tokens,
     stage="Groq API",
+    temperature=0.2,
 ):
     headers = get_groq_headers()
 
@@ -1895,7 +2007,7 @@ def call_groq(
                 "content": prompt,
             },
         ],
-        "temperature": 0.2,
+        "temperature": temperature,
         "max_tokens": safe_max_tokens,
     }
 
@@ -2285,10 +2397,13 @@ def rebuild_long_report():
     if not ctx or not parts:
         return
 
-    state["pm_long"] = compose_report(
-        DETAIL_PART_KEYS,
-        ctx,
-        parts,
+    state["pm_long"] = apply_headline(
+        compose_report(
+            DETAIL_PART_KEYS,
+            ctx,
+            parts,
+        ),
+        state.get("pm_headline", ""),
     )
 
 
@@ -2404,6 +2519,70 @@ def run_one_part(part, number, total, ctx, status):
     status.write(f"✅ {stage} 완료 · 저장됨")
 
 
+def run_headline_step(status, full=True):
+    """압축본이 완성된 뒤 스타 기자 헤드라인을 따로 써서 한 줄 요약을 교체합니다.
+
+    실패해도 전체 생성은 실패 처리하지 않고 기존 한 줄 요약을 그대로 둡니다.
+    """
+
+    state = st.session_state
+
+    state["pm_headline_alts"] = []
+
+    try:
+        short = state.get("pm_short", "")
+
+        prompt = build_headline_prompt(short)
+
+        preview = make_request_preview(
+            "헤드라인 작성",
+            prompt,
+            GROQ_HEADLINE_MAX_TOKENS,
+        )
+
+        diagnostics = state.get("pm_api_diagnostics") or []
+        previous = diagnostics[-1] if diagnostics else None
+
+        wait_before_api_call(
+            previous,
+            prompt,
+            preview["max_output_tokens"],
+            "헤드라인 작성",
+        )
+
+        status.write("✍️ 헤드라인 작성 중...")
+
+        result = call_groq(
+            prompt,
+            max_tokens=GROQ_HEADLINE_MAX_TOKENS,
+            stage="헤드라인 작성",
+            temperature=GROQ_HEADLINE_TEMPERATURE,
+        )
+
+        headlines = parse_headlines(result)
+
+        if not headlines:
+            status.write(
+                "⚠️ 사용 가능한 헤드라인이 없어 기존 한 줄 요약을 유지합니다."
+            )
+            return
+
+        state["pm_short"] = apply_headline(short, headlines[0])
+        state["pm_headline_alts"] = headlines[1:]
+
+        if full:
+            state["pm_headline"] = headlines[0]
+            rebuild_long_report()
+
+        status.write("✅ 헤드라인 완료")
+
+    except Exception as error:
+        status.write(
+            f"⚠️ 헤드라인 작성 실패, 기존 한 줄 요약을 유지합니다: "
+            f"{str(error)[:200]}"
+        )
+
+
 def run_pipeline(mode, status):
     state = st.session_state
     now = datetime.datetime.now(KST)
@@ -2438,6 +2617,9 @@ def run_pipeline(mode, status):
             stage="원문 압축",
         )
 
+        # 붙여넣은 원문의 압축본에도 헤드라인 적용 (상세 리포트는 건드리지 않음)
+        run_headline_step(status, full=False)
+
         state["pm_note"] = (
             f"압축 완료 · {datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
             "Groq API 1회 호출"
@@ -2460,6 +2642,8 @@ def run_pipeline(mode, status):
         state["pm_short"] = ""
         state["pm_ctx"] = None
         state["pm_news_all"] = []
+        state["pm_headline"] = ""
+        state["pm_headline_alts"] = []
 
         today = (
             f"{now.year}년 {now.month:02d}월 "
@@ -2607,6 +2791,9 @@ def run_pipeline(mode, status):
         short,
         compact_index_table(index_rows),
     )
+
+    # 한 줄 요약을 스타 기자 헤드라인으로 교체 (실패해도 계속 진행)
+    run_headline_step(status, full=True)
 
     dropped = [
         key for key in COMPRESS_OPTIONAL if key not in included
@@ -3271,6 +3458,16 @@ def main():
             key="pm_short",
             height=480,
         )
+
+        alt_headlines = state.get("pm_headline_alts") or []
+
+        if alt_headlines:
+            with st.expander(
+                "✍️ 다른 헤드라인 후보 (마음에 들면 위 '한 줄 요약'을 직접 바꿔 쓰세요)",
+                expanded=False,
+            ):
+                for alt in alt_headlines:
+                    st.markdown(f"- {alt}")
 
         short = state.get("pm_short", "").strip()
 
