@@ -4435,15 +4435,15 @@ def apply_label_style(theme_mode="라이트"):
 
 
 def main():
-     st.title("MTNW 오후 시황")
-     apply_label_style()
+    st.title("MTNW 오후 시황")
+    apply_label_style()
 
     # 시총 100위 모드를 기본값으로 시작합니다.
-st.session_state.setdefault("uni_all", False)
-st.session_state.setdefault("uni_cap100", True)
+    st.session_state.setdefault("uni_all", False)
+    st.session_state.setdefault("uni_cap100", True)
 
-with st.sidebar:
-    st.header("설정")
+    with st.sidebar:
+        st.header("설정")
 
         auto = st.selectbox(
             "자동 갱신 (지수·환율 등 전체)",
