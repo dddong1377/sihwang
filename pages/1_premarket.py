@@ -3493,5 +3493,521 @@ def main():
 
     render_token_status()
 
+# ===============================================================
+# [장전 시황 페이지] 일정은 토스 증시 캘린더에서만 가져오는 패치
+#
+# 붙여넣는 곳: 이 페이지 코드 맨 아래, 마지막 줄 `main()` 바로 위 (한 곳, 한 번만)
+# 지울 것: 없음 (아래 코드가 기존 함수·문구를 덮어씁니다)
+# ===============================================================
 
+
+# ---------------------------------------------------------------
+# A. 토스 증시 캘린더 조회 (오늘 ~ 이번 주 일요일)
+# ---------------------------------------------------------------
+
+TOSS_CALENDAR_BASE = "https://wts-cert-api.tossinvest.com"
+
+CALENDAR_CACHE_SECONDS = 120
+
+
+def _calendar_session_headers():
+    cookie = (
+        secret("TOSS_CALENDAR_COOKIE").strip()
+        or secret("TOSS_NEWS_COOKIE").strip()
+        or secret("TOSS_INDICATOR_COOKIE").strip()
+    )
+    xsrf_token = (
+        secret("TOSS_CALENDAR_XSRF_TOKEN").strip()
+        or secret("TOSS_NEWS_XSRF_TOKEN").strip()
+        or secret("TOSS_INDICATOR_XSRF_TOKEN").strip()
+    )
+    app_version = (
+        secret("TOSS_CALENDAR_APP_VERSION").strip()
+        or secret("TOSS_NEWS_APP_VERSION").strip()
+        or secret("TOSS_INDICATOR_APP_VERSION").strip()
+    )
+    browser_tab_id = (
+        secret("TOSS_CALENDAR_BROWSER_TAB_ID").strip()
+        or secret("TOSS_NEWS_BROWSER_TAB_ID").strip()
+        or secret("TOSS_INDICATOR_BROWSER_TAB_ID").strip()
+    )
+
+    missing = []
+
+    if not cookie:
+        missing.append("TOSS_CALENDAR_COOKIE(또는 TOSS_NEWS_COOKIE)")
+
+    if not xsrf_token:
+        missing.append("TOSS_CALENDAR_XSRF_TOKEN(또는 TOSS_NEWS_XSRF_TOKEN)")
+
+    if not app_version:
+        missing.append("TOSS_CALENDAR_APP_VERSION(또는 TOSS_NEWS_APP_VERSION)")
+
+    if missing:
+        raise RuntimeError(
+            "토스 캘린더 세션 정보가 Secrets에 없습니다: " + ", ".join(missing)
+        )
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://www.tossinvest.com",
+        "Referer": "https://www.tossinvest.com/calendar",
+        "app-version": app_version,
+        "x-xsrf-token": xsrf_token,
+        "Cookie": cookie,
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+    }
+
+    if browser_tab_id:
+        headers["browser-tab-id"] = browser_tab_id
+
+    return headers
+
+
+def _fetch_calendar_month(year_month):
+    """토스 웹 캘린더의 월별 이벤트 원본 목록."""
+
+    try:
+        response = requests.post(
+            f"{TOSS_CALENDAR_BASE}/api/v4/calendar/monthly/{year_month}",
+            data=b"",
+            headers=_calendar_session_headers(),
+            timeout=(5, 15),
+        )
+    except requests.RequestException as error:
+        raise RuntimeError(f"토스 캘린더 연결 실패: {error}") from error
+
+    if response.status_code in (401, 403, 429):
+        raise RuntimeError(
+            f"토스 캘린더 접근 제한(HTTP {response.status_code}). "
+            "브라우저 세션이 만료됐을 수 있으니 Cookie/XSRF 값을 갱신해 주세요."
+        )
+
+    if not response.ok:
+        raise RuntimeError(
+            f"토스 캘린더 조회 실패(HTTP {response.status_code}): "
+            f"{response.text[:200]}"
+        )
+
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise RuntimeError("토스 캘린더 응답이 JSON 형식이 아닙니다.") from error
+
+    events = (payload.get("result") or {}).get("events")
+
+    if not isinstance(events, list):
+        raise RuntimeError("토스 캘린더 응답에 result.events 배열이 없습니다.")
+
+    return events
+
+
+def _cal_country(value):
+    value = str(value or "").lower()
+
+    if value in ("kr", "korea", "kor"):
+        return "국내"
+
+    if value in ("us", "usa", "united_states"):
+        return "미국"
+
+    return value.upper() if value else "국가 미표기"
+
+
+def _cal_kst_hhmm(value):
+    value = str(value or "").strip()
+
+    if not value:
+        return ""
+
+    try:
+        dt = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+        if dt.tzinfo:
+            dt = dt.astimezone(KST)
+
+        return dt.strftime("%H:%M")
+
+    except ValueError:
+        return ""
+
+
+def _calendar_event_row(event):
+    """원본 이벤트 → 표시용 한 행. 캘린더에 있는 값만 사용합니다."""
+
+    group = str((event.get("id") or {}).get("group") or "")
+    view = event.get("view") or {}
+    title = str(view.get("title") or "일정명 확인 불가").strip()
+
+    day = datetime.date.fromisoformat(event["date"])
+
+    row = {
+        "date": day,
+        "rank": 2,
+        "kind": "기타",
+        "title": title,
+        "time": "",
+        "note": "",
+    }
+
+    if group == "ECONOMIC":
+        indicator = view.get("economicIndicatorValue") or {}
+        row["rank"] = 0
+        row["kind"] = f"경제지표·{_cal_country(indicator.get('countryType'))}"
+
+        raw_time = str(indicator.get("time") or "").strip()
+
+        # 00:00은 실제 시각이 아닌 기본값일 수 있어 표시하지 않음
+        if raw_time and raw_time not in ("00:00:00", "00:00"):
+            row["time"] = raw_time[:5]
+
+        unit = str(indicator.get("unit") or "").strip()
+        prefix = str(indicator.get("unitPrefix") or "").strip()
+        notes = []
+
+        if indicator.get("forecast") is not None:
+            notes.append(f"예상 {prefix}{indicator['forecast']}{unit}")
+
+        if indicator.get("historical") is not None:
+            notes.append(f"이전 {prefix}{indicator['historical']}{unit}")
+
+        row["note"] = " · ".join(notes)
+
+    elif group in ("USD_EARNINGS_ANNOUNCEMENT", "KRX_EARNINGS_ANNOUNCEMENT"):
+        earnings = event.get("stockEarnings") or {}
+        company = str(
+            earnings.get("companyName") or title.replace(" 실적발표", "")
+        ).strip()
+
+        row["rank"] = 1
+        row["kind"] = f"기업 실적·{_cal_country(earnings.get('countryType'))}"
+        row["title"] = f"{company} 실적 발표"
+        row["time"] = _cal_kst_hhmm(earnings.get("announceDateTime"))
+        row["note"] = str(earnings.get("announceMarketStatusText") or "").strip()
+
+    return row
+
+
+def _cal_cell(text):
+    return str(text or "").replace("|", "/").replace("\n", " ").strip()
+
+
+def _cal_day_text(day):
+    return f"{day.month}/{day.day}({WEEKDAYS[day.weekday()]})"
+
+
+def _calendar_markdown(rows):
+    if not rows:
+        return "토스 증시 캘린더에 확인된 일정이 없습니다."
+
+    lines = [
+        "| 날짜 | 구분 | 일정 | 시각 | 비고 |",
+        "|---|---|---|---|---|",
+    ]
+
+    for row in rows:
+        lines.append(
+            f"| {_cal_day_text(row['date'])} | {_cal_cell(row['kind'])} "
+            f"| {_cal_cell(row['title'])} | {row['time'] or '-'} "
+            f"| {_cal_cell(row['note']) or '-'} |"
+        )
+
+    return "\n".join(lines)
+
+
+def _calendar_short_markdown(rows, limit=8):
+    if not rows:
+        return "- 토스 증시 캘린더에 확인된 일정 없음"
+
+    lines = []
+
+    for row in rows[:limit]:
+        time_text = f" ({row['time']})" if row["time"] else ""
+
+        lines.append(
+            f"- {_cal_day_text(row['date'])} [{_cal_cell(row['kind'])}] "
+            f"{_cal_cell(row['title'])}{time_text}"
+        )
+
+    if len(rows) > limit:
+        lines.append(f"- 이 외 {len(rows) - limit}건은 상세 리포트에서 확인")
+
+    return "\n".join(lines)
+
+
+def get_calendar_context():
+    """오늘~이번 주 일요일의 토스 증시 캘린더 일정. 실패해도 AI가 대신 쓰지 않습니다."""
+
+    state = st.session_state
+    now = datetime.datetime.now(KST)
+    today = now.date()
+
+    cached = state.get("pm_calendar_cache")
+
+    if (
+        cached
+        and cached.get("day") == today.isoformat()
+        and time.time() - cached.get("at", 0) < CALENDAR_CACHE_SECONDS
+    ):
+        return cached
+
+    # 이번 주 일요일까지. 오늘이 일요일이면 다음 일요일까지 7일.
+    days_left = 6 - today.weekday()
+    end = today + datetime.timedelta(days=days_left or 7)
+
+    result = {
+        "day": today.isoformat(),
+        "at": time.time(),
+        "error": "",
+        "count": 0,
+        "full": "",
+        "short": "",
+    }
+
+    try:
+        year_months = sorted({
+            today.strftime("%Y-%m"),
+            end.strftime("%Y-%m"),
+        })
+
+        events = []
+
+        for year_month in year_months:
+            events.extend(_fetch_calendar_month(year_month))
+
+        rows = []
+
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+
+            date_text = str(event.get("date") or "")
+
+            if not (today.isoformat() <= date_text <= end.isoformat()):
+                continue
+
+            if event.get("excludeFromAll", False):
+                continue
+
+            if (event.get("id") or {}).get("group") in ("HOLIDAY", "ETC"):
+                continue
+
+            if (event.get("view") or {}).get("title") == "소식이 없어요":
+                continue
+
+            rows.append(_calendar_event_row(event))
+
+        rows.sort(
+            key=lambda row: (
+                row["date"], row["rank"], row["time"] or "99:99", row["title"]
+            )
+        )
+
+        result["count"] = len(rows)
+        result["full"] = _calendar_markdown(rows)
+        result["short"] = _calendar_short_markdown(rows)
+
+    except Exception as error:
+        result["error"] = str(error)[:300]
+
+        warning = (
+            "⚠️ 토스 증시 캘린더를 불러오지 못해 일정을 표시하지 않습니다. "
+            "직접 확인해 주세요. "
+            f"({result['error']})"
+        )
+
+        result["full"] = warning
+        result["short"] = f"- {warning}"
+
+    state["pm_calendar_cache"] = result
+
+    return result
+
+
+# ---------------------------------------------------------------
+# B. AI가 일정을 쓰지 못하게 프롬프트 수정
+# ---------------------------------------------------------------
+
+for _part in DETAIL_PARTS:
+    if _part["key"] == "schedule":
+        _part["name"] = "글로벌 이슈"
+        _part["instruction"] = """
+# 작성할 파트
+
+### 5. 🌐 글로벌 이슈 (미국·중국·일본·유럽·원자재·환율)
+각 분야를 2~3문장으로 작성한다.
+제공된 지수·뉴스 자료에 없는 수치(금리, 달러인덱스, 유가, VIX 등)는 확인 불가로 표기한다.
+
+일정표(경제지표·실적 발표 일정)는 쓰지 않는다.
+일정은 시스템이 토스 증시 캘린더에서 직접 넣는다.
+
+이 파트에는 위 항목만 작성한다.
+"""
+
+    if _part["key"] == "issues":
+        _part["instruction"] = _part["instruction"].replace(
+            "- 향후 일정/리스크: 1문장 [출처번호]",
+            "- 향후 리스크: 1문장 [출처번호] (날짜·시간이 있는 일정은 쓰지 않는다)",
+        )
+
+PREMARKET_COMMON_PROMPT = PREMARKET_COMMON_PROMPT.replace(
+    "11. 키워드 순위는 실제 검색량 데이터가 아니라 뉴스 노출 기반 후보라고 명시한다.\n",
+    "11. 키워드 순위는 실제 검색량 데이터가 아니라 뉴스 노출 기반 후보라고 명시한다.\n"
+    "12. 일정(경제지표·실적 발표 등)은 시스템이 토스 증시 캘린더에서 직접 넣는다. "
+    "뉴스에서 본 일정을 날짜·시간까지 일정표처럼 쓰거나 임의로 만들지 않는다.\n",
+)
+
+CALENDAR_MARKER = "[[CALENDAR]]"
+
+COMPRESS_PROMPT = COMPRESS_PROMPT.replace(
+    "### 📆 오늘·이번 주 일정\n최대 5개 (원문에 일정이 없으면 확인 불가)\n",
+    "### 📆 오늘·이번 주 일정\n"
+    f"{CALENDAR_MARKER}\n"
+    "위 줄은 그대로 출력한다. 일정은 시스템이 토스 증시 캘린더에서 직접 넣으므로 쓰지 않는다.\n",
+)
+
+
+# ---------------------------------------------------------------
+# C. 일정은 코드가 캘린더 값을 직접 삽입
+# ---------------------------------------------------------------
+
+_original_insert_compact_index_table = insert_compact_index_table
+
+
+def insert_compact_index_table(short, table_md):
+    """지수표 삽입(기존 동작) + 일정 자리에 토스 캘린더 일정 삽입."""
+
+    text = _original_insert_compact_index_table(short, table_md)
+
+    calendar_short = get_calendar_context()["short"]
+
+    if CALENDAR_MARKER in text:
+        return text.replace(CALENDAR_MARKER, calendar_short)
+
+    # 표시 줄을 AI가 빠뜨린 경우: 일정 제목 아래 AI 내용을 지우고 삽입
+    match = re.search(r"^###\s*📆[^\n]*\n", text, re.M)
+
+    if match:
+        rest = text[match.end():]
+        next_heading = re.search(r"^###\s", rest, re.M)
+        tail = rest[next_heading.start():] if next_heading else ""
+
+        return (
+            text[:match.end()]
+            + "\n"
+            + calendar_short
+            + "\n\n"
+            + tail
+        )
+
+    return text + "\n\n### 📆 오늘·이번 주 일정\n\n" + calendar_short
+
+
+def compose_report(
+    keys,
+    ctx,
+    parts,
+    include_sources=True,
+    include_table=True,
+):
+    keys = set(keys)
+
+    blocks = [
+        f"## 📅 {ctx['today']} | MTNW Market Intelligence [장전]"
+    ]
+
+    for part in DETAIL_PARTS:
+        key = part["key"]
+
+        if key not in keys or key not in parts:
+            continue
+
+        text = re.sub(
+            r"^## 📅.*\n?",
+            "",
+            parts[key],
+            flags=re.M,
+        ).strip()
+
+        if key == "overseas" and include_table:
+            text = insert_overseas_table(text, ctx["table_md"])
+
+        if key == "schedule" and include_table:
+            text += (
+                "\n\n### 6. 📆 오늘·이번 주 일정 (토스 증시 캘린더)\n\n"
+                + get_calendar_context()["full"]
+            )
+
+        blocks.append(text)
+
+    body = "\n\n".join(blocks)
+
+    if include_sources:
+        body += "\n\n" + build_sources_markdown(ctx["news"], body)
+
+    return body
+
+
+def build_compress_source(ctx, parts):
+    """토큰 예산 안에서 압축 입력을 구성합니다. 반환: (프롬프트, 포함 파트)"""
+
+    keys = [
+        key
+        for key in COMPRESS_REQUIRED + COMPRESS_OPTIONAL
+        if key in parts
+    ]
+
+    while True:
+        source = compose_report(
+            keys,
+            ctx,
+            parts,
+            include_sources=False,
+            include_table=False,
+        )
+
+        numbers = cited_numbers(source, len(ctx["news"]))
+
+        publishers = sorted({
+            ctx["news"][number - 1]["publisher"]
+            for number in numbers
+        })
+
+        source += (
+            "\n\n출처 언론사: "
+            + (", ".join(publishers) if publishers else "확인 불가")
+        )
+
+        if "keywords" not in keys:
+            source += (
+                "\n\n※ 키워드 파트는 입력 한도로 제외됨. "
+                "핵심 키워드 10은 위 이슈·종목에 나온 단어형 키워드만 사용하고, "
+                "부족하면 확인 불가로 표시할 것."
+            )
+
+        prompt = build_compress_prompt(source, system_index=True)
+
+        if (
+            estimate_tokens(prompt) + GROQ_COMPRESS_MAX_TOKENS
+            <= GROQ_TPM_SAFE_BUDGET
+        ):
+            return prompt, keys
+
+        optional_in = [
+            key for key in keys if key in COMPRESS_OPTIONAL
+        ]
+
+        if not optional_in:
+            raise RuntimeError(
+                "필수 파트만으로도 압축 입력이 토큰 예산을 초과합니다. "
+                "상세 파트의 출력 한도를 낮춰 주세요."
+            )
+
+        keys.remove(optional_in[-1])
 main()
