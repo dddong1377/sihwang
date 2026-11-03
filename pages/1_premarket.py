@@ -29,30 +29,22 @@ GROQ_MODEL = "openai/gpt-oss-120b"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_TIMEOUT = 180
 
-# Groq TPM 8,000 기준 안전 예산
+# 한 요청(입력 + 최대 출력)이 넘지 않도록 하는 안전 예산 (TPM 8,000 기준)
 GROQ_TPM_SAFE_BUDGET = 7500
 
-# 상세 리포트 4개 파트 + 최종 압축본
-GROQ_DETAIL_MAX_TOKENS = 1300
-GROQ_COMPRESS_MAX_TOKENS = 1200
+# 추론 토큰이 출력 한도를 먼저 소진하지 않도록 추론량을 낮춤
+# (모델이 지원하지 않으면 자동으로 제외하고 재시도)
+GROQ_REASONING_EFFORT = "low"
 
-# 출력 길이 초과 시 재시도 설정
-GROQ_RETRY_MAX_TOKENS = 1000
-GROQ_LENGTH_RETRY_COUNT = 1
+GROQ_COMPRESS_MAX_TOKENS = 1300
 
-# 다음 API 요청 전에 남겨둘 여유 토큰
-GROQ_WAIT_TOKEN_MARGIN = 400
-
-MAX_NEWS_ITEMS = 11
+MAX_NEWS_ITEMS = 16
 
 # 한국어 토큰 추정 오차를 고려한 보수적 추정
 CHARS_PER_TOKEN_ESTIMATE = 1.65
 
 GROQ_DEFAULT_WAIT_SECONDS = 60
 GROQ_WAIT_SAFETY_SECONDS = 3
-
-# 공통 프롬프트 외 파트 지시문 등의 추가 여유 공간
-GROQ_PROMPT_OVERHEAD_RESERVE = 1000
 
 
 def get_groq_api_key():
@@ -138,13 +130,13 @@ def parse_reset_seconds(value):
     if not value:
         return None
 
-    value = str(value).strip().lower()
+    value = str(value).strip().lower().strip(". ")
 
     try:
         if value.endswith("ms"):
             return float(value[:-2]) / 1000
 
-        minutes = re.search(r"(\d+(?:\.\d+)?)m", value)
+        minutes = re.search(r"(\d+(?:\.\d+)?)m(?!s)", value)
         seconds = re.search(r"(\d+(?:\.\d+)?)s", value)
 
         if minutes or seconds:
@@ -158,13 +150,46 @@ def parse_reset_seconds(value):
 
             return total
 
-        if value.endswith("s"):
-            return float(value[:-1])
-
         return float(value)
 
     except (TypeError, ValueError):
         return None
+
+
+def parse_retry_seconds(response, message):
+    retry_after = response.headers.get("retry-after")
+
+    if retry_after:
+        try:
+            return float(retry_after)
+        except ValueError:
+            pass
+
+    found = re.search(
+        r"try again in\s+([0-9hms.]+)",
+        message or "",
+        re.I,
+    )
+
+    if found:
+        return parse_reset_seconds(found.group(1))
+
+    return None
+
+
+def sleep_with_countdown(seconds, label):
+    seconds = int(max(0, math.ceil(seconds)))
+
+    if seconds <= 0:
+        return
+
+    box = st.empty()
+
+    for remaining in range(seconds, 0, -1):
+        box.caption(f"⏳ {label} · {remaining}초 대기")
+        time.sleep(1)
+
+    box.empty()
 
 
 def wait_for_next_groq_call(
@@ -187,7 +212,6 @@ def wait_for_next_groq_call(
     next_required = (
         estimate_tokens(next_prompt)
         + next_output_tokens
-        + GROQ_WAIT_TOKEN_MARGIN
     )
 
     try:
@@ -195,21 +219,33 @@ def wait_for_next_groq_call(
     except (TypeError, ValueError):
         remaining_tokens = None
 
-    reset_seconds = parse_reset_seconds(reset_value)
-
     if (
         remaining_tokens is not None
         and remaining_tokens >= next_required
     ):
         return 0
 
-    if reset_seconds is not None:
-        wait_seconds = (
-            math.ceil(reset_seconds)
-            + GROQ_WAIT_SAFETY_SECONDS
-        )
-    else:
-        wait_seconds = GROQ_DEFAULT_WAIT_SECONDS
+    finished_at = previous_diagnostic.get("finished_at")
+
+    elapsed = (
+        max(0.0, time.time() - finished_at)
+        if finished_at
+        else 0.0
+    )
+
+    reset_seconds = parse_reset_seconds(reset_value)
+
+    if reset_seconds is None:
+        reset_seconds = GROQ_DEFAULT_WAIT_SECONDS
+
+    # 이전 응답 이후 이미 초기화 시간이 지났으면 대기하지 않음
+    if elapsed >= reset_seconds:
+        return 0
+
+    wait_seconds = (
+        math.ceil(reset_seconds - elapsed)
+        + GROQ_WAIT_SAFETY_SECONDS
+    )
 
     return min(max(2, wait_seconds), 180)
 
@@ -232,11 +268,10 @@ def wait_before_api_call(
     if wait_seconds <= 0:
         return
 
-    with st.spinner(
-        f"{stage} 호출 전 Groq 토큰 제한 초기화 대기 중... "
-        f"약 {wait_seconds}초"
-    ):
-        time.sleep(wait_seconds)
+    sleep_with_countdown(
+        wait_seconds,
+        f"{stage} 호출 전 Groq 토큰 제한 초기화 대기",
+    )
 
 
 # ===============================================================
@@ -380,8 +415,37 @@ def collect_news():
     return all_news, errors
 
 
-def news_to_text(news, limit=MAX_NEWS_ITEMS):
-    if not news:
+def select_news(news, limit=MAX_NEWS_ITEMS):
+    """카테고리별로 돌아가며 최신 기사를 골라 한 주제에 쏠리지 않게 합니다."""
+
+    buckets = {}
+    order = []
+
+    for item in news:
+        category = item["category"]
+
+        if category not in buckets:
+            buckets[category] = []
+            order.append(category)
+
+        buckets[category].append(item)
+
+    picked = []
+
+    while len(picked) < limit and any(buckets.values()):
+        for category in order:
+            if buckets[category] and len(picked) < limit:
+                picked.append(buckets[category].pop(0))
+
+    return picked
+
+
+def news_to_text(news, limit=None):
+    """AI에는 제목·언론사·게시 시각만 전달합니다(링크는 토큰 절약을 위해 제외)."""
+
+    items = news if limit is None else news[:limit]
+
+    if not items:
         return (
             "최근 24시간 이내 수집된 뉴스가 없습니다. "
             "뉴스 관련 사실은 임의로 작성하지 말고 확인 불가로 표시하세요."
@@ -389,53 +453,14 @@ def news_to_text(news, limit=MAX_NEWS_ITEMS):
 
     lines = []
 
-    for index, item in enumerate(news[:limit], start=1):
+    for index, item in enumerate(items, start=1):
         lines.append(
             f"[{index}] [{item['category']}] "
-            f"{item['title']}\n"
-            f"언론사: {item['publisher']}\n"
-            f"게시 시각: {item['published']}\n"
-            f"링크: {item['link']}"
+            f"{item['title']} "
+            f"({item['publisher']}, {item['published']})"
         )
 
-    return "\n\n".join(lines)
-
-
-def build_news_context_within_budget(
-    news,
-    base_prompt,
-    max_output_tokens,
-):
-    count = min(len(news), MAX_NEWS_ITEMS)
-
-    while count >= 0:
-        context = news_to_text(news, count)
-
-        prompt = base_prompt.replace(
-            "__NEWS_CONTEXT__",
-            context,
-        )
-
-        estimated_input = estimate_tokens(prompt)
-
-        estimated_total = (
-            estimated_input
-            + max_output_tokens
-            + GROQ_PROMPT_OVERHEAD_RESERVE
-        )
-
-        if estimated_total <= GROQ_TPM_SAFE_BUDGET:
-            return prompt, count, estimated_input
-
-        if count == 0:
-            break
-
-        count -= 1
-
-    raise RuntimeError(
-        "뉴스를 모두 줄여도 API 요청량이 안전 범위를 초과합니다. "
-        "프롬프트 자체의 분량을 줄여야 합니다."
-    )
+    return "\n".join(lines)
 
 
 # ===============================================================
@@ -467,6 +492,8 @@ TOSS_INDEX_ITEMS = (
     ("필라델피아 반도체", "SOX.NAI", 2, "extra"),
     ("VIX", "RGI..VIX", 2, "extra"),
 )
+
+KNOWN_INDEX_CODES = {item[1] for item in TOSS_INDEX_ITEMS}
 
 EXCLUDED_FUTURES_CODES = {
     "RFU.NQc1",
@@ -1028,6 +1055,21 @@ def build_main_index_rows(rows):
     return result
 
 
+def report_index_rows(rows, main_rows):
+    """리포트에 쓸 표: 해외 주요 7개 + Toss에서 확인된 보조 지표."""
+
+    main_labels = {row["label"] for row in main_rows}
+
+    extras = [
+        row for row in rows
+        if row.get("code") in KNOWN_INDEX_CODES
+        and row["label"] not in main_labels
+        and row["text"] != "확인 불가"
+    ]
+
+    return list(main_rows) + extras
+
+
 def indices_markdown(rows):
     lines = [
         "| 구분 | 종가/현재가 (전일 대비) | 기준 시각 | 비고 |",
@@ -1074,6 +1116,7 @@ PREMARKET_COMMON_PROMPT = """# 역할
 
 국내외 최신 주식 뉴스를 조사해 MTNW 광고팀·콘텐츠팀·방송팀이
 바로 쓸 수 있는 "한눈에 보이는 데일리 시황 리포트"를 작성한다.
+이 리포트는 여러 파트로 나누어 작성되며, 지금은 그중 한 파트만 작성한다.
 
 # 실행 모드: 장전
 - 중심 내용: 미국·유럽 마감 결과, 간밤 주요 이슈, 오늘 국내 증시 전망, 오늘 일정
@@ -1084,32 +1127,21 @@ PREMARKET_COMMON_PROMPT = """# 역할
 # 조사 원칙
 1. 제공된 뉴스 자료와 지수 자료를 최우선으로 사용한다.
 2. 뉴스는 게시 시각이 오늘 기준 최근 24시간 이내인 자료만 사용한다.
-3. RSS에 수집되지 않은 기사의 내용은 확인된 사실처럼 작성하지 않는다.
+3. 수집되지 않은 기사의 내용은 확인된 사실처럼 작성하지 않는다.
 4. 기사 제목만 확인된 경우 세부 내용은 추정하지 않는다.
 5. 같은 뉴스는 하나로 통합한다. 기사 문장을 그대로 복사하지 않는다.
 6. 확인되지 않은 루머, 증시와 무관한 정치 뉴스는 제외한다.
 7. 확인 불가한 수치는 추정하지 말고 "확인 불가"로 표기한다.
 8. 한국 개인투자자 관점에서 우선순위를 정한다.
-9. 출처 링크는 제공된 뉴스 자료에 있는 링크만 사용한다.
+9. 출처는 뉴스 번호 [번호] 형식으로만 표기한다. 링크와 출처 표는 시스템이 자동으로 붙이므로 작성하지 않는다.
 10. 수급 데이터가 제공되지 않으면 외국인·기관·개인 수급을 확인 불가로 표시한다.
 11. 실시간 검색 순위 데이터가 없으면 검색량 순위인 것처럼 꾸며내지 않는다.
 12. 키워드 순위는 실제 검색량 데이터가 아니라 뉴스 노출 기반 후보라고 명시한다.
 
-# 지수 데이터 규칙
-- 아래 Toss 지수 데이터를 기준 수치로 사용한다.
-- Toss 데이터에 없는 지수는 임의로 채우지 않는다.
-- 기준 시각을 확인하고 최신 종가인지 실시간 지표인지 구분한다.
-- 비고에 미확인 또는 데이터 없음으로 표시된 항목은 임의로 채우지 않는다.
-- 표기 형식: 지수명 : 지수값 (전일 대비 ±포인트, ±%)
-- 대상: 다우, S&P500 현물, 나스닥 현물, FTSE100, CAC40, DAX, 유로스톡스50
-- 선물 지수는 사용하지 않는다. S&P500은 반드시 현물 지수만 사용한다.
-
-[확인된 Toss 지수 데이터]
-__INDEX_TABLE__
-
+__INDEX_BLOCK__
 # 최근 24시간 뉴스 자료
-아래는 Google News RSS에서 수집한 기사 목록이다.
-제목·언론사·게시 시각·링크를 근거로 작성하라.
+아래는 Google News RSS에서 수집한 기사 목록이다. [번호] [분류] 제목 (언론사, 게시 시각) 형식이다.
+제목·언론사·게시 시각을 근거로 작성하라.
 기사 본문을 확인하지 못한 경우 세부 사실을 만들어내지 마라.
 
 __NEWS_CONTEXT__
@@ -1119,150 +1151,204 @@ __NEWS_CONTEXT__
 - 문장은 한 줄 요약형, 표·불릿 위주로 작성한다.
 - 주요 주장에는 뉴스 번호를 [번호]로 붙인다.
 - 검색 과정 설명 없이 최종 리포트 내용만 작성한다.
-- 각 파트에 포함된 항목만 작성한다.
-- 다른 파트의 항목은 작성하지 않는다.
+- 이번 파트에 지정된 항목만 작성하고 다른 파트의 항목은 작성하지 않는다.
 - 확인할 수 없는 사실은 확인 불가로 처리한다.
-- 불필요한 서론과 결론을 쓰지 않는다.
-- 출력 토큰을 고려해 요청된 항목을 간결하게 작성한다.
 """
 
 
-DETAIL_PART_PROMPTS = [
-    {
-        "name": "상세 리포트 1/4 · 시장 동향",
-        "instruction": """
-# 작성할 상세 리포트 파트 1/4
+INDEX_BLOCK_TEMPLATE = """# 지수 데이터 규칙
+- 아래 Toss 지수 데이터를 기준 수치로 사용한다.
+- Toss 데이터에 없는 지수는 임의로 채우지 않는다.
+- 기준 시각을 확인하고 최신 종가인지 실시간 지표인지 구분한다.
+- 비고에 미확인 또는 데이터 없음으로 표시된 항목은 임의로 채우지 않는다.
+- 선물 지수는 사용하지 않는다. S&P500은 반드시 현물 지수만 사용한다.
 
-## 📅 YYYY년 MM월 DD일 (요일) | MTNW Market Intelligence [장전]
-> 📌 **오늘 한 줄 요약**: 핵심만 20~30자
+[확인된 Toss 지수 데이터]
+__INDEX_TABLE__
+
+"""
+
+
+# key: 결과 저장 키 / use_index: 지수 자료 포함 여부 / max_tokens: 출력 한도
+DETAIL_PARTS = [
+    {
+        "key": "overseas",
+        "name": "한 줄 요약 · 해외 증시",
+        "max_tokens": 1000,
+        "use_index": True,
+        "instruction": """
+# 작성할 파트
+
+> 📌 **오늘 한 줄 요약**: 20~30자
 
 ### 1. 🌎 해외 증시
-| 지수 | 종가/현재가 | 전일 대비 |
-|---|---|---|
-다우, S&P500, 나스닥, FTSE100, CAC40, DAX, 유로스톡스50.
-7개 지수를 모두 표기하고 확인 불가 시 사유를 적는다.
+(지수 표는 시스템이 이 제목 바로 아래에 자동 삽입하므로 표는 작성하지 않는다.)
+이 제목 아래에 간밤 해외 증시·지표 흐름을 불릿 4~6개로 정리한다.
+- 미국·유럽 마감 결과와 방향성
+- 제공된 지표(금리·유가·환율·VIX 등)가 있으면 수치와 함께 정리
+- 확인 불가 항목은 사유(휴장 등)와 함께 표기
+제공된 지수 자료에 없는 수치는 만들지 않는다.
+
+이 파트에는 위 두 항목만 작성한다. 문서 제목(## 📅 ...)은 쓰지 않는다.
+""",
+    },
+    {
+        "key": "issues",
+        "name": "핵심 이슈 TOP5",
+        "max_tokens": 1200,
+        "use_index": False,
+        "instruction": """
+# 작성할 파트
 
 ### 2. 🔥 핵심 이슈 TOP5
-각 이슈는 아래 형식으로 간결하게 작성한다.
+각 이슈는 아래 4줄 형식으로 작성한다.
 - **제목** (시장 영향도 ⭐1~5 / 콘텐츠 점수 00/100)
 - 무슨 일: 1문장
 - 왜 중요한가 + 관련 종목·테마: 1문장
 - 향후 일정/리스크: 1문장 [출처번호]
 
-작성 원칙:
-- 중요도 순으로 5개 선정
-- 뉴스 제목만 확인된 내용은 세부 사실을 확대 해석하지 않는다.
-- 관련 종목은 뉴스에서 실제 확인된 종목만 사용한다.
-
-이 파트의 내용만 작성하고 3번 이후 항목은 작성하지 않는다.
-출력은 간결하게 작성한다.
-"""
+뉴스 자료에서 확인되는 이슈만 선정한다. 5개를 채울 수 없으면 확인된 개수만 작성한다.
+이 파트에는 위 항목만 작성한다.
+""",
     },
     {
-        "name": "상세 리포트 2/4 · 키워드 및 종목",
+        "key": "keywords",
+        "name": "검색 키워드",
+        "max_tokens": 1400,
+        "use_index": False,
         "instruction": """
-# 작성할 상세 리포트 파트 2/4
+# 작성할 파트
 
 ### 3. 🔍 검색 키워드
+표 위에 한 줄로 "실제 검색량 순위가 아닌 뉴스 노출 기반 후보"임을 명시한다.
 
 **뉴스 기반 관심 키워드 TOP20**
 | 순위 | 키워드 | 검색 의도 | 광고/SEO 활용 |
+|---|---|---|---|
+(키워드는 단어형, 검색 의도·활용은 각 10자 내외)
 
 **주요 급상승 후보 TOP10**
 | 순위 | 키워드 | 뉴스 노출 이유 |
+|---|---|---|
+(이유는 10자 내외)
 
-실제 검색량 순위가 아닌 뉴스 노출 기반 후보라고 표시한다.
-
-### 4. 📈 종목·테마·수급
-
-- **언급 TOP10 종목**: 종목 | 이유 | 방송 적합도
-- **강세 테마 TOP5**: 테마 | 관련 종목 | 지속 가능성
-- **관심 업종 TOP5**: 업종 | 이유
-- **수급**: 외국인 / 기관 / 개인 순매수·순매도 요약
-  - 실제 수급 데이터가 없으면 확인 불가
-
-작성 원칙:
-- 표 중심으로 간결하게 작성한다.
-- 실제 뉴스에서 확인되는 종목만 사용한다.
-- 종목이나 테마의 강세를 확인할 수 없다면 후보 또는 확인 불가로 표시한다.
-
-이 파트의 내용만 작성하고 1~2번 및 5번 이후 항목은 작성하지 않는다.
-"""
+이 파트에는 위 항목만 작성한다.
+""",
     },
     {
-        "name": "상세 리포트 3/4 · 글로벌 및 일정",
+        "key": "stocks",
+        "name": "종목·테마·수급",
+        "max_tokens": 1400,
+        "use_index": False,
         "instruction": """
-# 작성할 상세 리포트 파트 3/4
+# 작성할 파트
 
-### 5. 🌐 글로벌 이슈
-미국·중국·일본·유럽·원자재·환율 관련 내용을 정리한다.
-각 항목은 핵심 1~2문장으로 작성한다.
-제공된 자료에 없는 수치는 확인 불가로 표기한다.
+### 4. 📈 종목·테마·수급
+**언급 TOP10 종목**
+| 종목 | 이유(한 줄) | 방송 적합도(상/중/하) |
+|---|---|---|
+
+**강세 테마 TOP5**
+| 테마 | 관련 종목 | 지속 가능성 |
+|---|---|---|
+
+**관심 업종 TOP5**
+| 업종 | 이유 |
+|---|---|
+
+**수급**
+- 외국인 / 기관 / 개인 순매수·순매도 요약 (제공된 자료에 없으면 "확인 불가")
+
+뉴스에서 실제로 확인된 종목·테마만 사용한다. 이 파트에는 위 항목만 작성한다.
+""",
+    },
+    {
+        "key": "schedule",
+        "name": "글로벌 이슈 · 일정",
+        "max_tokens": 1300,
+        "use_index": True,
+        "instruction": """
+# 작성할 파트
+
+### 5. 🌐 글로벌 이슈 (미국·중국·일본·유럽·원자재·환율)
+각 분야를 2~3문장으로 작성한다.
+제공된 지수·뉴스 자료에 없는 수치(금리, 달러인덱스, 유가, VIX 등)는 확인 불가로 표기한다.
 
 ### 6. 📆 오늘 체크 일정
 | 시간 | 일정 | 시장 영향 |
+|---|---|---|
+뉴스 자료로 확인할 수 있는 일정만 작성한다. 시간·일정이 확인되지 않으면 확인 불가로 표시한다.
 
-뉴스 자료로 확인할 수 있는 일정만 작성한다.
-시간과 일정이 확인되지 않으면 확인 불가로 표시한다.
-
-### 7. 🎬 오늘 반드시 만들 콘텐츠 TOP3
-| 순위 | 뉴스 | 추천 형식 | 핵심 키워드 | 썸네일 문구 |
-
-### 8. 💰 광고 키워드
-| 구분 | 키워드 | 전환 가능성 |
-
-작성 원칙:
-- 실제 확인된 뉴스와 일정만 사용한다.
-- 시장 영향은 가능성으로 표현하고 단정하지 않는다.
-- 콘텐츠는 뉴스 제목을 바탕으로 제작 방향을 제안한다.
-
-이 파트의 내용만 작성하고 1~4번 및 9번 이후 항목은 작성하지 않는다.
-"""
+이 파트에는 위 두 항목만 작성한다.
+""",
     },
     {
-        "name": "상세 리포트 4/4 · 콘텐츠 및 종합",
+        "key": "content",
+        "name": "콘텐츠 TOP3 · 광고 키워드",
+        "max_tokens": 1200,
+        "use_index": False,
         "instruction": """
-# 작성할 상세 리포트 파트 4/4
+# 작성할 파트
+
+### 7. 🎬 오늘 반드시 만들 콘텐츠 TOP3
+| 순위 | 뉴스 | 추천 형식 | 핵심 키워드 | 썸네일 문구(15자 이하) |
+|---|---|---|---|---|
+
+### 8. 💰 광고 키워드 (각 5개 이내)
+| 구분(브랜드/일반/정보탐색/급상승/롱테일) | 키워드 | 전환 가능성 |
+|---|---|---|
+
+뉴스 자료로 확인된 이슈만 근거로 삼는다. 이 파트에는 위 두 항목만 작성한다.
+""",
+    },
+    {
+        "key": "ideas",
+        "name": "콘텐츠 아이디어",
+        "max_tokens": 1500,
+        "use_index": False,
+        "instruction": """
+# 작성할 파트
 
 ### 9. ✍️ 콘텐츠 아이디어
-
-아래 항목을 표와 불릿으로 간결하게 작성한다.
 - 유튜브 제목 5개
-- 블로그 제목 10개
-- 숏폼 아이디어 10개
+- 블로그 제목 10개 (SEO형)
+- 숏폼 아이디어 10개 (한 줄씩)
 - 카드뉴스 주제 5개
-- 썸네일 문구 20개
+- 썸네일 문구 20개 (15자 이하, 클릭 유도형)
 
 제공된 뉴스와 확인된 이슈를 기반으로 작성한다.
 확인되지 않은 사실을 제목에 단정적으로 넣지 않는다.
-각 제목은 짧고 실제 콘텐츠에 활용할 수 있게 작성한다.
+이 파트에는 위 항목만 작성한다.
+""",
+    },
+    {
+        "key": "broadcast",
+        "name": "방송 추천 종목 · 전일 대비 변화",
+        "max_tokens": 1300,
+        "use_index": False,
+        "instruction": """
+# 작성할 파트
 
 ### 10. 🎙️ 방송 추천 종목 TOP5 + 오늘 꼭 봐야 할 종목 TOP5
 | 종목 | 이유 | 주의점 |
-
+|---|---|---|
 뉴스에서 실제로 확인된 종목만 사용한다.
 추천은 콘텐츠 제작 관점의 관심 후보이며 투자 권유가 아니다.
 
 ### 11. 🔄 전일 대비 변화
-전일 자료가 없으면 비교 불가라고 표시한다.
-새로 등장 / 사라진 키워드, 강해진·약해진 테마를 정리한다.
+전일 자료가 없으면 "비교 불가"라고 표시한다.
+새로 등장 / 사라진 키워드, 강해진·약해진 테마를 각 1줄로 정리한다.
 
-### 12. 📎 출처
-| 번호 | 언론사 | 기사 제목 | 링크 |
-
-수집된 기사 중 실제 사용한 자료만 출처로 연결한다.
-
-### 최종 점검
-- 지수 수치와 기준 시각을 재확인했는가?
-- 24시간 초과 기사나 미확인 루머가 없는가?
-- 실제 검색량이 없는 키워드를 검색량 순위로 오인하게 하지 않았는가?
-- 수급 데이터가 없으면 확인 불가로 처리했는가?
-- 확인되지 않은 종목·일정·수치를 만들지 않았는가?
-
-이 파트의 내용만 작성하고 1~8번 항목은 작성하지 않는다.
-"""
+이 파트에는 위 두 항목만 작성한다.
+""",
     },
 ]
+
+DETAIL_PART_KEYS = [part["key"] for part in DETAIL_PARTS]
+
+# 압축에 쓸 파트: 필수는 항상 포함, 선택은 토큰 예산 안에서만 포함
+COMPRESS_REQUIRED = ["overseas", "issues", "stocks"]
+COMPRESS_OPTIONAL = ["schedule", "keywords"]  # 뒤에서부터 먼저 제외
 
 
 COMPRESS_PROMPT = """# 역할
@@ -1277,11 +1363,10 @@ COMPRESS_PROMPT = """# 역할
 5. 핵심 포인트마다 관련 종목을 붙인다.
 6. 핵심 키워드·수치·종목명은 **굵게** 표시한다.
 7. 상승은 🔺, 하락은 🔻, 중립은 ➖로 표시한다.
-8. 가장 중요한 이슈 1개에는 🔥 표시를 한다.
+8. 가장 중요한 이슈 1개에는 🔥 표시한다.
 9. 표는 지수표 1개만 허용한다.
 10. 출처는 "출처: 언론사명 나열" 한 줄로 작성한다.
-11. 중복 내용은 통합하고 중요도가 낮은 내용은 제외한다.
-12. 출력은 반드시 아래 형식에 맞춰 간결하게 작성한다.
+11. 설명 문장 없이 아래 형식의 최종 결과만 출력한다.
 
 # 출력 형식
 
@@ -1311,7 +1396,7 @@ COMPRESS_PROMPT = """# 역할
 외국인 / 기관 / 개인 (원문에 없으면 확인 불가)
 
 ### 📆 오늘·이번 주 일정
-최대 5개
+최대 5개 (원문에 일정이 없으면 확인 불가)
 
 ### 🔍 핵심 키워드 10
 원문에 등장한 단어형 키워드
@@ -1323,15 +1408,31 @@ __SOURCE__
 """
 
 
-def build_part_prompt(
-    common_prompt,
-    part_instruction,
-):
+def build_part_prompt(part, today, index_table, news_text):
+    if part["use_index"]:
+        index_block = INDEX_BLOCK_TEMPLATE.replace(
+            "__INDEX_TABLE__",
+            index_table,
+        )
+    else:
+        index_block = ""
+
+    common = (
+        PREMARKET_COMMON_PROMPT
+        .replace("__TODAY__", today)
+        .replace("__INDEX_BLOCK__", index_block)
+        .replace("__NEWS_CONTEXT__", news_text)
+    )
+
+    limit_chars = int(part["max_tokens"] * 1.1)
+
     return (
-        common_prompt
+        common
         + "\n\n"
-        + part_instruction
-        + "\n\n중요: 지정된 파트만 작성하고 다른 파트는 작성하지 마세요."
+        + part["instruction"]
+        + "\n\n중요: 위에 지정된 항목만 작성하세요. "
+        + f"공백 포함 약 {limit_chars:,}자 이내로 간결하게 작성하고, "
+        + "서론·설명·맺음말은 쓰지 마세요."
     )
 
 
@@ -1339,6 +1440,38 @@ def build_compress_prompt(detail_text):
     return COMPRESS_PROMPT.replace(
         "__SOURCE__",
         detail_text,
+    )
+
+
+def choose_news_count(selected, today, index_table):
+    """모든 파트가 토큰 예산 안에 들어가는 가장 큰 뉴스 개수를 찾습니다."""
+
+    for count in range(len(selected), -1, -1):
+        news_text = news_to_text(selected[:count])
+
+        fits = True
+
+        for part in DETAIL_PARTS:
+            prompt = build_part_prompt(
+                part,
+                today,
+                index_table,
+                news_text,
+            )
+
+            if (
+                estimate_tokens(prompt) + part["max_tokens"]
+                > GROQ_TPM_SAFE_BUDGET
+            ):
+                fits = False
+                break
+
+        if fits:
+            return count
+
+    raise RuntimeError(
+        "뉴스를 모두 줄여도 API 요청량이 안전 범위를 초과합니다. "
+        "프롬프트 자체의 분량을 줄여야 합니다."
     )
 
 
@@ -1439,6 +1572,24 @@ def friendly_groq_error(error_info):
     return messages.get(error_type, messages["other"])
 
 
+def groq_error_message(error_info):
+    return (
+        friendly_groq_error(error_info)
+        + "\n\n"
+        + f"HTTP 상태: {error_info['http_status']}"
+        + "\n"
+        + f"오류 코드: {error_info['error_code'] or '없음'}"
+        + "\n"
+        + f"오류 유형: {error_info['error_type'] or '없음'}"
+        + "\n"
+        + "오류 원문: "
+        + (
+            error_info["error_message"]
+            or error_info["raw_response"]
+        )
+    )
+
+
 # ===============================================================
 # 13. Groq API 호출 및 사용량 진단
 # ===============================================================
@@ -1457,11 +1608,6 @@ def call_groq(
 
     input_estimate = estimate_tokens(prompt)
 
-    state = st.session_state
-
-    if "pm_api_diagnostics" not in state:
-        state["pm_api_diagnostics"] = []
-
     diagnostic = {
         "stage": stage,
         "model": GROQ_MODEL,
@@ -1475,44 +1621,52 @@ def call_groq(
         "actual_prompt_tokens": None,
         "actual_completion_tokens": None,
         "actual_total_tokens": None,
+        "reasoning_tokens": None,
         "finish_reason": None,
         "request_id": None,
         "rate_limits": {},
+        "retries": 0,
+        "note": "",
+        "finished_at": None,
         "error": None,
-        "retry_count": 0,
         "called_at": datetime.datetime.now(KST).strftime(
             "%Y-%m-%d %H:%M:%S"
         ),
     }
 
-    state["pm_api_diagnostics"].append(diagnostic)
+    state = st.session_state
+
+    state.setdefault("pm_api_diagnostics", []).append(diagnostic)
     state["pm_api_diagnostic"] = diagnostic
 
-    current_max_tokens = safe_max_tokens
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "당신은 한국 주식시장 전문 시황 에디터입니다. "
+                    "제공된 자료에 없는 사실이나 수치를 만들어내지 마세요. "
+                    "확인할 수 없는 정보는 확인 불가라고 표시하세요."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        "temperature": 0.2,
+        "max_tokens": safe_max_tokens,
+    }
 
-    for attempt in range(GROQ_LENGTH_RETRY_COUNT + 1):
-        payload = {
-            "model": GROQ_MODEL,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "당신은 한국 주식시장 전문 시황 에디터입니다. "
-                        "제공된 자료에 없는 사실이나 수치를 만들어내지 마세요. "
-                        "확인할 수 없는 정보는 확인 불가라고 표시하세요. "
-                        "요청된 항목을 빠뜨리지 말고 간결하게 작성하세요."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-            "temperature": 0.2,
-            "max_tokens": current_max_tokens,
-        }
+    if GROQ_REASONING_EFFORT:
+        payload["reasoning_effort"] = GROQ_REASONING_EFFORT
+        payload["include_reasoning"] = False
 
-        try:
+    try:
+        response = None
+
+        for attempt in range(3):
             response = requests.post(
                 GROQ_API_URL,
                 headers=headers,
@@ -1529,143 +1683,169 @@ def call_groq(
                 or response.headers.get("request-id")
             )
 
-            diagnostic["actual_max_output_tokens"] = (
-                current_max_tokens
-            )
+            diagnostic["finished_at"] = time.time()
 
-            if response.status_code != 200:
-                error_info = parse_groq_error(response)
-                diagnostic["error"] = error_info
+            if response.status_code == 200:
+                break
 
-                raise RuntimeError(
-                    friendly_groq_error(error_info)
-                    + "\n\n"
-                    + f"HTTP 상태: {error_info['http_status']}"
-                    + "\n"
-                    + f"오류 코드: {error_info['error_code'] or '없음'}"
-                    + "\n"
-                    + f"오류 유형: {error_info['error_type'] or '없음'}"
-                    + "\n"
-                    + f"오류 원문: "
-                    + (
-                        error_info["error_message"]
-                        or error_info["raw_response"]
-                    )
+            error_info = parse_groq_error(response)
+
+            # 추론 옵션을 지원하지 않는 모델이면 옵션을 빼고 재시도
+            if (
+                response.status_code == 400
+                and "reasoning_effort" in payload
+                and "reasoning" in (
+                    error_info["error_message"]
+                    + error_info["raw_response"]
+                ).lower()
+            ):
+                payload.pop("reasoning_effort", None)
+                payload.pop("include_reasoning", None)
+
+                diagnostic["retries"] += 1
+                diagnostic["note"] = (
+                    "추론 옵션이 지원되지 않아 제외하고 재시도"
+                )
+                continue
+
+            # 분당 토큰 제한: 안내된 시간만큼 기다린 뒤 재시도
+            if (
+                response.status_code == 429
+                and classify_groq_error(
+                    response.status_code,
+                    error_info["error_code"],
+                    error_info["error_message"],
+                ) == "tpm"
+                and attempt < 2
+            ):
+                wait = parse_retry_seconds(
+                    response,
+                    error_info["error_message"],
                 )
 
-            data = response.json()
-            usage = data.get("usage") or {}
-
-            diagnostic["actual_prompt_tokens"] = usage.get(
-                "prompt_tokens"
-            )
-
-            diagnostic["actual_completion_tokens"] = usage.get(
-                "completion_tokens"
-            )
-
-            diagnostic["actual_total_tokens"] = usage.get(
-                "total_tokens"
-            )
-
-            choices = data.get("choices") or []
-
-            if not choices:
-                raise RuntimeError(
-                    "Groq 응답에 choices 항목이 없습니다."
+                wait = min(
+                    (wait if wait is not None else 20) + 2,
+                    90,
                 )
 
-            choice = choices[0]
+                diagnostic["retries"] += 1
 
-            diagnostic["finish_reason"] = choice.get(
-                "finish_reason"
+                sleep_with_countdown(
+                    wait,
+                    f"{stage} 토큰 제한 대기 후 재시도",
+                )
+                continue
+
+            diagnostic["error"] = error_info
+            raise RuntimeError(groq_error_message(error_info))
+
+        if response is None or response.status_code != 200:
+            error_info = parse_groq_error(response)
+            diagnostic["error"] = error_info
+            raise RuntimeError(groq_error_message(error_info))
+
+        data = response.json()
+        usage = data.get("usage") or {}
+
+        diagnostic["actual_prompt_tokens"] = usage.get(
+            "prompt_tokens"
+        )
+
+        diagnostic["actual_completion_tokens"] = usage.get(
+            "completion_tokens"
+        )
+
+        diagnostic["actual_total_tokens"] = usage.get(
+            "total_tokens"
+        )
+
+        details = usage.get("completion_tokens_details") or {}
+
+        if isinstance(details, dict):
+            diagnostic["reasoning_tokens"] = details.get(
+                "reasoning_tokens"
             )
 
-            message = choice.get("message") or {}
-            result = message.get("content")
+        choices = data.get("choices") or []
 
-            if isinstance(result, list):
-                result = "\n".join(
-                    str(item.get("text", ""))
-                    for item in result
-                    if isinstance(item, dict)
-                )
+        if not choices:
+            raise RuntimeError(
+                "Groq 응답에 choices 항목이 없습니다."
+            )
 
-            result = str(result or "").strip()
+        choice = choices[0]
 
-            if not result:
-                raise RuntimeError("Groq 응답이 비어 있습니다.")
+        diagnostic["finish_reason"] = choice.get(
+            "finish_reason"
+        )
 
-            if diagnostic["finish_reason"] == "length":
-                diagnostic["error"] = {
-                    "message": (
-                        "출력 토큰 제한으로 응답이 중간에 종료됐습니다."
-                    )
-                }
+        message = choice.get("message") or {}
+        result = message.get("content")
 
-                if (
-                    attempt < GROQ_LENGTH_RETRY_COUNT
-                    and current_max_tokens > GROQ_RETRY_MAX_TOKENS
-                ):
-                    diagnostic["retry_count"] += 1
+        if isinstance(result, list):
+            result = "\n".join(
+                str(item.get("text", ""))
+                for item in result
+                if isinstance(item, dict)
+            )
 
-                    current_max_tokens = min(
-                        GROQ_RETRY_MAX_TOKENS,
-                        current_max_tokens - 200,
-                    )
+        result = str(result or "").strip()
 
-                    previous = diagnostic
+        # 잘린 응답은 완성된 결과로 취급하지 않음 (내용 유무와 무관)
+        if diagnostic["finish_reason"] == "length":
+            reasoning = diagnostic["reasoning_tokens"]
 
-                    wait_before_api_call(
-                        previous,
-                        prompt,
-                        current_max_tokens,
-                        f"{stage} 재시도",
-                    )
-
-                    continue
-
-                raise RuntimeError(
-                    f"{stage}: 출력 토큰 제한으로 응답이 중간에 종료됐습니다. "
-                    "파트를 더 분리하거나 출력 분량을 줄여야 합니다."
-                )
-
-            return result
-
-        except requests.exceptions.Timeout:
             diagnostic["error"] = {
-                "message": "API 요청 시간 초과",
+                "message": (
+                    "출력 한도에 도달해 응답이 잘렸습니다. "
+                    f"추론 토큰: {reasoning if reasoning is not None else '미확인'}"
+                )
             }
 
             raise RuntimeError(
-                f"{stage}: Groq API 응답 시간이 초과되었습니다."
+                f"{stage}: 출력 한도({safe_max_tokens:,})에 도달해 "
+                "응답이 중간에 종료됐습니다. "
+                f"추론 토큰: {reasoning if reasoning is not None else '미확인'}. "
+                "이 파트는 저장하지 않았습니다."
             )
 
-        except requests.exceptions.RequestException as error:
+        if not result:
+            raise RuntimeError("Groq 응답이 비어 있습니다.")
+
+        return result
+
+    except requests.exceptions.Timeout:
+        diagnostic["error"] = {
+            "message": "API 요청 시간 초과",
+        }
+
+        raise RuntimeError(
+            f"{stage}: Groq API 응답 시간이 초과되었습니다."
+        )
+
+    except requests.exceptions.RequestException as error:
+        diagnostic["error"] = {
+            "message": str(error)[:1000],
+        }
+
+        raise RuntimeError(
+            f"{stage}: Groq 네트워크 요청 실패: {str(error)[:300]}"
+        )
+
+    except Exception as error:
+        if diagnostic.get("error") is None:
             diagnostic["error"] = {
-                "message": str(error)[:1000],
+                "message": str(error)[:2000],
             }
 
-            raise RuntimeError(
-                f"{stage}: Groq 네트워크 요청 실패: {str(error)[:300]}"
-            )
+        raise
 
-        except Exception as error:
-            if diagnostic.get("error") is None:
-                diagnostic["error"] = {
-                    "message": str(error)[:2000],
-                }
-
-            raise
-
-        finally:
-            state["pm_api_diagnostic"] = diagnostic
-
-    raise RuntimeError(f"{stage}: API 호출이 완료되지 않았습니다.")
+    finally:
+        state["pm_api_diagnostic"] = diagnostic
 
 
 # ===============================================================
-# 14. 상세 리포트 4개 파트 생성 및 압축
+# 14. 상세 리포트 파트별 생성, 저장, 조립, 압축
 # ===============================================================
 
 def make_request_preview(
@@ -1695,36 +1875,216 @@ def make_request_preview(
     return result
 
 
-def run_one_detail_part(
-    common_prompt,
-    part,
-    part_number,
-):
-    state = st.session_state
+def cited_numbers(text, limit):
+    return sorted({
+        int(number)
+        for number in re.findall(r"\[(\d{1,3})\]", text)
+        if 1 <= int(number) <= limit
+    })
 
-    prompt = build_part_prompt(
-        common_prompt,
-        part["instruction"],
+
+def insert_overseas_table(text, table_md):
+    """AI가 쓴 해외 증시 파트의 제목 바로 아래에 지수 표를 삽입합니다."""
+
+    match = re.search(r"^###\s*1\.\s*🌎[^\n]*\n", text, re.M)
+
+    if match:
+        position = match.end()
+
+        return (
+            text[:position]
+            + "\n"
+            + table_md
+            + "\n"
+            + text[position:]
+        )
+
+    return (
+        "### 1. 🌎 해외 증시\n\n"
+        + table_md
+        + "\n\n"
+        + text
     )
 
-    stage = part["name"]
+
+def build_sources_markdown(news, body_text):
+    heading = "### 12. 📎 출처"
+
+    if not news:
+        return (
+            f"{heading}\n\n"
+            "수집된 뉴스가 없어 출처를 표시할 수 없습니다."
+        )
+
+    cited = cited_numbers(body_text, len(news))
+
+    numbers = cited or list(range(1, len(news) + 1))
+
+    lines = [
+        heading,
+        "",
+        (
+            "본문에서 인용된 기사만 표시합니다."
+            if cited
+            else "본문에 인용 번호가 없어 전달된 기사 전체를 표시합니다."
+        ),
+        "",
+        "| 번호 | 언론사 | 기사 제목 | 링크 |",
+        "|---|---|---|---|",
+    ]
+
+    for number in numbers:
+        item = news[number - 1]
+
+        title = item["title"].replace("|", "/")
+        publisher = item["publisher"].replace("|", "/")
+
+        lines.append(
+            f"| {number} | {publisher} | {title} | "
+            f"[링크]({item['link']}) |"
+        )
+
+    return "\n".join(lines)
+
+
+def compose_report(keys, ctx, parts, include_sources=True):
+    keys = set(keys)
+
+    blocks = [
+        f"## 📅 {ctx['today']} | MTNW Market Intelligence [장전]"
+    ]
+
+    for part in DETAIL_PARTS:
+        key = part["key"]
+
+        if key not in keys or key not in parts:
+            continue
+
+        text = re.sub(
+            r"^## 📅.*\n?",
+            "",
+            parts[key],
+            flags=re.M,
+        ).strip()
+
+        if key == "overseas":
+            text = insert_overseas_table(text, ctx["table_md"])
+
+        blocks.append(text)
+
+    body = "\n\n".join(blocks)
+
+    if include_sources:
+        body += "\n\n" + build_sources_markdown(ctx["news"], body)
+
+    return body
+
+
+def rebuild_long_report():
+    """완성된 파트만 모아 상세 리포트를 갱신합니다."""
+
+    state = st.session_state
+
+    ctx = state.get("pm_ctx")
+    parts = state.get("pm_detail_parts") or {}
+
+    if not ctx or not parts:
+        return
+
+    state["pm_long"] = compose_report(
+        DETAIL_PART_KEYS,
+        ctx,
+        parts,
+    )
+
+
+def build_compress_source(ctx, parts):
+    """토큰 예산 안에서 압축 입력을 구성합니다. 반환: (프롬프트, 포함 파트)"""
+
+    keys = [
+        key
+        for key in COMPRESS_REQUIRED + COMPRESS_OPTIONAL
+        if key in parts
+    ]
+
+    while True:
+        source = compose_report(
+            keys,
+            ctx,
+            parts,
+            include_sources=False,
+        )
+
+        numbers = cited_numbers(source, len(ctx["news"]))
+
+        publishers = sorted({
+            ctx["news"][number - 1]["publisher"]
+            for number in numbers
+        })
+
+        source += (
+            "\n\n출처 언론사: "
+            + (", ".join(publishers) if publishers else "확인 불가")
+        )
+
+        if "keywords" not in keys:
+            source += (
+                "\n\n※ 키워드 파트는 입력 한도로 제외됨. "
+                "핵심 키워드 10은 위 이슈·종목에 나온 단어형 키워드만 사용하고, "
+                "부족하면 확인 불가로 표시할 것."
+            )
+
+        if "schedule" not in keys:
+            source += (
+                "\n\n※ 일정 파트는 입력 한도로 제외됨. "
+                "일정은 확인 불가로 표시할 것."
+            )
+
+        prompt = build_compress_prompt(source)
+
+        if (
+            estimate_tokens(prompt) + GROQ_COMPRESS_MAX_TOKENS
+            <= GROQ_TPM_SAFE_BUDGET
+        ):
+            return prompt, keys
+
+        optional_in = [
+            key for key in keys if key in COMPRESS_OPTIONAL
+        ]
+
+        if not optional_in:
+            raise RuntimeError(
+                "필수 파트만으로도 압축 입력이 토큰 예산을 초과합니다. "
+                "상세 파트의 출력 한도를 낮춰 주세요."
+            )
+
+        keys.remove(optional_in[-1])
+
+
+def run_one_part(part, number, total, ctx, status):
+    state = st.session_state
+
+    news_text = news_to_text(ctx["news"])
+
+    prompt = build_part_prompt(
+        part,
+        ctx["today"],
+        ctx["index_table"],
+        news_text,
+    )
+
+    stage = f"상세 {number}/{total} · {part['name']}"
 
     preview = make_request_preview(
         stage,
         prompt,
-        GROQ_DETAIL_MAX_TOKENS,
+        part["max_tokens"],
     )
 
-    state.setdefault(
-        "pm_part_previews",
-        [],
-    ).append(preview)
+    state.setdefault("pm_part_previews", []).append(preview)
 
-    previous = (
-        state["pm_api_diagnostics"][-1]
-        if state["pm_api_diagnostics"]
-        else None
-    )
+    diagnostics = state.get("pm_api_diagnostics") or []
+    previous = diagnostics[-1] if diagnostics else None
 
     wait_before_api_call(
         previous,
@@ -1733,121 +2093,85 @@ def run_one_detail_part(
         stage,
     )
 
-    with st.spinner(
-        f"{part_number}/5 {stage} 생성 중..."
-    ):
-        result = call_groq(
-            prompt,
-            max_tokens=GROQ_DETAIL_MAX_TOKENS,
-            stage=stage,
-        )
+    status.write(f"⏳ {stage} 생성 중...")
 
-    # 각 파트는 생성 직후 개별 저장
-    state["pm_detail_parts"][part_number] = result
-
-    # 현재까지 만들어진 부분 리포트도 화면에 보존
-    partial_text = "\n\n".join(
-        state["pm_detail_parts"][key]
-        for key in sorted(state["pm_detail_parts"])
+    result = call_groq(
+        prompt,
+        max_tokens=part["max_tokens"],
+        stage=stage,
     )
 
-    state["pm_long"] = partial_text
+    # 정상 완료된 파트만 즉시 저장
+    state["pm_detail_parts"][part["key"]] = result
 
-    return result
+    rebuild_long_report()
+
+    status.write(f"✅ {stage} 완료 · 저장됨")
 
 
-def run_premarket(use_source_only=False):
+def run_pipeline(mode, status):
     state = st.session_state
+    now = datetime.datetime.now(KST)
 
-    if state.get("pm_api_running", False):
-        state["pm_note"] = (
-            "이미 작업이 진행 중입니다. "
-            "현재 작업이 끝난 후 다시 실행해 주세요."
+    # -----------------------------------------------------------
+    # A. 붙여넣은 원문 압축
+    # -----------------------------------------------------------
+
+    if mode == "paste":
+        pasted = state.get("pm_pasted", "").strip()
+
+        if not pasted:
+            raise RuntimeError("압축할 원문을 먼저 붙여넣어 주세요.")
+
+        state["pm_api_diagnostics"] = []
+        state["pm_api_diagnostic"] = None
+        state["pm_compress_preview"] = None
+
+        prompt = build_compress_prompt(pasted)
+
+        state["pm_compress_preview"] = make_request_preview(
+            "원문 압축",
+            prompt,
+            GROQ_COMPRESS_MAX_TOKENS,
         )
+
+        status.write("⏳ 붙여넣은 원문을 압축하는 중...")
+
+        state["pm_short"] = call_groq(
+            prompt,
+            max_tokens=GROQ_COMPRESS_MAX_TOKENS,
+            stage="원문 압축",
+        )
+
+        state["pm_note"] = (
+            f"압축 완료 · {datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
+            "Groq API 1회 호출"
+        )
+        state["pm_note_level"] = "ok"
         return
 
-    state["pm_api_running"] = True
+    # -----------------------------------------------------------
+    # B. 전체 생성 또는 이어서 생성
+    # -----------------------------------------------------------
 
-    state["pm_api_diagnostics"] = []
-    state["pm_api_diagnostic"] = None
-    state["pm_request_preview"] = None
-    state["pm_compress_preview"] = None
-    state["pm_part_previews"] = []
-
-    try:
-        now = datetime.datetime.now(KST)
+    if mode == "full":
+        state["pm_api_diagnostics"] = []
+        state["pm_api_diagnostic"] = None
+        state["pm_request_preview"] = None
+        state["pm_compress_preview"] = None
+        state["pm_part_previews"] = []
+        state["pm_detail_parts"] = {}
+        state["pm_long"] = ""
+        state["pm_short"] = ""
+        state["pm_ctx"] = None
 
         today = (
             f"{now.year}년 {now.month:02d}월 "
             f"{now.day:02d}일 ({WEEKDAYS[now.weekday()]})"
         )
 
-        pasted = state.get("pm_pasted", "").strip()
-
-        # -------------------------------------------------------
-        # A. 붙여넣은 원문 압축
-        # -------------------------------------------------------
-
-        if use_source_only:
-            if not pasted:
-                state["pm_note"] = (
-                    "압축할 원문을 먼저 붙여넣어 주세요."
-                )
-                return
-
-            prompt = build_compress_prompt(pasted)
-
-            preview = make_request_preview(
-                "원문 압축",
-                prompt,
-                GROQ_COMPRESS_MAX_TOKENS,
-            )
-
-            state["pm_compress_preview"] = preview
-
-            previous = (
-                state["pm_api_diagnostics"][-1]
-                if state["pm_api_diagnostics"]
-                else None
-            )
-
-            wait_before_api_call(
-                previous,
-                prompt,
-                preview["max_output_tokens"],
-                "원문 압축",
-            )
-
-            with st.spinner(
-                "Groq API로 원문을 압축하는 중..."
-            ):
-                short = call_groq(
-                    prompt,
-                    max_tokens=GROQ_COMPRESS_MAX_TOKENS,
-                    stage="원문 압축",
-                )
-
-            state["pm_short"] = short
-
-            state["pm_note"] = (
-                f"압축 완료 · "
-                f"{datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
-                "Groq API 1회 호출"
-            )
-
-            return
-
-        # -------------------------------------------------------
-        # B. 이전 결과 초기화
-        # -------------------------------------------------------
-
-        state["pm_long"] = ""
-        state["pm_short"] = ""
-        state["pm_detail_parts"] = {}
-
-        # -------------------------------------------------------
-        # C. Toss 지수 데이터 확보
-        # -------------------------------------------------------
+        # 지수 데이터 확보
+        status.write("📊 Toss 지수 데이터 확인 중...")
 
         rows = state.get("pm_indices")
 
@@ -1858,153 +2182,204 @@ def run_premarket(use_source_only=False):
             state["pm_indices"] = rows
             state["pm_main_indices"] = build_main_index_rows(rows)
 
-        main_rows = state.get("pm_main_indices")
-
-        if not main_rows:
-            main_rows = build_main_index_rows(rows)
-
-        index_table = indices_markdown(main_rows)
-
-        # -------------------------------------------------------
-        # D. 뉴스 수집
-        # -------------------------------------------------------
-
-        with st.spinner(
-            "최근 24시간 국내외 뉴스 RSS 수집 중..."
-        ):
-            news, news_errors = collect_news()
-
-        base_prompt = (
-            PREMARKET_COMMON_PROMPT
-            .replace("__TODAY__", today)
-            .replace("__INDEX_TABLE__", index_table)
+        main_rows = (
+            state.get("pm_main_indices")
+            or build_main_index_rows(rows)
         )
 
-        common_prompt, news_sent, estimated_input = (
-            build_news_context_within_budget(
-                news,
-                base_prompt,
-                GROQ_DETAIL_MAX_TOKENS,
-            )
+        table_rows = report_index_rows(rows, main_rows)
+
+        index_table = indices_markdown(table_rows)
+
+        # 뉴스 수집
+        status.write("📰 최근 24시간 뉴스 RSS 수집 중...")
+
+        news, news_errors = collect_news()
+
+        selected = select_news(news, MAX_NEWS_ITEMS)
+
+        count = choose_news_count(selected, today, index_table)
+
+        used_news = selected[:count]
+
+        state["pm_ctx"] = {
+            "today": today,
+            "index_table": index_table,
+            "table_md": index_table,
+            "news": used_news,
+            "news_total": len(news),
+            "news_errors": len(news_errors),
+        }
+
+        sample_prompt = build_part_prompt(
+            DETAIL_PARTS[0],
+            today,
+            index_table,
+            news_to_text(used_news),
         )
 
         state["pm_request_preview"] = {
             "news_count": len(news),
-            "news_sent": news_sent,
-            "prompt_characters": len(common_prompt),
-            "estimated_input_tokens": estimated_input,
-            "max_output_tokens": GROQ_DETAIL_MAX_TOKENS,
+            "news_sent": len(used_news),
+            "prompt_characters": len(sample_prompt),
+            "estimated_input_tokens": estimate_tokens(sample_prompt),
+            "max_output_tokens": DETAIL_PARTS[0]["max_tokens"],
             "estimated_total_tokens": (
-                estimated_input
-                + GROQ_DETAIL_MAX_TOKENS
+                estimate_tokens(sample_prompt)
+                + DETAIL_PARTS[0]["max_tokens"]
             ),
         }
 
-        # -------------------------------------------------------
-        # E. 상세 리포트 1~4차 생성
-        # -------------------------------------------------------
+        status.write(
+            f"✅ 뉴스 {len(news)}건 수집 · {len(used_news)}건 사용"
+        )
 
-        for index, part in enumerate(
-            DETAIL_PART_PROMPTS,
-            start=1,
-        ):
-            run_one_detail_part(
-                common_prompt,
-                part,
-                index,
-            )
-
-        # -------------------------------------------------------
-        # F. 상세 리포트 통합
-        # -------------------------------------------------------
-
-        detail_parts = state["pm_detail_parts"]
-
-        if len(detail_parts) != 4:
+    else:  # resume
+        if not state.get("pm_ctx"):
             raise RuntimeError(
-                "상세 리포트 4개 파트가 모두 생성되지 않았습니다."
+                "이어서 생성할 이전 작업이 없습니다. "
+                "'장전 시황 생성'으로 처음부터 실행해 주세요."
             )
 
-        detail = "\n\n".join(
-            detail_parts[index]
-            for index in (1, 2, 3, 4)
+        state.setdefault("pm_detail_parts", {})
+        state.setdefault("pm_part_previews", [])
+
+        status.write(
+            f"▶ 이어서 생성: 완료된 파트 "
+            f"{len(state['pm_detail_parts'])}/{len(DETAIL_PARTS)}"
         )
 
-        state["pm_long"] = detail
+    ctx = state["pm_ctx"]
 
-        # -------------------------------------------------------
-        # G. 상세 리포트 압축 프롬프트 구성
-        # -------------------------------------------------------
+    # -----------------------------------------------------------
+    # C. 상세 리포트 파트별 생성 (완료된 파트는 건너뜀)
+    # -----------------------------------------------------------
 
-        compress_prompt = build_compress_prompt(detail)
+    total = len(DETAIL_PARTS)
 
-        compress_preview = make_request_preview(
-            "통합 상세 리포트 압축",
-            compress_prompt,
-            GROQ_COMPRESS_MAX_TOKENS,
+    for number, part in enumerate(DETAIL_PARTS, start=1):
+        if part["key"] in state["pm_detail_parts"]:
+            continue
+
+        run_one_part(part, number, total, ctx, status)
+
+    parts = state["pm_detail_parts"]
+
+    if len(parts) < total:
+        raise RuntimeError(
+            "상세 리포트 파트가 모두 생성되지 않아 압축을 실행하지 않았습니다."
         )
 
-        state["pm_compress_preview"] = compress_preview
+    rebuild_long_report()
 
-        # -------------------------------------------------------
-        # H. TPM 잔여량 확인 및 대기
-        # -------------------------------------------------------
+    # -----------------------------------------------------------
+    # D. 압축본 생성
+    # -----------------------------------------------------------
 
-        previous = (
-            state["pm_api_diagnostics"][-1]
-            if state["pm_api_diagnostics"]
-            else None
-        )
+    compress_prompt, included = build_compress_source(ctx, parts)
 
-        wait_before_api_call(
-            previous,
-            compress_prompt,
-            compress_preview["max_output_tokens"],
-            "통합 상세 리포트 압축",
-        )
+    compress_preview = make_request_preview(
+        "통합 상세 리포트 압축",
+        compress_prompt,
+        GROQ_COMPRESS_MAX_TOKENS,
+        extra={"included_parts": ", ".join(included)},
+    )
 
-        # -------------------------------------------------------
-        # I. 5차 호출: 압축본 생성
-        # -------------------------------------------------------
+    state["pm_compress_preview"] = compress_preview
 
-        with st.spinner(
-            "5/5 통합 상세 리포트를 압축하는 중..."
-        ):
-            short = call_groq(
-                compress_prompt,
-                max_tokens=GROQ_COMPRESS_MAX_TOKENS,
-                stage="통합 상세 리포트 압축",
+    diagnostics = state.get("pm_api_diagnostics") or []
+    previous = diagnostics[-1] if diagnostics else None
+
+    wait_before_api_call(
+        previous,
+        compress_prompt,
+        compress_preview["max_output_tokens"],
+        "통합 상세 리포트 압축",
+    )
+
+    status.write("⏳ 통합 상세 리포트를 압축하는 중...")
+
+    short = call_groq(
+        compress_prompt,
+        max_tokens=GROQ_COMPRESS_MAX_TOKENS,
+        stage="통합 상세 리포트 압축",
+    )
+
+    state["pm_short"] = short
+
+    dropped = [
+        key for key in COMPRESS_OPTIONAL if key not in included
+    ]
+
+    dropped_note = (
+        f" · 입력 한도로 압축에서 제외: {', '.join(dropped)}"
+        if dropped
+        else ""
+    )
+
+    error_note = (
+        f" · RSS 일부 수집 실패 {ctx['news_errors']}건"
+        if ctx.get("news_errors")
+        else ""
+    )
+
+    state["pm_note"] = (
+        f"생성 완료 · {datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
+        f"뉴스 {ctx['news_total']}건 수집 / {len(ctx['news'])}건 사용 · "
+        f"Groq API {len(state.get('pm_api_diagnostics') or [])}회 호출"
+        f"{dropped_note}{error_note}"
+    )
+    state["pm_note_level"] = "ok"
+
+
+def run_with_status(mode):
+    state = st.session_state
+
+    labels = {
+        "full": "장전 시황 생성 중... (대기 포함 약 4~7분)",
+        "resume": "이어서 생성 중...",
+        "paste": "원문 압축 중...",
+    }
+
+    with st.status(
+        labels.get(mode, "생성 중..."),
+        expanded=True,
+    ) as status:
+        try:
+            run_pipeline(mode, status)
+
+            status.update(
+                label="완료",
+                state="complete",
+                expanded=False,
             )
 
-        state["pm_short"] = short
+        except Exception as error:
+            rebuild_long_report()
 
-        error_note = ""
+            done = len(state.get("pm_detail_parts") or {})
 
-        if news_errors:
-            error_note = (
-                f" · RSS 일부 수집 실패 {len(news_errors)}건"
+            if done:
+                state["pm_note"] = (
+                    f"중단됨: {error}\n\n"
+                    f"정상 완료된 상세 파트 {done}/{len(DETAIL_PARTS)}개는 "
+                    "저장되어 있습니다. '이어서 생성'으로 "
+                    "실패한 단계부터 계속할 수 있습니다."
+                )
+            else:
+                state["pm_note"] = f"생성 실패: {error}"
+
+            state["pm_note_level"] = "error"
+
+            status.update(
+                label="오류로 중단됨 (완료된 파트는 보존)",
+                state="error",
+                expanded=True,
             )
 
-        state["pm_note"] = (
-            f"생성 완료 · "
-            f"{datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
-            f"뉴스 {len(news)}건 수집 / {news_sent}건 전달 · "
-            "상세 4회 + 압축 1회"
-            f"{error_note}"
-        )
 
-    except Exception as error:
-        if state.get("pm_long"):
-            state["pm_note"] = (
-                f"일부 생성 완료: {error}\n\n"
-                "현재까지 생성된 상세 리포트는 저장되어 있습니다. "
-                "실패한 단계 이후의 결과는 생성되지 않았을 수 있습니다."
-            )
-        else:
-            state["pm_note"] = f"생성 실패: {error}"
-
-    finally:
-        state["pm_api_running"] = False
+def request_run(mode):
+    st.session_state["pm_run_mode"] = mode
 
 
 # ===============================================================
@@ -2187,7 +2562,7 @@ def show_api_diagnostics():
         diagnostics = state.get("pm_api_diagnostics", [])
 
         if preview:
-            st.markdown("#### 뉴스 수집 및 공통 프롬프트")
+            st.markdown("#### 뉴스 수집 및 첫 파트 프롬프트")
 
             col1, col2, col3 = st.columns(3)
 
@@ -2202,12 +2577,12 @@ def show_api_diagnostics():
             )
 
             col3.metric(
-                "공통 프롬프트 글자 수",
+                "첫 파트 프롬프트 글자 수",
                 f"{preview.get('prompt_characters', 0):,}",
             )
 
             st.caption(
-                "공통 프롬프트 예상 입력 토큰: "
+                "첫 파트 예상 입력 토큰: "
                 f"{preview.get('estimated_input_tokens', 0):,}개"
             )
 
@@ -2268,6 +2643,12 @@ def show_api_diagnostics():
                 f"{compress_preview.get('estimated_total_tokens', 0):,}개"
             )
 
+            if compress_preview.get("included_parts"):
+                st.caption(
+                    "압축 입력에 포함된 파트: "
+                    f"{compress_preview['included_parts']}"
+                )
+
         if diagnostics:
             st.divider()
             st.markdown("#### API 호출별 응답 정보")
@@ -2285,7 +2666,7 @@ def show_api_diagnostics():
                     f"{index}차 호출 · {stage}",
                     expanded=(index == len(diagnostics)),
                 ):
-                    col1, col2, col3 = st.columns(3)
+                    col1, col2, col3, col4 = st.columns(4)
 
                     prompt_tokens = diagnostic.get(
                         "actual_prompt_tokens"
@@ -2293,6 +2674,10 @@ def show_api_diagnostics():
 
                     completion_tokens = diagnostic.get(
                         "actual_completion_tokens"
+                    )
+
+                    reasoning_tokens = diagnostic.get(
+                        "reasoning_tokens"
                     )
 
                     total_tokens = diagnostic.get(
@@ -2318,6 +2703,15 @@ def show_api_diagnostics():
                     )
 
                     col3.metric(
+                        "추론 토큰(출력에 포함)",
+                        (
+                            f"{reasoning_tokens:,}"
+                            if isinstance(reasoning_tokens, (int, float))
+                            else "미확인"
+                        ),
+                    )
+
+                    col4.metric(
                         "전체 사용 토큰",
                         (
                             f"{total_tokens:,}"
@@ -2335,6 +2729,14 @@ def show_api_diagnostics():
                         "호출 시각:",
                         diagnostic.get("called_at", "확인 불가"),
                     )
+
+                    st.write(
+                        "재시도 횟수:",
+                        diagnostic.get("retries", 0),
+                    )
+
+                    if diagnostic.get("note"):
+                        st.write("비고:", diagnostic["note"])
 
                     st.write(
                         "프롬프트 글자 수:",
@@ -2359,11 +2761,6 @@ def show_api_diagnostics():
                     st.write(
                         "예상 요청 토큰 합계:",
                         f"{diagnostic.get('estimated_total_tokens', 0):,}",
-                    )
-
-                    st.write(
-                        "재시도 횟수:",
-                        diagnostic.get("retry_count", 0),
                     )
 
                     st.write(
@@ -2407,9 +2804,9 @@ def main():
     st.title("MTNW 장전 시황")
 
     st.caption(
-        "Toss 지수와 최근 24시간 뉴스 RSS를 수집한 뒤, "
-        "Groq API 4회 호출로 상세 리포트 4개 파트를 생성하고 "
-        "5차 호출로 통합 압축본을 생성합니다. "
+        "Toss 지수와 최근 24시간 뉴스 RSS를 수집한 뒤, Groq API로 "
+        "상세 리포트를 8개 파트로 나누어 생성하고, 마지막에 통합 압축본을 만듭니다. "
+        "무료 TPM 한도 때문에 중간에 대기가 있어 4~7분 걸릴 수 있습니다. "
         "오후 시황은 왼쪽 메뉴의 'app'에서 작성합니다."
     )
 
@@ -2468,31 +2865,61 @@ def main():
             ),
         )
 
+        done_before = len(state.get("pm_detail_parts") or {})
+
+        can_resume = bool(state.get("pm_ctx")) and (
+            done_before < len(DETAIL_PARTS)
+            or not str(state.get("pm_short", "")).strip()
+        )
+
         col_a, col_b, col_c = st.columns(
-            [1.8, 1.4, 4],
+            [1.8, 1.2, 1.6],
             vertical_alignment="center",
         )
 
         col_a.button(
             "✨ 장전 시황 생성 (뉴스 수집 + 압축)",
             type="primary",
-            on_click=run_premarket,
-            args=(False,),
+            on_click=request_run,
+            args=("full",),
             use_container_width=True,
-            disabled=state.get("pm_api_running", False),
         )
 
         col_b.button(
             "압축만 실행",
-            on_click=run_premarket,
-            args=(True,),
+            on_click=request_run,
+            args=("paste",),
             use_container_width=True,
             help="붙여넣은 원문만 압축합니다.",
-            disabled=state.get("pm_api_running", False),
         )
 
+        col_c.button(
+            "▶ 실패한 단계부터 이어서",
+            on_click=request_run,
+            args=("resume",),
+            use_container_width=True,
+            disabled=not can_resume,
+            help="이미 정상 생성된 파트는 건너뛰고 나머지만 생성합니다.",
+        )
+
+        mode = state.pop("pm_run_mode", None)
+
+        if mode:
+            run_with_status(mode)
+
+        done = len(state.get("pm_detail_parts") or {})
+
+        if state.get("pm_ctx"):
+            st.caption(
+                f"상세 리포트 파트 {done}/{len(DETAIL_PARTS)} 완료 "
+                "(완료된 파트는 실패해도 보존됩니다)"
+            )
+
         if state.get("pm_note"):
-            col_c.caption(state["pm_note"])
+            if state.get("pm_note_level") == "error":
+                st.error(state["pm_note"])
+            else:
+                st.success(state["pm_note"])
 
     # -----------------------------------------------------------
     # ③ 결과
