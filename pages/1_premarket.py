@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
@@ -272,6 +273,140 @@ def wait_before_api_call(
         wait_seconds,
         f"{stage} 호출 전 Groq 토큰 제한 초기화 대기",
     )
+
+
+# ===============================================================
+# 1-2. 하루 토큰 사용량 기록 및 상단 표시 (이 앱 기준 추정)
+# ===============================================================
+
+# 무료 플랜 하루 토큰 한도 (Groq 콘솔 limits 페이지의 값에 맞게 수정)
+GROQ_DAILY_TOKEN_LIMIT = 200_000
+
+# 한도 부족 경고 기준 (1회 생성에 필요한 토큰 추정치)
+LOW_TOKEN_WARNING = 60_000
+
+USAGE_FILE = os.path.join(
+    tempfile.gettempdir(),
+    "mtnw_groq_usage.json",
+)
+
+# 화면 맨 위 표시 영역 (main()에서 지정)
+TOKEN_BOX = {"box": None}
+
+
+def load_usage():
+    today = datetime.datetime.now(KST).strftime("%Y-%m-%d")
+
+    try:
+        with open(USAGE_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except Exception:
+        data = {}
+
+    if not isinstance(data, dict) or data.get("date") != today:
+        data = {"date": today, "tokens": 0, "calls": 0}
+
+    return data
+
+
+def add_usage(tokens):
+    try:
+        tokens = int(tokens)
+    except (TypeError, ValueError):
+        return
+
+    data = load_usage()
+
+    data["tokens"] = int(data.get("tokens", 0)) + tokens
+    data["calls"] = int(data.get("calls", 0)) + 1
+
+    try:
+        with open(USAGE_FILE, "w", encoding="utf-8") as file:
+            json.dump(data, file)
+    except Exception:
+        pass
+
+
+def format_token_value(value):
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        return "확인 불가"
+
+
+def render_token_status():
+    box = TOKEN_BOX.get("box")
+
+    if box is None:
+        return
+
+    try:
+        usage = load_usage()
+
+        used = int(usage.get("tokens", 0))
+        calls = int(usage.get("calls", 0))
+        remaining = max(0, GROQ_DAILY_TOKEN_LIMIT - used)
+
+        # 가장 최근 호출의 분당 토큰 잔량(응답 헤더)
+        minute_remaining = None
+
+        diagnostics = (
+            st.session_state.get("pm_api_diagnostics") or []
+        )
+
+        for diagnostic in reversed(diagnostics):
+            limits = diagnostic.get("rate_limits") or {}
+            value = limits.get("x-ratelimit-remaining-tokens")
+
+            if value not in (None, "응답에 없음"):
+                minute_remaining = value
+                break
+
+        with box.container():
+            with st.container(border=True):
+                col1, col2, col3, col4 = st.columns(4)
+
+                col1.metric(
+                    "오늘 남은 토큰 (추정)",
+                    f"{remaining:,}",
+                )
+
+                col2.metric(
+                    "오늘 사용 토큰",
+                    f"{used:,} / {GROQ_DAILY_TOKEN_LIMIT:,}",
+                )
+
+                col3.metric(
+                    "오늘 API 호출",
+                    f"{calls}회",
+                )
+
+                col4.metric(
+                    "분당 남은 토큰 (직전 호출)",
+                    format_token_value(minute_remaining),
+                )
+
+                st.progress(
+                    min(1.0, used / GROQ_DAILY_TOKEN_LIMIT)
+                )
+
+                if remaining < LOW_TOKEN_WARNING:
+                    st.warning(
+                        f"오늘 남은 토큰이 {LOW_TOKEN_WARNING:,} 미만입니다. "
+                        "1회 생성에 수만 토큰이 들 수 있어 "
+                        "도중에 하루 한도에 걸릴 수 있습니다."
+                    )
+
+                st.caption(
+                    "이 페이지가 기록한 사용량 기준의 추정치입니다. "
+                    "같은 Groq 조직의 다른 페이지·도구 사용분은 반영되지 않고, "
+                    "초기화 시각은 한국 시간 자정으로 가정했습니다. "
+                    "앱을 재시작하면 기록이 지워질 수 있으니 "
+                    "정확한 잔량은 Groq 콘솔의 limits 페이지에서 확인하세요."
+                )
+
+    except Exception:
+        pass
 
 
 # ===============================================================
@@ -1374,13 +1509,7 @@ COMPRESS_PROMPT = """# 역할
 
 > 📌 **한 줄 요약**: 20~30자
 
-### 🌎 지수 한눈에
-| 지수 | 현재값 | 등락 |
-|---|---|---|
-원문에 있는 미국 3대 지수 + 유럽 4개 + 필요 시 코스피·코스닥
-- 현재값 열: 원문 지수표의 종가/현재가 숫자를 소수점까지 그대로 적는다. 반올림하거나 바꾸지 않는다.
-- 등락 열: 원문의 등락률(%)과 🔺/🔻/➖를 적는다. 필요하면 등락폭도 함께 적는다.
-- 원문에 값이 없거나 "확인 불가"인 지수는 현재값·등락 모두 "확인 불가"로 적는다.
+__INDEX_SECTION__
 
 ### 🔥 오늘의 핵심 포인트 TOP3
 각 포인트 3줄:
@@ -1439,10 +1568,118 @@ def build_part_prompt(part, today, index_table, news_text):
     )
 
 
-def build_compress_prompt(detail_text):
-    return COMPRESS_PROMPT.replace(
-        "__SOURCE__",
-        detail_text,
+INDEX_MARKER = "[[INDEX_TABLE]]"
+
+# 통합 생성: 지수표는 코드가 직접 삽입 (AI는 표시 줄만 출력)
+COMPRESS_INDEX_SYSTEM = f"""### 🌎 지수 한눈에
+{INDEX_MARKER}
+위 줄은 그대로 출력하고 지수표는 직접 쓰지 않는다. 지수 이름·수치도 따로 쓰지 않는다."""
+
+# 붙여넣은 원문 압축: AI가 원문 지수표를 옮겨 적음
+COMPRESS_INDEX_FREE = """### 🌎 지수 한눈에
+| 지수 | 현재값 | 등락 |
+|---|---|---|
+원문 지수표에 있는 지수만, 원문 순서 그대로 쓴다. 원문에 없는 지수는 추가하지 않는다.
+- 현재값 열: 원문의 종가/현재가 숫자를 소수점까지 그대로 적는다. 반올림하거나 바꾸지 않는다.
+- 등락 열: 원문의 등락률(%)과 🔺/🔻/➖를 적는다.
+- 원문에 값이 "확인 불가"인 지수는 표에서 뺀다."""
+
+
+def build_compress_prompt(detail_text, system_index=False):
+    section = (
+        COMPRESS_INDEX_SYSTEM
+        if system_index
+        else COMPRESS_INDEX_FREE
+    )
+
+    return (
+        COMPRESS_PROMPT
+        .replace("__INDEX_SECTION__", section)
+        .replace("__SOURCE__", detail_text)
+    )
+
+
+def split_index_text(text):
+    """'5,635.93 (-223.15, -3.81%) 🔻' → ('5,635.93', '-3.81% 🔻')"""
+
+    text = str(text or "").strip()
+
+    match = re.match(
+        r"^([\d,]+(?:\.\d+)?)\s*\((.*)\)\s*(\S*)$",
+        text,
+    )
+
+    if not match:
+        return "확인 불가", "확인 불가"
+
+    value, inner, arrow = match.groups()
+
+    pct = re.search(r"[+-]?\d+(?:\.\d+)?%", inner)
+
+    if pct:
+        change = f"{pct.group(0)} {arrow}".strip()
+    else:
+        change = inner.strip() or "확인 불가"
+
+    return value, change
+
+
+def compact_index_table(rows):
+    """화면 ①에 표시되는 지수를 같은 순서로 '지수/현재값/등락' 표로 만듭니다."""
+
+    lines = [
+        "| 지수 | 현재값 | 등락 |",
+        "|---|---|---|",
+    ]
+
+    for row in rows:
+        value, change = split_index_text(row.get("text"))
+
+        lines.append(
+            f"| {row.get('label', '')} | {value} | {change} |"
+        )
+
+    return "\n".join(lines)
+
+
+def insert_compact_index_table(short, table_md):
+    """AI가 쓴 압축본의 지수 자리에 코드가 만든 표를 넣습니다."""
+
+    # 표시 줄 아래에 AI가 덧붙인 안내 문장 제거
+    short = re.sub(
+        r"^\s*위 줄은 그대로 출력[^\n]*\n?",
+        "",
+        short,
+        flags=re.M,
+    )
+
+    if INDEX_MARKER in short:
+        return short.replace(INDEX_MARKER, table_md)
+
+    # 표시 줄이 없으면 지수 제목 아래의 AI 표를 지우고 삽입
+    match = re.search(r"^###\s*🌎[^\n]*\n", short, re.M)
+
+    if match:
+        rest = short[match.end():]
+
+        rest = re.sub(
+            r"\A\s*(?:\|[^\n]*(?:\n|$))+",
+            "",
+            rest,
+        )
+
+        return (
+            short[:match.end()]
+            + "\n"
+            + table_md
+            + "\n\n"
+            + rest.lstrip("\n")
+        )
+
+    return (
+        short
+        + "\n\n### 🌎 지수 한눈에\n\n"
+        + table_md
     )
 
 
@@ -1762,6 +1999,10 @@ def call_groq(
             "total_tokens"
         )
 
+        # 잘린 응답이라도 처리된 토큰은 하루 한도에서 차감되므로 기록
+        add_usage(usage.get("total_tokens"))
+        render_token_status()
+
         details = usage.get("completion_tokens_details") or {}
 
         if isinstance(details, dict):
@@ -1994,7 +2235,13 @@ def build_sources_markdown(news, body_text):
     return "\n".join(lines)
 
 
-def compose_report(keys, ctx, parts, include_sources=True):
+def compose_report(
+    keys,
+    ctx,
+    parts,
+    include_sources=True,
+    include_table=True,
+):
     keys = set(keys)
 
     blocks = [
@@ -2014,7 +2261,7 @@ def compose_report(keys, ctx, parts, include_sources=True):
             flags=re.M,
         ).strip()
 
-        if key == "overseas":
+        if key == "overseas" and include_table:
             text = insert_overseas_table(text, ctx["table_md"])
 
         blocks.append(text)
@@ -2060,6 +2307,7 @@ def build_compress_source(ctx, parts):
             ctx,
             parts,
             include_sources=False,
+            include_table=False,
         )
 
         numbers = cited_numbers(source, len(ctx["news"]))
@@ -2087,7 +2335,7 @@ def build_compress_source(ctx, parts):
                 "일정은 확인 불가로 표시할 것."
             )
 
-        prompt = build_compress_prompt(source)
+        prompt = build_compress_prompt(source, system_index=True)
 
         if (
             estimate_tokens(prompt) + GROQ_COMPRESS_MAX_TOKENS
@@ -2230,14 +2478,8 @@ def run_pipeline(mode, status):
             state["pm_indices"] = rows
             state["pm_main_indices"] = build_main_index_rows(rows)
 
-        main_rows = (
-            state.get("pm_main_indices")
-            or build_main_index_rows(rows)
-        )
-
-        table_rows = report_index_rows(rows, main_rows)
-
-        index_table = indices_markdown(table_rows)
+        # 화면 ①에 표시되는 지수만, 같은 순서로 사용
+        index_table = indices_markdown(rows)
 
         # 뉴스 수집
         status.write("📰 최근 24시간 뉴스 RSS 수집 중...")
@@ -2255,6 +2497,7 @@ def run_pipeline(mode, status):
             "today": today,
             "index_table": index_table,
             "table_md": index_table,
+            "index_rows": rows,
             "news": used_news,
             "news_total": len(news),
             "news_errors": len(news_errors),
@@ -2354,7 +2597,16 @@ def run_pipeline(mode, status):
         stage="통합 상세 리포트 압축",
     )
 
-    state["pm_short"] = short
+    index_rows = (
+        ctx.get("index_rows")
+        or state.get("pm_indices")
+        or []
+    )
+
+    state["pm_short"] = insert_compact_index_table(
+        short,
+        compact_index_table(index_rows),
+    )
 
     dropped = [
         key for key in COMPRESS_OPTIONAL if key not in included
@@ -2878,6 +3130,10 @@ def main():
 
     st.title("MTNW 장전 시황")
 
+    # 맨 위 토큰 현황 (생성 중·생성 후에도 같은 자리에서 갱신됨)
+    TOKEN_BOX["box"] = st.empty()
+    render_token_status()
+
     st.caption(
         "Toss 지수와 최근 24시간 뉴스 RSS를 수집한 뒤, Groq API로 "
         "상세 리포트를 8개 파트로 나누어 생성하고, 마지막에 통합 압축본을 만듭니다. "
@@ -3044,6 +3300,8 @@ def main():
     # -----------------------------------------------------------
 
     show_api_diagnostics()
+
+    render_token_status()
 
 
 main()
