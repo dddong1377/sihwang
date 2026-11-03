@@ -1875,6 +1875,50 @@ def make_request_preview(
     return result
 
 
+def news_table_markdown(items, sent_links=None):
+    """뉴스 목록을 표로 만듭니다. sent_links가 있으면 AI 전달 번호 열을 추가합니다."""
+
+    if not items:
+        return "표시할 뉴스가 없습니다."
+
+    sent_numbers = {}
+
+    if sent_links is not None:
+        sent_numbers = {
+            link: number
+            for number, link in enumerate(sent_links, start=1)
+        }
+
+    if sent_links is None:
+        lines = [
+            "| 번호 | 분류 | 언론사 | 기사 제목 | 게시 시각 | 링크 |",
+            "|---|---|---|---|---|---|",
+        ]
+    else:
+        lines = [
+            "| AI 전달 | 분류 | 언론사 | 기사 제목 | 게시 시각 | 링크 |",
+            "|---|---|---|---|---|---|",
+        ]
+
+    for index, item in enumerate(items, start=1):
+        title = item["title"].replace("|", "/")
+        publisher = item["publisher"].replace("|", "/")
+
+        if sent_links is None:
+            first = str(index)
+        else:
+            number = sent_numbers.get(item["link"])
+            first = f"[{number}]" if number else "-"
+
+        lines.append(
+            f"| {first} | {item['category']} | {publisher} | "
+            f"{title} | {item['published']} | "
+            f"[링크]({item['link']}) |"
+        )
+
+    return "\n".join(lines)
+
+
 def cited_numbers(text, limit):
     return sorted({
         int(number)
@@ -2164,6 +2208,7 @@ def run_pipeline(mode, status):
         state["pm_long"] = ""
         state["pm_short"] = ""
         state["pm_ctx"] = None
+        state["pm_news_all"] = []
 
         today = (
             f"{now.year}년 {now.month:02d}월 "
@@ -2195,6 +2240,7 @@ def run_pipeline(mode, status):
         status.write("📰 최근 24시간 뉴스 RSS 수집 중...")
 
         news, news_errors = collect_news()
+        state["pm_news_all"] = news
 
         selected = select_news(news, MAX_NEWS_ITEMS)
 
@@ -2585,6 +2631,32 @@ def show_api_diagnostics():
                 "첫 파트 예상 입력 토큰: "
                 f"{preview.get('estimated_input_tokens', 0):,}개"
             )
+
+            all_news = state.get("pm_news_all") or []
+            ctx = state.get("pm_ctx") or {}
+            sent_news = ctx.get("news") or []
+
+            with st.expander(
+                f"📰 수집된 뉴스 전체 {len(all_news)}건 보기 (출처·링크)",
+                expanded=False,
+            ):
+                st.caption(
+                    "Google News RSS에서 수집한 최근 24시간 기사입니다. "
+                    "'AI 전달' 열의 [번호]는 상세 리포트 본문의 인용 번호와 같습니다."
+                )
+
+                st.markdown(
+                    news_table_markdown(
+                        all_news,
+                        sent_links=[item["link"] for item in sent_news],
+                    )
+                )
+
+            with st.expander(
+                f"🤖 AI에 실제 전달된 뉴스 {len(sent_news)}건 보기",
+                expanded=False,
+            ):
+                st.markdown(news_table_markdown(sent_news))
 
         if part_previews:
             st.divider()
