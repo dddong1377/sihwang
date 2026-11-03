@@ -3947,18 +3947,33 @@ def build_markdown(snapshot, time_text="확인 불가"):
 
 
 def md_to_html(markdown):
-    """마크다운을 간단한 HTML로 변환. 표의 첫 줄(머리글)은 연한 회색 배경으로 구분합니다."""
+    """마크다운을 간단한 HTML로 변환.
+    - 표의 첫 줄(머리글)은 연한 회색 배경으로 구분합니다.
+    - 빈 줄 없이 이어진 글줄은 한 문단(<p>) 안에서 <br>로만 줄바꿈해,
+      게시판에 올렸을 때 줄마다 문단 여백이 생기지 않게 합니다."""
 
     output = []
     in_table = False
     first_row = False
+    para = []
 
     header_style = (
         " style='background-color:#F2F3F5;font-weight:normal;text-align:left'"
     )
 
+    def inline(text):
+        safe = html.escape(text)
+        return re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", safe)
+
+    def flush_para():
+        if para:
+            output.append("<p style='margin:0 0 10px'>" + "<br>".join(para) + "</p>")
+            para.clear()
+
     for line in markdown.splitlines():
         if line.startswith("|"):
+            flush_para()
+
             cells = [
                 cell.strip()
                 for cell in line.split("|")[1:-1]
@@ -3982,12 +3997,7 @@ def md_to_html(markdown):
             rendered_cells = []
 
             for cell in cells:
-                safe = html.escape(cell)
-                safe = re.sub(
-                    r"\*\*(.*?)\*\*",
-                    r"<b>\1</b>",
-                    safe
-                )
+                safe = inline(cell)
 
                 if first_row:
                     rendered_cells.append(f"<th{header_style}>{safe}</th>")
@@ -4007,25 +4017,26 @@ def md_to_html(markdown):
             in_table = False
 
         if line.startswith("# "):
+            flush_para()
             output.append(
                 "<h1>" + html.escape(line[2:]) + "</h1>"
             )
 
         elif line.startswith("### "):
+            flush_para()
             output.append(
                 "<h3>" + html.escape(line[4:]) + "</h3>"
             )
 
         elif line.strip():
-            safe = html.escape(line)
+            # 앞쪽 들여쓰기(하위 항목)는 HTML에서 사라지므로 공백 문자로 유지
+            indent = len(line) - len(line.lstrip(" "))
+            para.append("&nbsp;" * indent + inline(line.strip()))
 
-            safe = re.sub(
-                r"\*\*(.*?)\*\*",
-                r"<b>\1</b>",
-                safe
-            )
+        else:
+            flush_para()
 
-            output.append("<p>" + safe + "</p>")
+    flush_para()
 
     if in_table:
         output.append("</table>")
