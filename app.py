@@ -4439,7 +4439,7 @@ def main():
      apply_label_style()
 
     # 시총 100위 모드를 기본값으로 시작합니다.
-    st.session_state.setdefault("uni_all", False)
+st.session_state.setdefault("uni_all", False)
     st.session_state.setdefault("uni_cap100", True)
 
     with st.sidebar:
