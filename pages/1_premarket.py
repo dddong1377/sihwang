@@ -29,11 +29,19 @@ GROQ_MODEL = "openai/gpt-oss-120b"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_TIMEOUT = 180
 
+# Groq TPM 8,000 기준 안전 예산
 GROQ_TPM_SAFE_BUDGET = 7500
 
-# 상세 리포트 3개 파트 + 압축본
-GROQ_DETAIL_MAX_TOKENS = 2200
-GROQ_COMPRESS_MAX_TOKENS = 1500
+# 상세 리포트 4개 파트 + 최종 압축본
+GROQ_DETAIL_MAX_TOKENS = 1300
+GROQ_COMPRESS_MAX_TOKENS = 1200
+
+# 출력 길이 초과 시 재시도 설정
+GROQ_RETRY_MAX_TOKENS = 1000
+GROQ_LENGTH_RETRY_COUNT = 1
+
+# 다음 API 요청 전에 남겨둘 여유 토큰
+GROQ_WAIT_TOKEN_MARGIN = 400
 
 MAX_NEWS_ITEMS = 11
 
@@ -42,6 +50,9 @@ CHARS_PER_TOKEN_ESTIMATE = 1.65
 
 GROQ_DEFAULT_WAIT_SECONDS = 60
 GROQ_WAIT_SAFETY_SECONDS = 3
+
+# 공통 프롬프트 외 파트 지시문 등의 추가 여유 공간
+GROQ_PROMPT_OVERHEAD_RESERVE = 1000
 
 
 def get_groq_api_key():
@@ -176,6 +187,7 @@ def wait_for_next_groq_call(
     next_required = (
         estimate_tokens(next_prompt)
         + next_output_tokens
+        + GROQ_WAIT_TOKEN_MARGIN
     )
 
     try:
@@ -407,7 +419,9 @@ def build_news_context_within_budget(
         estimated_input = estimate_tokens(prompt)
 
         estimated_total = (
-            estimated_input + max_output_tokens
+            estimated_input
+            + max_output_tokens
+            + GROQ_PROMPT_OVERHEAD_RESERVE
         )
 
         if estimated_total <= GROQ_TPM_SAFE_BUDGET:
@@ -1108,17 +1122,19 @@ __NEWS_CONTEXT__
 - 각 파트에 포함된 항목만 작성한다.
 - 다른 파트의 항목은 작성하지 않는다.
 - 확인할 수 없는 사실은 확인 불가로 처리한다.
+- 불필요한 서론과 결론을 쓰지 않는다.
+- 출력 토큰을 고려해 요청된 항목을 간결하게 작성한다.
 """
 
 
 DETAIL_PART_PROMPTS = [
     {
-        "name": "상세 리포트 1/3 · 시장 동향",
+        "name": "상세 리포트 1/4 · 시장 동향",
         "instruction": """
-# 작성할 상세 리포트 파트 1/3
+# 작성할 상세 리포트 파트 1/4
 
 ## 📅 YYYY년 MM월 DD일 (요일) | MTNW Market Intelligence [장전]
-> 📌 **오늘 한 줄 요약**: 20~30자
+> 📌 **오늘 한 줄 요약**: 핵심만 20~30자
 
 ### 1. 🌎 해외 증시
 | 지수 | 종가/현재가 | 전일 대비 |
@@ -1127,13 +1143,28 @@ DETAIL_PART_PROMPTS = [
 7개 지수를 모두 표기하고 확인 불가 시 사유를 적는다.
 
 ### 2. 🔥 핵심 이슈 TOP5
-각 이슈는 아래 형식으로 작성한다.
+각 이슈는 아래 형식으로 간결하게 작성한다.
 - **제목** (시장 영향도 ⭐1~5 / 콘텐츠 점수 00/100)
 - 무슨 일: 1문장
 - 왜 중요한가 + 관련 종목·테마: 1문장
 - 향후 일정/리스크: 1문장 [출처번호]
 
+작성 원칙:
+- 중요도 순으로 5개 선정
+- 뉴스 제목만 확인된 내용은 세부 사실을 확대 해석하지 않는다.
+- 관련 종목은 뉴스에서 실제 확인된 종목만 사용한다.
+
+이 파트의 내용만 작성하고 3번 이후 항목은 작성하지 않는다.
+출력은 간결하게 작성한다.
+"""
+    },
+    {
+        "name": "상세 리포트 2/4 · 키워드 및 종목",
+        "instruction": """
+# 작성할 상세 리포트 파트 2/4
+
 ### 3. 🔍 검색 키워드
+
 **뉴스 기반 관심 키워드 TOP20**
 | 순위 | 키워드 | 검색 의도 | 광고/SEO 활용 |
 
@@ -1143,23 +1174,29 @@ DETAIL_PART_PROMPTS = [
 실제 검색량 순위가 아닌 뉴스 노출 기반 후보라고 표시한다.
 
 ### 4. 📈 종목·테마·수급
+
 - **언급 TOP10 종목**: 종목 | 이유 | 방송 적합도
 - **강세 테마 TOP5**: 테마 | 관련 종목 | 지속 가능성
 - **관심 업종 TOP5**: 업종 | 이유
 - **수급**: 외국인 / 기관 / 개인 순매수·순매도 요약
   - 실제 수급 데이터가 없으면 확인 불가
 
-이 파트의 내용만 작성하고 5번 이후 항목은 작성하지 않는다.
+작성 원칙:
+- 표 중심으로 간결하게 작성한다.
+- 실제 뉴스에서 확인되는 종목만 사용한다.
+- 종목이나 테마의 강세를 확인할 수 없다면 후보 또는 확인 불가로 표시한다.
+
+이 파트의 내용만 작성하고 1~2번 및 5번 이후 항목은 작성하지 않는다.
 """
     },
     {
-        "name": "상세 리포트 2/3 · 글로벌 및 일정",
+        "name": "상세 리포트 3/4 · 글로벌 및 일정",
         "instruction": """
-# 작성할 상세 리포트 파트 2/3
+# 작성할 상세 리포트 파트 3/4
 
 ### 5. 🌐 글로벌 이슈
-미국·중국·일본·유럽·원자재·환율 관련 내용을
-각각 2~3문장으로 작성한다.
+미국·중국·일본·유럽·원자재·환율 관련 내용을 정리한다.
+각 항목은 핵심 1~2문장으로 작성한다.
 제공된 자료에 없는 수치는 확인 불가로 표기한다.
 
 ### 6. 📆 오늘 체크 일정
@@ -1174,15 +1211,22 @@ DETAIL_PART_PROMPTS = [
 ### 8. 💰 광고 키워드
 | 구분 | 키워드 | 전환 가능성 |
 
+작성 원칙:
+- 실제 확인된 뉴스와 일정만 사용한다.
+- 시장 영향은 가능성으로 표현하고 단정하지 않는다.
+- 콘텐츠는 뉴스 제목을 바탕으로 제작 방향을 제안한다.
+
 이 파트의 내용만 작성하고 1~4번 및 9번 이후 항목은 작성하지 않는다.
 """
     },
     {
-        "name": "상세 리포트 3/3 · 콘텐츠 및 종합",
+        "name": "상세 리포트 4/4 · 콘텐츠 및 종합",
         "instruction": """
-# 작성할 상세 리포트 파트 3/3
+# 작성할 상세 리포트 파트 4/4
 
 ### 9. ✍️ 콘텐츠 아이디어
+
+아래 항목을 표와 불릿으로 간결하게 작성한다.
 - 유튜브 제목 5개
 - 블로그 제목 10개
 - 숏폼 아이디어 10개
@@ -1191,6 +1235,7 @@ DETAIL_PART_PROMPTS = [
 
 제공된 뉴스와 확인된 이슈를 기반으로 작성한다.
 확인되지 않은 사실을 제목에 단정적으로 넣지 않는다.
+각 제목은 짧고 실제 콘텐츠에 활용할 수 있게 작성한다.
 
 ### 10. 🎙️ 방송 추천 종목 TOP5 + 오늘 꼭 봐야 할 종목 TOP5
 | 종목 | 이유 | 주의점 |
@@ -1232,9 +1277,11 @@ COMPRESS_PROMPT = """# 역할
 5. 핵심 포인트마다 관련 종목을 붙인다.
 6. 핵심 키워드·수치·종목명은 **굵게** 표시한다.
 7. 상승은 🔺, 하락은 🔻, 중립은 ➖로 표시한다.
-8. 가장 중요한 이슈 1개에는 🔥 표시한다.
+8. 가장 중요한 이슈 1개에는 🔥 표시를 한다.
 9. 표는 지수표 1개만 허용한다.
 10. 출처는 "출처: 언론사명 나열" 한 줄로 작성한다.
+11. 중복 내용은 통합하고 중요도가 낮은 내용은 제외한다.
+12. 출력은 반드시 아래 형식에 맞춰 간결하게 작성한다.
 
 # 출력 형식
 
@@ -1410,6 +1457,11 @@ def call_groq(
 
     input_estimate = estimate_tokens(prompt)
 
+    state = st.session_state
+
+    if "pm_api_diagnostics" not in state:
+        state["pm_api_diagnostics"] = []
+
     diagnostic = {
         "stage": stage,
         "model": GROQ_MODEL,
@@ -1427,166 +1479,193 @@ def call_groq(
         "request_id": None,
         "rate_limits": {},
         "error": None,
+        "retry_count": 0,
         "called_at": datetime.datetime.now(KST).strftime(
             "%Y-%m-%d %H:%M:%S"
         ),
     }
 
-    state = st.session_state
-
-    if "pm_api_diagnostics" not in state:
-        state["pm_api_diagnostics"] = []
-
     state["pm_api_diagnostics"].append(diagnostic)
     state["pm_api_diagnostic"] = diagnostic
 
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "당신은 한국 주식시장 전문 시황 에디터입니다. "
-                    "제공된 자료에 없는 사실이나 수치를 만들어내지 마세요. "
-                    "확인할 수 없는 정보는 확인 불가라고 표시하세요."
-                ),
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-        "temperature": 0.2,
-        "max_tokens": safe_max_tokens,
-    }
+    current_max_tokens = safe_max_tokens
 
-    try:
-        response = requests.post(
-            GROQ_API_URL,
-            headers=headers,
-            json=payload,
-            timeout=GROQ_TIMEOUT,
-        )
+    for attempt in range(GROQ_LENGTH_RETRY_COUNT + 1):
+        payload = {
+            "model": GROQ_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "당신은 한국 주식시장 전문 시황 에디터입니다. "
+                        "제공된 자료에 없는 사실이나 수치를 만들어내지 마세요. "
+                        "확인할 수 없는 정보는 확인 불가라고 표시하세요. "
+                        "요청된 항목을 빠뜨리지 말고 간결하게 작성하세요."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            "temperature": 0.2,
+            "max_tokens": current_max_tokens,
+        }
 
-        diagnostic["rate_limits"] = get_rate_limit_info(
-            response.headers
-        )
+        try:
+            response = requests.post(
+                GROQ_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=GROQ_TIMEOUT,
+            )
 
-        diagnostic["request_id"] = (
-            response.headers.get("x-request-id")
-            or response.headers.get("request-id")
-        )
+            diagnostic["rate_limits"] = get_rate_limit_info(
+                response.headers
+            )
 
-        if response.status_code != 200:
-            error_info = parse_groq_error(response)
-            diagnostic["error"] = error_info
+            diagnostic["request_id"] = (
+                response.headers.get("x-request-id")
+                or response.headers.get("request-id")
+            )
 
-            raise RuntimeError(
-                friendly_groq_error(error_info)
-                + "\n\n"
-                + f"HTTP 상태: {error_info['http_status']}"
-                + "\n"
-                + f"오류 코드: {error_info['error_code'] or '없음'}"
-                + "\n"
-                + f"오류 유형: {error_info['error_type'] or '없음'}"
-                + "\n"
-                + f"오류 원문: "
-                + (
-                    error_info["error_message"]
-                    or error_info["raw_response"]
+            diagnostic["actual_max_output_tokens"] = (
+                current_max_tokens
+            )
+
+            if response.status_code != 200:
+                error_info = parse_groq_error(response)
+                diagnostic["error"] = error_info
+
+                raise RuntimeError(
+                    friendly_groq_error(error_info)
+                    + "\n\n"
+                    + f"HTTP 상태: {error_info['http_status']}"
+                    + "\n"
+                    + f"오류 코드: {error_info['error_code'] or '없음'}"
+                    + "\n"
+                    + f"오류 유형: {error_info['error_type'] or '없음'}"
+                    + "\n"
+                    + f"오류 원문: "
+                    + (
+                        error_info["error_message"]
+                        or error_info["raw_response"]
+                    )
                 )
+
+            data = response.json()
+            usage = data.get("usage") or {}
+
+            diagnostic["actual_prompt_tokens"] = usage.get(
+                "prompt_tokens"
             )
 
-        data = response.json()
-        usage = data.get("usage") or {}
-
-        diagnostic["actual_prompt_tokens"] = usage.get(
-            "prompt_tokens"
-        )
-
-        diagnostic["actual_completion_tokens"] = usage.get(
-            "completion_tokens"
-        )
-
-        diagnostic["actual_total_tokens"] = usage.get(
-            "total_tokens"
-        )
-
-        choices = data.get("choices") or []
-
-        if not choices:
-            raise RuntimeError(
-                "Groq 응답에 choices 항목이 없습니다."
+            diagnostic["actual_completion_tokens"] = usage.get(
+                "completion_tokens"
             )
 
-        choice = choices[0]
-
-        diagnostic["finish_reason"] = choice.get(
-            "finish_reason"
-        )
-
-        message = choice.get("message") or {}
-        result = message.get("content")
-
-        if isinstance(result, list):
-            result = "\n".join(
-                str(item.get("text", ""))
-                for item in result
-                if isinstance(item, dict)
+            diagnostic["actual_total_tokens"] = usage.get(
+                "total_tokens"
             )
 
-        result = str(result or "").strip()
+            choices = data.get("choices") or []
 
-        if not result:
-            raise RuntimeError("Groq 응답이 비어 있습니다.")
+            if not choices:
+                raise RuntimeError(
+                    "Groq 응답에 choices 항목이 없습니다."
+                )
 
-        if diagnostic["finish_reason"] == "length":
+            choice = choices[0]
+
+            diagnostic["finish_reason"] = choice.get(
+                "finish_reason"
+            )
+
+            message = choice.get("message") or {}
+            result = message.get("content")
+
+            if isinstance(result, list):
+                result = "\n".join(
+                    str(item.get("text", ""))
+                    for item in result
+                    if isinstance(item, dict)
+                )
+
+            result = str(result or "").strip()
+
+            if not result:
+                raise RuntimeError("Groq 응답이 비어 있습니다.")
+
+            if diagnostic["finish_reason"] == "length":
+                diagnostic["error"] = {
+                    "message": (
+                        "출력 토큰 제한으로 응답이 중간에 종료됐습니다."
+                    )
+                }
+
+                if (
+                    attempt < GROQ_LENGTH_RETRY_COUNT
+                    and current_max_tokens > GROQ_RETRY_MAX_TOKENS
+                ):
+                    diagnostic["retry_count"] += 1
+
+                    current_max_tokens = min(
+                        GROQ_RETRY_MAX_TOKENS,
+                        current_max_tokens - 200,
+                    )
+
+                    previous = diagnostic
+
+                    wait_before_api_call(
+                        previous,
+                        prompt,
+                        current_max_tokens,
+                        f"{stage} 재시도",
+                    )
+
+                    continue
+
+                raise RuntimeError(
+                    f"{stage}: 출력 토큰 제한으로 응답이 중간에 종료됐습니다. "
+                    "파트를 더 분리하거나 출력 분량을 줄여야 합니다."
+                )
+
+            return result
+
+        except requests.exceptions.Timeout:
             diagnostic["error"] = {
-                "message": (
-                    "출력 토큰 제한으로 응답이 중간에 종료됐습니다."
-                )
+                "message": "API 요청 시간 초과",
             }
 
             raise RuntimeError(
-                f"{stage}: 출력 토큰 제한으로 응답이 중간에 종료됐습니다. "
-                "해당 파트의 출력 한도를 더 낮춰야 합니다."
+                f"{stage}: Groq API 응답 시간이 초과되었습니다."
             )
 
-        return result
-
-    except requests.exceptions.Timeout:
-        diagnostic["error"] = {
-            "message": "API 요청 시간 초과",
-        }
-
-        raise RuntimeError(
-            f"{stage}: Groq API 응답 시간이 초과되었습니다."
-        )
-
-    except requests.exceptions.RequestException as error:
-        diagnostic["error"] = {
-            "message": str(error)[:1000],
-        }
-
-        raise RuntimeError(
-            f"{stage}: Groq 네트워크 요청 실패: {str(error)[:300]}"
-        )
-
-    except Exception as error:
-        if diagnostic.get("error") is None:
+        except requests.exceptions.RequestException as error:
             diagnostic["error"] = {
-                "message": str(error)[:2000],
+                "message": str(error)[:1000],
             }
 
-        raise
+            raise RuntimeError(
+                f"{stage}: Groq 네트워크 요청 실패: {str(error)[:300]}"
+            )
 
-    finally:
-        # 리스트 안의 동일 진단 객체가 갱신된 상태로 유지되도록 한다.
-        state["pm_api_diagnostic"] = diagnostic
+        except Exception as error:
+            if diagnostic.get("error") is None:
+                diagnostic["error"] = {
+                    "message": str(error)[:2000],
+                }
+
+            raise
+
+        finally:
+            state["pm_api_diagnostic"] = diagnostic
+
+    raise RuntimeError(f"{stage}: API 호출이 완료되지 않았습니다.")
 
 
 # ===============================================================
-# 14. 상세 리포트 3단계 생성 및 압축
+# 14. 상세 리포트 4개 파트 생성 및 압축
 # ===============================================================
 
 def make_request_preview(
@@ -1655,7 +1734,7 @@ def run_one_detail_part(
     )
 
     with st.spinner(
-        f"{part_number}/4 {stage} 생성 중..."
+        f"{part_number}/5 {stage} 생성 중..."
     ):
         result = call_groq(
             prompt,
@@ -1699,7 +1778,7 @@ def run_premarket(use_source_only=False):
         now = datetime.datetime.now(KST)
 
         today = (
-            f"{now.year}년 {now.month:02d}일 "
+            f"{now.year}년 {now.month:02d}월 "
             f"{now.day:02d}일 ({WEEKDAYS[now.weekday()]})"
         )
 
@@ -1726,6 +1805,19 @@ def run_premarket(use_source_only=False):
 
             state["pm_compress_preview"] = preview
 
+            previous = (
+                state["pm_api_diagnostics"][-1]
+                if state["pm_api_diagnostics"]
+                else None
+            )
+
+            wait_before_api_call(
+                previous,
+                prompt,
+                preview["max_output_tokens"],
+                "원문 압축",
+            )
+
             with st.spinner(
                 "Groq API로 원문을 압축하는 중..."
             ):
@@ -1746,7 +1838,15 @@ def run_premarket(use_source_only=False):
             return
 
         # -------------------------------------------------------
-        # B. Toss 지수 데이터 확보
+        # B. 이전 결과 초기화
+        # -------------------------------------------------------
+
+        state["pm_long"] = ""
+        state["pm_short"] = ""
+        state["pm_detail_parts"] = {}
+
+        # -------------------------------------------------------
+        # C. Toss 지수 데이터 확보
         # -------------------------------------------------------
 
         rows = state.get("pm_indices")
@@ -1766,7 +1866,7 @@ def run_premarket(use_source_only=False):
         index_table = indices_markdown(main_rows)
 
         # -------------------------------------------------------
-        # C. 뉴스 수집
+        # D. 뉴스 수집
         # -------------------------------------------------------
 
         with st.spinner(
@@ -1795,17 +1895,13 @@ def run_premarket(use_source_only=False):
             "estimated_input_tokens": estimated_input,
             "max_output_tokens": GROQ_DETAIL_MAX_TOKENS,
             "estimated_total_tokens": (
-                estimated_input + GROQ_DETAIL_MAX_TOKENS
+                estimated_input
+                + GROQ_DETAIL_MAX_TOKENS
             ),
         }
 
-        # 이전 결과 초기화
-        state["pm_long"] = ""
-        state["pm_short"] = ""
-        state["pm_detail_parts"] = {}
-
         # -------------------------------------------------------
-        # D. 상세 리포트 1~3차 생성
+        # E. 상세 리포트 1~4차 생성
         # -------------------------------------------------------
 
         for index, part in enumerate(
@@ -1819,25 +1915,25 @@ def run_premarket(use_source_only=False):
             )
 
         # -------------------------------------------------------
-        # E. 상세 리포트 통합
+        # F. 상세 리포트 통합
         # -------------------------------------------------------
 
         detail_parts = state["pm_detail_parts"]
 
-        if len(detail_parts) != 3:
+        if len(detail_parts) != 4:
             raise RuntimeError(
-                "상세 리포트 3개 파트가 모두 생성되지 않았습니다."
+                "상세 리포트 4개 파트가 모두 생성되지 않았습니다."
             )
 
         detail = "\n\n".join(
             detail_parts[index]
-            for index in (1, 2, 3)
+            for index in (1, 2, 3, 4)
         )
 
         state["pm_long"] = detail
 
         # -------------------------------------------------------
-        # F. 상세 리포트 압축 프롬프트 구성
+        # G. 상세 리포트 압축 프롬프트 구성
         # -------------------------------------------------------
 
         compress_prompt = build_compress_prompt(detail)
@@ -1851,7 +1947,7 @@ def run_premarket(use_source_only=False):
         state["pm_compress_preview"] = compress_preview
 
         # -------------------------------------------------------
-        # G. TPM 잔여량 확인 및 대기
+        # H. TPM 잔여량 확인 및 대기
         # -------------------------------------------------------
 
         previous = (
@@ -1868,11 +1964,11 @@ def run_premarket(use_source_only=False):
         )
 
         # -------------------------------------------------------
-        # H. 4차 호출: 압축본 생성
+        # I. 5차 호출: 압축본 생성
         # -------------------------------------------------------
 
         with st.spinner(
-            "4/4 통합 상세 리포트를 압축하는 중..."
+            "5/5 통합 상세 리포트를 압축하는 중..."
         ):
             short = call_groq(
                 compress_prompt,
@@ -1893,7 +1989,7 @@ def run_premarket(use_source_only=False):
             f"생성 완료 · "
             f"{datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
             f"뉴스 {len(news)}건 수집 / {news_sent}건 전달 · "
-            "Groq API 4회 호출"
+            "상세 4회 + 압축 1회"
             f"{error_note}"
         )
 
@@ -2266,6 +2362,11 @@ def show_api_diagnostics():
                     )
 
                     st.write(
+                        "재시도 횟수:",
+                        diagnostic.get("retry_count", 0),
+                    )
+
+                    st.write(
                         "응답 종료 사유:",
                         diagnostic.get("finish_reason") or "확인 불가",
                     )
@@ -2307,8 +2408,8 @@ def main():
 
     st.caption(
         "Toss 지수와 최근 24시간 뉴스 RSS를 수집한 뒤, "
-        "Groq API 3회 호출로 상세 리포트 3개 파트를 생성하고 "
-        "4차 호출로 통합 압축본을 생성합니다. "
+        "Groq API 4회 호출로 상세 리포트 4개 파트를 생성하고 "
+        "5차 호출로 통합 압축본을 생성합니다. "
         "오후 시황은 왼쪽 메뉴의 'app'에서 작성합니다."
     )
 
