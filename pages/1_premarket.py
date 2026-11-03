@@ -3,6 +3,7 @@ import email.utils
 import hmac
 import html
 import json
+import math
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -19,22 +20,30 @@ KST = ZoneInfo("Asia/Seoul")
 WEEKDAYS = "월화수목금토일"
 
 
-# ---------------------------------------------------------------
-# Groq API 설정 및 진단
-# ---------------------------------------------------------------
+# ===============================================================
+# 1. Groq API 설정 및 요청량 제어
+# ===============================================================
 
 GROQ_MODEL = "openai/gpt-oss-120b"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-
-# 우선 출력 토큰을 낮춰 API 사용량을 진단
-GROQ_MAX_TOKENS = 4000
 GROQ_TIMEOUT = 180
 
-# 한 번의 API 요청에 전달할 최대 뉴스 개수
-MAX_NEWS_ITEMS = 30
+# Groq TPM 한도 8,000에 여유를 두고 요청
+# 입력 추정 토큰 + 출력 토큰의 목표 합계
+GROQ_TPM_SAFE_BUDGET = 6500
 
-# 실제 토큰 수가 아닌 입력량 추정용
-CHARS_PER_TOKEN_ESTIMATE = 3
+# 최대 출력 토큰
+GROQ_MAX_TOKENS = 2500
+
+# 압축만 실행할 때의 최대 출력 토큰
+GROQ_COMPRESS_MAX_TOKENS = 1800
+
+# 뉴스는 최대 15건부터 전달
+MAX_NEWS_ITEMS = 15
+
+# 한국어와 영문이 섞인 프롬프트의 보수적인 토큰 추정
+# 실제 토큰 수와 다를 수 있으므로 안전 여유를 둔다.
+CHARS_PER_TOKEN_ESTIMATE = 2.5
 
 
 def get_groq_api_key():
@@ -67,22 +76,17 @@ def get_groq_headers():
 
 
 def estimate_tokens(text):
-    """
-    정확한 토큰 수가 아닌 대략적인 입력량 추정치.
-    실제 사용량은 API 응답의 usage 값을 기준으로 확인한다.
-    """
+    """실제 토큰 수가 아닌 보수적인 추정치."""
+
     if not text:
         return 0
 
-    return max(
-        1,
-        len(text) // CHARS_PER_TOKEN_ESTIMATE,
+    return math.ceil(
+        len(text) / CHARS_PER_TOKEN_ESTIMATE
     )
 
 
 def get_rate_limit_info(headers):
-    """Groq 응답 헤더에서 제한 정보를 추출한다."""
-
     header_map = {
         key.lower(): value
         for key, value in headers.items()
@@ -105,9 +109,38 @@ def get_rate_limit_info(headers):
     }
 
 
-# ---------------------------------------------------------------
-# 무료 뉴스 RSS 설정
-# ---------------------------------------------------------------
+def calculate_safe_output_tokens(prompt, requested_max_tokens):
+    """
+    입력 추정량을 기준으로 출력 토큰을 자동 조정한다.
+
+    TPM 안전 예산에서 입력 추정량을 제외한 만큼만
+    출력 토큰을 요청한다.
+    """
+
+    input_estimate = estimate_tokens(prompt)
+
+    available_output = (
+        GROQ_TPM_SAFE_BUDGET - input_estimate
+    )
+
+    if available_output < 500:
+        raise RuntimeError(
+            "프롬프트 입력량이 너무 많습니다. "
+            f"입력 토큰 추정치: {input_estimate:,}개. "
+            "뉴스 수집량이나 원문 분량을 줄여 주세요."
+        )
+
+    safe_output = min(
+        requested_max_tokens,
+        available_output,
+    )
+
+    return max(500, safe_output)
+
+
+# ===============================================================
+# 2. Google News RSS 설정 및 수집
+# ===============================================================
 
 GOOGLE_NEWS_RSS_URL = (
     "https://news.google.com/rss/search"
@@ -191,10 +224,7 @@ def fetch_google_news_rss(query, display_name):
 
         published = parse_news_date(pub_date)
 
-        if not title or not link:
-            continue
-
-        if published is None:
+        if not title or not link or published is None:
             continue
 
         if published < cutoff or published > now:
@@ -249,7 +279,7 @@ def collect_news():
     return all_news, errors
 
 
-def news_to_text(news):
+def news_to_text(news, limit=MAX_NEWS_ITEMS):
     if not news:
         return (
             "최근 24시간 이내 수집된 뉴스가 없습니다. "
@@ -258,8 +288,7 @@ def news_to_text(news):
 
     lines = []
 
-    # API 입력량 관리를 위해 최대 30건만 전달
-    selected_news = news[:MAX_NEWS_ITEMS]
+    selected_news = news[:limit]
 
     for index, item in enumerate(selected_news, start=1):
         lines.append(
@@ -273,9 +302,47 @@ def news_to_text(news):
     return "\n\n".join(lines)
 
 
-# ---------------------------------------------------------------
-# Toss 대시보드 지수 API 설정
-# ---------------------------------------------------------------
+def build_news_context_within_budget(news, base_prompt, max_output_tokens):
+    """
+    뉴스 개수를 자동으로 조정하여 요청량을 줄인다.
+
+    15건부터 시작해 TPM 안전 예산을 넘으면
+    2건씩 줄여 입력량을 재계산한다.
+    """
+
+    count = min(len(news), MAX_NEWS_ITEMS)
+
+    while count >= 0:
+        context = news_to_text(news, count)
+
+        prompt = base_prompt.replace(
+            "__NEWS_CONTEXT__",
+            context,
+        )
+
+        estimated_input = estimate_tokens(prompt)
+
+        estimated_total = (
+            estimated_input + max_output_tokens
+        )
+
+        if estimated_total <= GROQ_TPM_SAFE_BUDGET:
+            return prompt, count, estimated_input
+
+        if count == 0:
+            break
+
+        count = max(0, count - 2)
+
+    raise RuntimeError(
+        "뉴스를 모두 줄여도 API 요청량이 안전 범위를 초과합니다. "
+        "프롬프트 자체의 분량을 줄여야 합니다."
+    )
+
+
+# ===============================================================
+# 3. Toss 지수 API 설정
+# ===============================================================
 
 TOSS_INDICATOR_URL = (
     "https://wts-cert-api.tossinvest.com"
@@ -293,10 +360,6 @@ TOSS_HEADERS = {
     "Referer": "https://www.tossinvest.com/",
 }
 
-
-# ---------------------------------------------------------------
-# 표시할 지수 목록
-# ---------------------------------------------------------------
 
 TOSS_INDEX_ITEMS = (
     ("코스피", "KGG01P", 2, "extra"),
@@ -365,9 +428,9 @@ INDEX_NAME_ALIASES = {
 }
 
 
-# ---------------------------------------------------------------
-# 공통: 설정값 / 로그인
-# ---------------------------------------------------------------
+# ===============================================================
+# 4. 공통 설정 / 로그인
+# ===============================================================
 
 def secret(key, default=""):
     try:
@@ -417,9 +480,9 @@ if not login():
     st.stop()
 
 
-# ---------------------------------------------------------------
-# Toss API 요청 헤더
-# ---------------------------------------------------------------
+# ===============================================================
+# 5. Toss API 요청 헤더
+# ===============================================================
 
 def toss_session_headers():
     headers = dict(TOSS_HEADERS)
@@ -463,9 +526,9 @@ def toss_session_headers():
     return headers
 
 
-# ---------------------------------------------------------------
-# Toss 지수 API 조회
-# ---------------------------------------------------------------
+# ===============================================================
+# 6. Toss 지수 API 조회
+# ===============================================================
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_toss_indicators():
@@ -498,9 +561,9 @@ def get_toss_indicators():
     return infos
 
 
-# ---------------------------------------------------------------
-# 데이터 변환
-# ---------------------------------------------------------------
+# ===============================================================
+# 7. 데이터 변환
+# ===============================================================
 
 def safe_float(value):
     try:
@@ -523,10 +586,6 @@ def safe_float(value):
     except (TypeError, ValueError):
         return None
 
-
-# ---------------------------------------------------------------
-# 실제 캔들 시간 추출
-# ---------------------------------------------------------------
 
 def parse_timestamp(value):
     if value is None or isinstance(value, bool):
@@ -678,9 +737,9 @@ def get_info_timestamp(info):
     return max(timestamps).strftime("%Y-%m-%d %H:%M")
 
 
-# ---------------------------------------------------------------
-# 선물 지수 필터
-# ---------------------------------------------------------------
+# ===============================================================
+# 8. 선물 지수 필터
+# ===============================================================
 
 def is_futures_index(info):
     code = str(info.get("code") or "").strip()
@@ -697,9 +756,9 @@ def is_futures_index(info):
     return any(keyword in name for keyword in futures_keywords)
 
 
-# ---------------------------------------------------------------
-# Toss 데이터 행 구성
-# ---------------------------------------------------------------
+# ===============================================================
+# 9. Toss 데이터 행 구성
+# ===============================================================
 
 def build_toss_rows(infos):
     by_code = {}
@@ -825,9 +884,9 @@ def build_toss_rows(infos):
     return rows
 
 
-# ---------------------------------------------------------------
-# 해외 주요 지수 표 구성
-# ---------------------------------------------------------------
+# ===============================================================
+# 10. 해외 주요 지수 표 구성
+# ===============================================================
 
 def build_main_index_rows(rows):
     result = []
@@ -907,9 +966,9 @@ def fetch_indices():
         state["pm_indices_note"] = f"Toss 지수 조회 실패: {error}"
 
 
-# ---------------------------------------------------------------
-# 프롬프트
-# ---------------------------------------------------------------
+# ===============================================================
+# 11. 프롬프트
+# ===============================================================
 
 PREMARKET_PROMPT = """# 역할
 너는 경제신문 증권부 기자, 증권사 애널리스트, 네이버 SEO 전문가,
@@ -957,7 +1016,7 @@ __INDEX_TABLE__
 __NEWS_CONTEXT__
 
 # 작성 원칙
-- 전체 분량: 모바일 스크롤 기준 3~4화면 내외
+- 전체 분량은 핵심 위주로 작성한다.
 - 문장은 한 줄 요약형, 표·불릿 위주
 - 키워드는 검색광고에 바로 넣을 수 있는 단어형만 사용
 - 주요 주장에는 [번호]로 출처를 붙이고 하단 출처 목록과 연결
@@ -1165,9 +1224,9 @@ __SOURCE__
 """
 
 
-# ---------------------------------------------------------------
-# Groq 오류 분석
-# ---------------------------------------------------------------
+# ===============================================================
+# 12. Groq 오류 분석
+# ===============================================================
 
 def parse_groq_error(response):
     try:
@@ -1206,6 +1265,17 @@ def classify_groq_error(status_code, error_code="", error_message=""):
 
     if status_code == 404:
         return "model"
+
+    # Groq에서 토큰 TPM 초과 시 HTTP 413으로 반환하는 경우 처리
+    if status_code == 413:
+        if (
+            "tokens per minute" in message
+            or "tpm" in message
+            or "request too large" in message
+        ):
+            return "tpm"
+
+        return "request_too_large"
 
     if status_code == 429:
         if "tokens per minute" in message or "tpm" in message:
@@ -1249,8 +1319,12 @@ def friendly_groq_error(error_info):
             "모델명을 확인해 주세요."
         ),
         "tpm": (
-            "분당 토큰 제한(TPM)에 도달했습니다. "
-            "입력량 또는 출력량을 줄인 뒤 다시 시도해 주세요."
+            "분당 토큰 제한(TPM)을 초과했습니다. "
+            "뉴스 입력량이나 출력 토큰을 더 줄여야 합니다."
+        ),
+        "request_too_large": (
+            "Groq가 요청 크기를 초과한 것으로 판단했습니다. "
+            "프롬프트 분량을 줄여 주세요."
         ),
         "rpm": (
             "분당 요청 횟수 제한(RPM)에 도달했습니다. "
@@ -1279,18 +1353,29 @@ def friendly_groq_error(error_info):
     return messages.get(error_type, messages["other"])
 
 
-# ---------------------------------------------------------------
-# Groq API 호출 및 사용량 진단
-# ---------------------------------------------------------------
+# ===============================================================
+# 13. Groq API 호출 및 사용량 진단
+# ===============================================================
 
-def call_groq(prompt, max_tokens=4000):
+def call_groq(prompt, max_tokens=GROQ_MAX_TOKENS):
     headers = get_groq_headers()
+
+    safe_max_tokens = calculate_safe_output_tokens(
+        prompt,
+        max_tokens,
+    )
+
+    input_estimate = estimate_tokens(prompt)
 
     diagnostic = {
         "model": GROQ_MODEL,
         "input_characters": len(prompt),
-        "estimated_input_tokens": estimate_tokens(prompt),
-        "max_output_tokens": max_tokens,
+        "estimated_input_tokens": input_estimate,
+        "requested_output_tokens": max_tokens,
+        "actual_max_output_tokens": safe_max_tokens,
+        "estimated_total_tokens": (
+            input_estimate + safe_max_tokens
+        ),
         "actual_prompt_tokens": None,
         "actual_completion_tokens": None,
         "actual_total_tokens": None,
@@ -1322,7 +1407,7 @@ def call_groq(prompt, max_tokens=4000):
             },
         ],
         "temperature": 0.2,
-        "max_tokens": max_tokens,
+        "max_tokens": safe_max_tokens,
     }
 
     try:
@@ -1358,11 +1443,14 @@ def call_groq(prompt, max_tokens=4000):
                 + "\n"
                 + f"오류 유형: {error_info['error_type'] or '없음'}"
                 + "\n"
-                + f"오류 원문: {error_info['error_message'] or error_info['raw_response']}"
+                + f"오류 원문: "
+                + (
+                    error_info["error_message"]
+                    or error_info["raw_response"]
+                )
             )
 
         data = response.json()
-
         usage = data.get("usage") or {}
 
         diagnostic["actual_prompt_tokens"] = usage.get(
@@ -1407,6 +1495,8 @@ def call_groq(prompt, max_tokens=4000):
                 "Groq 응답이 비어 있습니다."
             )
 
+        st.session_state["pm_api_diagnostic"] = diagnostic
+
         if diagnostic["finish_reason"] == "length":
             diagnostic["error"] = {
                 "message": (
@@ -1418,10 +1508,9 @@ def call_groq(prompt, max_tokens=4000):
 
             raise RuntimeError(
                 "출력 토큰 제한으로 응답이 중간에 종료됐습니다. "
-                "상세 리포트와 압축본이 모두 생성되지 않았을 수 있습니다."
+                "상세 리포트 또는 압축본이 완성되지 않았을 수 있습니다. "
+                "진단 화면의 실제 토큰 사용량을 확인해 주세요."
             )
-
-        st.session_state["pm_api_diagnostic"] = diagnostic
 
         return result
 
@@ -1453,9 +1542,9 @@ def call_groq(prompt, max_tokens=4000):
         raise
 
 
-# ---------------------------------------------------------------
-# 상세 리포트 / 압축본 구분
-# ---------------------------------------------------------------
+# ===============================================================
+# 14. 상세 리포트 / 압축본 구분
+# ===============================================================
 
 def extract_dual_output(raw_text):
     detail_start = "<<<MTNW_DETAIL_START>>>"
@@ -1486,14 +1575,13 @@ def extract_dual_output(raw_text):
     return detail, short
 
 
-# ---------------------------------------------------------------
-# 장전 시황 생성 및 압축
-# ---------------------------------------------------------------
+# ===============================================================
+# 15. 장전 시황 생성 및 압축
+# ===============================================================
 
 def run_premarket(use_source_only=False):
     state = st.session_state
 
-    # 중복 실행 방지
     if state.get("pm_api_running", False):
         state["pm_note"] = (
             "이미 작업이 진행 중입니다. "
@@ -1529,12 +1617,20 @@ def run_premarket(use_source_only=False):
                 pasted,
             )
 
+            safe_output = calculate_safe_output_tokens(
+                prompt,
+                GROQ_COMPRESS_MAX_TOKENS,
+            )
+
             state["pm_request_preview"] = {
                 "news_count": 0,
                 "news_sent": 0,
                 "prompt_characters": len(prompt),
                 "estimated_input_tokens": estimate_tokens(prompt),
-                "max_output_tokens": 2500,
+                "max_output_tokens": safe_output,
+                "estimated_total_tokens": (
+                    estimate_tokens(prompt) + safe_output
+                ),
             }
 
             with st.spinner(
@@ -1542,7 +1638,7 @@ def run_premarket(use_source_only=False):
             ):
                 short = call_groq(
                     prompt,
-                    max_tokens=2500,
+                    max_tokens=GROQ_COMPRESS_MAX_TOKENS,
                 )
 
             state["pm_short"] = short
@@ -1584,22 +1680,35 @@ def run_premarket(use_source_only=False):
         ):
             news, news_errors = collect_news()
 
-        news_context = news_to_text(news)
-
-        prompt = (
+        base_prompt = (
             PREMARKET_PROMPT
             .replace("__TODAY__", today)
             .replace("__INDEX_TABLE__", index_table)
-            .replace("__NEWS_CONTEXT__", news_context)
         )
 
-        # 호출 전 입력량 진단
+        # -------------------------------------------------------
+        # TPM 안전 예산에 맞춰 뉴스 개수 자동 조정
+        # -------------------------------------------------------
+
+        prompt, news_sent, estimated_input = (
+            build_news_context_within_budget(
+                news,
+                base_prompt,
+                GROQ_MAX_TOKENS,
+            )
+        )
+
+        estimated_total = (
+            estimated_input + GROQ_MAX_TOKENS
+        )
+
         state["pm_request_preview"] = {
             "news_count": len(news),
-            "news_sent": min(len(news), MAX_NEWS_ITEMS),
+            "news_sent": news_sent,
             "prompt_characters": len(prompt),
-            "estimated_input_tokens": estimate_tokens(prompt),
+            "estimated_input_tokens": estimated_input,
             "max_output_tokens": GROQ_MAX_TOKENS,
+            "estimated_total_tokens": estimated_total,
         }
 
         with st.spinner(
@@ -1641,7 +1750,7 @@ def run_premarket(use_source_only=False):
         state["pm_note"] = (
             f"생성 완료 · "
             f"{datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
-            f"뉴스 {len(news)}건 수집 · "
+            f"뉴스 {len(news)}건 수집 / {news_sent}건 전달 · "
             "Groq API 1회 호출"
             f"{error_note}"
         )
@@ -1653,9 +1762,9 @@ def run_premarket(use_source_only=False):
         state["pm_api_running"] = False
 
 
-# ---------------------------------------------------------------
-# 마크다운 → HTML / 복사 버튼
-# ---------------------------------------------------------------
+# ===============================================================
+# 16. 마크다운 → HTML / 복사 버튼
+# ===============================================================
 
 def md_to_html(markdown):
     output = []
@@ -1814,9 +1923,9 @@ def copy_buttons(markdown):
     components.html(page, height=45)
 
 
-# ---------------------------------------------------------------
-# API 진단 정보 표시
-# ---------------------------------------------------------------
+# ===============================================================
+# 17. API 진단 정보 표시
+# ===============================================================
 
 def show_api_diagnostics():
     state = st.session_state
@@ -1853,12 +1962,17 @@ def show_api_diagnostics():
             st.caption(
                 "예상 입력 토큰: "
                 f"{preview.get('estimated_input_tokens', 0):,}개 "
-                "(정확한 토큰 수가 아닌 참고값)"
+                "(정확한 토큰 수가 아닌 보수적 추정치)"
             )
 
             st.caption(
                 "최대 출력 토큰: "
                 f"{preview.get('max_output_tokens', 0):,}개"
+            )
+
+            st.caption(
+                "입력+출력 예상 합계: "
+                f"{preview.get('estimated_total_tokens', 0):,}개"
             )
 
         if diagnostic:
@@ -1905,6 +2019,26 @@ def show_api_diagnostics():
             )
 
             st.write(
+                "입력 토큰 추정치:",
+                f"{diagnostic.get('estimated_input_tokens', 0):,}",
+            )
+
+            st.write(
+                "요청한 출력 토큰:",
+                f"{diagnostic.get('requested_output_tokens', 0):,}",
+            )
+
+            st.write(
+                "실제 요청 출력 한도:",
+                f"{diagnostic.get('actual_max_output_tokens', 0):,}",
+            )
+
+            st.write(
+                "예상 요청 토큰 합계:",
+                f"{diagnostic.get('estimated_total_tokens', 0):,}",
+            )
+
+            st.write(
                 "응답 종료 사유:",
                 diagnostic.get("finish_reason") or "확인 불가",
             )
@@ -1934,9 +2068,9 @@ def show_api_diagnostics():
             )
 
 
-# ---------------------------------------------------------------
-# 화면
-# ---------------------------------------------------------------
+# ===============================================================
+# 18. 화면
+# ===============================================================
 
 def main():
     state = st.session_state
@@ -1945,11 +2079,14 @@ def main():
 
     st.caption(
         "Toss 지수와 최근 24시간 뉴스 RSS를 수집한 뒤, "
-        "Groq 무료 API로 장전 브리핑 원본과 압축본을 생성합니다. "
+        "Groq API로 장전 브리핑 원본과 압축본을 생성합니다. "
         "오후 시황은 왼쪽 메뉴의 'app'에서 작성합니다."
     )
 
-    # 1) 해외 지수
+    # -----------------------------------------------------------
+    # ① 해외 지수
+    # -----------------------------------------------------------
+
     st.markdown("### 🌎 ① 해외 지수·지표 확인")
 
     with st.container(border=True):
@@ -1984,7 +2121,10 @@ def main():
                 "생성 버튼을 누르면 지수도 자동으로 먼저 조회합니다."
             )
 
-    # 2) 생성
+    # -----------------------------------------------------------
+    # ② 생성
+    # -----------------------------------------------------------
+
     st.markdown("### ✨ ② 장전 시황 생성")
 
     with st.container(border=True):
@@ -2024,7 +2164,10 @@ def main():
         if state.get("pm_note"):
             col_c.caption(state["pm_note"])
 
-    # 3) 결과
+    # -----------------------------------------------------------
+    # ③ 결과
+    # -----------------------------------------------------------
+
     st.markdown("### 📝 ③ 결과")
 
     tab_short, tab_long = st.tabs(
@@ -2064,7 +2207,10 @@ def main():
                 "직접 붙여넣은 원문만 압축한 경우에는 표시되지 않습니다."
             )
 
-    # 4) API 진단
+    # -----------------------------------------------------------
+    # ④ API 진단
+    # -----------------------------------------------------------
+
     show_api_diagnostics()
 
 
