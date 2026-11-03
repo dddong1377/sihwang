@@ -3957,10 +3957,6 @@ def md_to_html(markdown):
     first_row = False
     para = []
 
-    header_style = (
-        " style='background-color:#F2F3F5;font-weight:normal;text-align:left'"
-    )
-
     def inline(text):
         safe = html.escape(text)
         return re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", safe)
@@ -3989,7 +3985,8 @@ def md_to_html(markdown):
                 output.append(
                     "<table border='1' cellpadding='6' "
                     "cellspacing='0' "
-                    "style='border-collapse:collapse;margin:0 0 10px'>"
+                    "style='border-collapse:collapse;margin:0 0 10px;"
+                    "width:100%;table-layout:auto'>"
                 )
                 in_table = True
                 first_row = True
@@ -3999,10 +3996,24 @@ def md_to_html(markdown):
             for cell in cells:
                 safe = inline(cell)
 
+                numeric = bool(
+                    re.fullmatch(r"[\s\d,.+\-%원🔺🔻➖▲▼]+", cell.replace("*", ""))
+                )
+
+                wrap_style = (
+                    "white-space:nowrap" if numeric
+                    else "word-break:break-all;overflow-wrap:anywhere"
+                )
+
                 if first_row:
-                    rendered_cells.append(f"<th{header_style}>{safe}</th>")
+                    rendered_cells.append(
+                        f"<th style='background-color:#F2F3F5;font-weight:normal;"
+                        f"text-align:left;{wrap_style}'>{safe}</th>"
+                    )
                 else:
-                    rendered_cells.append(f"<td>{safe}</td>")
+                    rendered_cells.append(
+                        f"<td style='{wrap_style}'>{safe}</td>"
+                    )
 
             output.append(
                 "<tr>" + "".join(rendered_cells) + "</tr>"
