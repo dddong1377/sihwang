@@ -3989,7 +3989,7 @@ def md_to_html(markdown):
                 output.append(
                     "<table border='1' cellpadding='6' "
                     "cellspacing='0' "
-                    "style='border-collapse:collapse'>"
+                    "style='border-collapse:collapse;margin:0 0 10px'>"
                 )
                 in_table = True
                 first_row = True
@@ -4019,13 +4019,13 @@ def md_to_html(markdown):
         if line.startswith("# "):
             flush_para()
             output.append(
-                "<h1>" + html.escape(line[2:]) + "</h1>"
+                "<h1 style='margin:0 0 12px'>" + html.escape(line[2:]) + "</h1>"
             )
 
         elif line.startswith("### "):
             flush_para()
             output.append(
-                "<h3>" + html.escape(line[4:]) + "</h3>"
+                "<h3 style='margin:18px 0 6px'>" + html.escape(line[4:]) + "</h3>"
             )
 
         elif line.strip():
