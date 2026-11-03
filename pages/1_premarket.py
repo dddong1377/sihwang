@@ -21,7 +21,7 @@ WEEKDAYS = "월화수목금토일"
 # Gemini API 설정
 # ---------------------------------------------------------------
 
-GEMINI_MODEL = "models/gemini-3.8-flash"
+GEMINI_MODEL = "models/gemini-2.5-flash"
 
 # 일시적인 요청 제한일 때만 재시도
 GEMINI_RETRY_WAIT = 20
