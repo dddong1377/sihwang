@@ -4435,20 +4435,8 @@ def apply_label_style(theme_mode="라이트"):
 
 
 def main():
-    st.session_state.setdefault("mtnw_theme_mode", "라이트")
-    title_col, theme_col = st.columns([4.5, 1.5], vertical_alignment="center")
-    with title_col:
-        st.title("MTNW 오후 시황")
-    with theme_col:
-        st.radio(
-            "화면 테마",
-            ["라이트", "블랙"],
-            horizontal=True,
-            key="mtnw_theme_mode",
-            label_visibility="collapsed",
-        )
-
-    apply_label_style(st.session_state.get("mtnw_theme_mode", "라이트"))
+     st.title("MTNW 오후 시황")
+    apply_label_style()
 
     # 시총 100위 모드를 기본값으로 시작합니다.
     st.session_state.setdefault("uni_all", False)
@@ -5013,7 +5001,7 @@ def main():
 def apply_label_style(theme_mode="라이트"):
     """네이버페이 증권 느낌의 화이트 카드 UI. 상승=빨강, 하락=파랑(국내 증권 관례)."""
 
-    dark = theme_mode == "블랙"
+    dark = False  # 라이트 전용
 
     if dark:
         page_bg, card_bg, card_alt = "#101215", "#1A1D21", "#23272D"
