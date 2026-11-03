@@ -4788,6 +4788,46 @@ def main():
                 elif not toss_news_error:
                     st.caption("아직 조회된 뉴스가 없습니다. ‘토스 뉴스 불러오기’를 눌러 주세요.")
 
+           # ---- 이슈 입력 카드 UI (뉴스 포커스 스타일) ----
+            st.markdown(
+                """
+                <style>
+                [class*="st-key-issue_card_"] {
+                    background: var(--card);
+                    border: 1px solid var(--line) !important;
+                    border-radius: 14px !important;
+                    overflow: hidden;
+                    box-shadow: 0 1px 3px rgba(25, 31, 40, .05);
+                    margin-bottom: .6rem;
+                }
+                .is-head {
+                    margin: -1rem -1rem .9rem;
+                    padding: .85rem 1.1rem;
+                    background: var(--alt);
+                    border-bottom: 1px solid var(--hair);
+                    font-size: 1.05rem;
+                    font-weight: 800;
+                    color: var(--text);
+                }
+                .is-head span {
+                    margin-left: .5rem;
+                    font-size: .8rem;
+                    font-weight: 500;
+                    color: var(--muted);
+                }
+                .is-sub {
+                    margin: .9rem 0 .2rem;
+                    padding-top: .8rem;
+                    border-top: 1px solid var(--hair);
+                    font-size: .82rem;
+                    font-weight: 700;
+                    color: var(--muted);
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+
             issues = [
                 (1, "🔺", "당일 상승률 상위 종목 흐름"),
                 (2, "🔻", "당일 하락률 상위 종목 흐름"),
@@ -4798,72 +4838,87 @@ def main():
                 st.session_state.setdefault(f"is{i}m", direction)
                 st.session_state.setdefault(f"is{i}t", title)
 
-                st.markdown(f"**이슈 {i}**")
+                with st.container(border=True, key=f"issue_card_{i}"):
+                    st.markdown(
+                        f"<div class='is-head'>이슈 {i}"
+                        "<span>제목 · 기사 · 요약 · 체크</span></div>",
+                        unsafe_allow_html=True,
+                    )
 
-                a, b, c = st.columns([1, 3, 3])
+                    a, b, c = st.columns([1, 3, 3])
 
-                a.selectbox(
-                    "방향",
-                    ["🔺", "🔻", "➖"],
-                    key=f"is{i}m",
-                )
+                    a.selectbox(
+                        "방향",
+                        ["🔺", "🔻", "➖"],
+                        key=f"is{i}m",
+                    )
 
-                b.text_area(
-                    "제목",
-                    key=f"is{i}t",
-                    height=68,
-                )
+                    b.text_area(
+                        "제목",
+                        key=f"is{i}t",
+                        height=68,
+                    )
 
-                c.text_area(
-                    "관련 종목",
-                    key=f"is{i}s",
-                    height=68,
-                )
+                    c.text_area(
+                        "관련 종목",
+                        key=f"is{i}s",
+                        height=68,
+                    )
 
-                l1, l2 = st.columns([5, 1.4], vertical_alignment="bottom")
+                    st.markdown(
+                        "<div class='is-sub'>기사 가져오기</div>",
+                        unsafe_allow_html=True,
+                    )
 
-                l1.text_input(
-                    "기사 링크",
-                    key=f"is{i}link",
-                    placeholder="https://...",
-                )
+                    l1, l2 = st.columns([5, 1.4], vertical_alignment="bottom")
 
-                l2.button(
-                    "기사 불러오기",
-                    key=f"is{i}fetch",
-                    on_click=load_article,
-                    args=(i,),
-                )
+                    l1.text_input(
+                        "기사 링크",
+                        key=f"is{i}link",
+                        placeholder="https://...",
+                    )
 
-                st.text_area(
-                    "기사 내용 (링크로 불러오거나 직접 붙여넣기)",
-                    key=f"is{i}src",
-                    height=110,
-                )
+                    l2.button(
+                        "기사 불러오기",
+                        key=f"is{i}fetch",
+                        on_click=load_article,
+                        args=(i,),
+                    )
 
-                s1, s2 = st.columns([1.4, 5], vertical_alignment="center")
+                    st.text_area(
+                        "기사 내용 (링크로 불러오거나 직접 붙여넣기)",
+                        key=f"is{i}src",
+                        height=110,
+                    )
 
-                s1.button(
-                    "✨ 핵심 정리",
-                    key=f"is{i}sum",
-                    on_click=summarize_issue,
-                    args=(i,),
-                )
+                    st.markdown(
+                        "<div class='is-sub'>시황글에 들어갈 내용</div>",
+                        unsafe_allow_html=True,
+                    )
 
-                if st.session_state.get(f"is{i}note"):
-                    s2.caption(st.session_state[f"is{i}note"])
+                    s1, s2 = st.columns([1.4, 5], vertical_alignment="center")
 
-                st.text_area(
-                    "내용",
-                    key=f"is{i}c",
-                    height=110,
-                )
+                    s1.button(
+                        "✨ 핵심 정리",
+                        key=f"is{i}sum",
+                        on_click=summarize_issue,
+                        args=(i,),
+                    )
 
-                st.text_area(
-                    "체크",
-                    key=f"is{i}k",
-                    height=68,
-                )
+                    if st.session_state.get(f"is{i}note"):
+                        s2.caption(st.session_state[f"is{i}note"])
+
+                    st.text_area(
+                        "내용",
+                        key=f"is{i}c",
+                        height=110,
+                    )
+
+                    st.text_area(
+                        "체크",
+                        key=f"is{i}k",
+                        height=68,
+                    )
 
             st.session_state.setdefault("themes", "AI 반도체 · 2차전지")
 
