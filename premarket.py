@@ -15,6 +15,8 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
+from archive import save_post
+
 
 st.set_page_config(page_title="MTNW 장전 시황", layout="wide")
 
@@ -3463,6 +3465,18 @@ def main():
                     st.markdown(f"- {alt}")
 
         short = state.get("pm_short", "").strip()
+
+        if short:
+            copy_buttons(short)
+
+            # ▼▼▼ 여기에 추가 (들여쓰기 공백 12칸) ▼▼▼
+            if st.button("💾 오늘 장전 시황글 저장 (주간 정리용)", key="save_pre_btn"):
+                save_post("pre", short)
+                st.success("장전 시황글을 저장했습니다.")
+            # ▲▲▲ 여기까지 ▲▲▲
+
+            with st.container(border=True):
+                st.markdown(short)
 
         if short:
             copy_buttons(short)
