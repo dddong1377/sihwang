@@ -1900,10 +1900,6 @@ def main():
             [f"{DAY_LABELS[i]} {day.month}/{day.day}" for i, day in enumerate(days)]
         )
 
-        tabs = st.tabs(
-            [f"{DAY_LABELS[i]} {day.month}/{day.day}" for i, day in enumerate(days)]
-        )
-
         for i, tab in enumerate(tabs):
             with tab:
                 col_pre, col_aft = st.columns(2)
