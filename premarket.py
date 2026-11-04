@@ -16,6 +16,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from archive import save_post
+from usage_store import load_usage, add_usage
 
 
 st.set_page_config(page_title="MTNW 장전 시황", layout="wide")
