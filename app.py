@@ -15,6 +15,12 @@ pages = [
         icon="🌅",
         url_path="premarket",
     ),
+    st.Page(
+        "weekly.py",
+        title="주간 정리",
+        icon="🗓️",
+        url_path="weekly",
+    ),
 ]
 
 st.markdown(
