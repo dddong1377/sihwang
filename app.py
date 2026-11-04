@@ -5394,4 +5394,13 @@ def render_market_cards(snapshot):
         indices.get(k, {}).get("pct") is None for k in ("kospi", "kosdaq")
     ):
         st.caption("전일 종가를 확인할 수 없는 지수는 등락률을 표시하지 않았습니다.")
+def toss_proxies():
+    """토스 Open API 요청에만 쓰는 프록시 설정. 없으면 None(직접 연결)."""
+ 
+    url = secret("TOSS_PROXY_URL").strip()
+ 
+    if not url:
+        return None
+ 
+    return {"http": url, "https": url}
 main()
