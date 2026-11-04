@@ -970,6 +970,7 @@ def fetch_news(name, today):
                 found.append({
                     "title": title,
                     "time": published.strftime("%H:%M"),
+                    "link": item.get("originallink") or item.get("link") or "",
                 })
 
         return found[:3]
@@ -985,11 +986,12 @@ def cached_news(name, day_text):
     return fetch_news(name, datetime.date.fromisoformat(day_text))
 
 
-def toss_stock_headlines(name, symbol):
-    """토스 대시보드 뉴스(주요·최신·급등주)에서 이 종목과 연결된 기사 제목을 찾습니다."""
+def toss_stock_sources(name, symbol):
+    """토스 대시보드 뉴스에서 이 종목과 연결된 기사(제목·링크·언론사)를 찾습니다."""
 
     key = _norm_name(name)
     found = []
+    seen = set()
 
     for news_type in ("SOARING_STOCK", "ALL_HIGHLIGHT", "HOT"):
         try:
@@ -1020,8 +1022,14 @@ def toss_stock_headlines(name, symbol):
                 or key in _norm_name(title)
             )
 
-            if matched and title not in found:
-                found.append(title)
+            if matched and title not in seen:
+                seen.add(title)
+                found.append({
+                    "title": title,
+                    "url": item.get("url", ""),
+                    "press": item.get("source") or "토스증권",
+                    "time": item.get("published", ""),
+                })
 
     return found
 
@@ -1089,26 +1097,37 @@ def short_reason(name, direction, titles):
 
 
 def enrich_stock(stock, day):
-    """토스 뉴스(우선) + 네이버 뉴스로 상승/하락 이유와 테마를 채웁니다."""
+    """토스 뉴스(우선) + 네이버 뉴스로 상승/하락 이유와 테마를 채우고, 출처를 함께 저장합니다."""
 
-    naver = cached_news(stock["name"], day.isoformat())
+    stock["sources"] = []
 
-    titles = toss_stock_headlines(stock["name"], stock["symbol"])
+    sources = toss_stock_sources(stock["name"], stock["symbol"])
+    seen = {source["title"] for source in sources}
 
-    for headline in naver:
-        if headline["title"] not in titles:
-            titles.append(headline["title"])
+    for headline in cached_news(stock["name"], day.isoformat()):
+        if headline["title"] in seen:
+            continue
 
-    if not titles:
+        seen.add(headline["title"])
+        sources.append({
+            "title": headline["title"],
+            "url": headline.get("link", ""),
+            "press": "네이버 뉴스",
+            "time": headline.get("time", ""),
+        })
+
+    sources = sources[:5]
+
+    if not sources:
         stock["reason"] = "-"
         return
 
+    titles = tuple(source["title"] for source in sources)
+
     direction = "상승" if stock["pct"] >= 0 else "하락"
 
-    stock["reason"] = short_reason(
-        stock["name"], direction, tuple(titles[:5])
-    )
-
+    stock["sources"] = sources
+    stock["reason"] = short_reason(stock["name"], direction, titles)
     stock["theme"] = classify_theme(stock["name"], titles)
 
 
@@ -4387,12 +4406,42 @@ def render_stock_section(
 
         st.session_state[reason_auto_key] = stock["reason"]
 
-        stock["reason"] = d.text_input(
+        text_col, info_col = d.columns([7, 1], vertical_alignment="center")
+
+        stock["reason"] = text_col.text_input(
             reason_label,
             key=reason_key,
             label_visibility="collapsed",
             disabled=not show_reason,
         )
+
+        sources = stock.get("sources") or []
+
+        with info_col.popover(
+            "ⓘ",
+            help="이유 요약에 사용한 뉴스 출처",
+            disabled=not sources,
+            use_container_width=True,
+        ):
+            st.markdown(f"**{stock['name']} · {reason_label} 출처**")
+
+            for source in sources:
+                safe_title = (
+                    source["title"].replace("[", "(").replace("]", ")")
+                )
+
+                meta = " · ".join(
+                    part for part in (source.get("press"), source.get("time"))
+                    if part
+                )
+
+                if source.get("url"):
+                    st.markdown(f"- [{safe_title}]({source['url']})")
+                else:
+                    st.markdown(f"- {safe_title}")
+
+                if meta:
+                    st.caption(meta)
 
         stock["theme"] = e.text_input(
             "테마",
