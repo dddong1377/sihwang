@@ -13,6 +13,8 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
+from archive import load_post
+
 
 st.set_page_config(page_title="MTNW 주간 정리", layout="wide")
 
@@ -1824,7 +1826,31 @@ def copy_buttons(markdown):
 # ===============================================================
 # 10. 화면
 # ===============================================================
+def fill_from_archive(monday):
+    """저장된 장전·오후 시황글을 월~금 입력칸에 채웁니다."""
 
+    found_pre = found_aft = 0
+
+    for i in range(5):
+        day = monday + datetime.timedelta(days=i)
+
+        pre = load_post("pre", day)
+        aft = load_post("aft", day)
+
+        if pre:
+            st.session_state[f"wk_pre_{i}"] = pre
+            found_pre += 1
+
+        if aft:
+            st.session_state[f"wk_aft_{i}"] = aft
+            found_aft += 1
+
+    st.session_state["wk_archive_note"] = (
+        f"저장분 불러오기 완료 · 장전 {found_pre}건 · 오후 {found_aft}건"
+        if (found_pre or found_aft)
+        else "이 주에 저장된 시황글이 없습니다. 직접 붙여넣어 주세요."
+    )
+    
 def main():
     state = st.session_state
 
@@ -1856,6 +1882,23 @@ def main():
         next_monday = monday + datetime.timedelta(days=7)
 
         days = [monday + datetime.timedelta(days=i) for i in range(5)]
+
+        # ▼▼▼ 여기에 추가 (들여쓰기 공백 8칸) ▼▼▼
+        load_col, load_note = st.columns([1.8, 5], vertical_alignment="center")
+
+        load_col.button(
+            "📥 저장된 시황글 불러오기",
+            on_click=fill_from_archive,
+            args=(monday,),
+        )
+
+        if state.get("wk_archive_note"):
+            load_note.caption(state["wk_archive_note"])
+        # ▲▲▲ 여기까지 ▲▲▲
+
+        tabs = st.tabs(
+            [f"{DAY_LABELS[i]} {day.month}/{day.day}" for i, day in enumerate(days)]
+        )
 
         tabs = st.tabs(
             [f"{DAY_LABELS[i]} {day.month}/{day.day}" for i, day in enumerate(days)]
