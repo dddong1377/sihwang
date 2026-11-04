@@ -16,6 +16,8 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from realtime_feed import TossFeed
+from realtime_feed import TossFeed
+from archive import save_post
 
 st.set_page_config(page_title="MTNW 오후 시황", layout="wide")
 
