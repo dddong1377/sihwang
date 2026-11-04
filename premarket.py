@@ -296,40 +296,6 @@ USAGE_FILE = os.path.join(
 # 화면 맨 위 표시 영역 (main()에서 지정)
 TOKEN_BOX = {"box": None}
 
-
-def load_usage():
-    today = datetime.datetime.now(KST).strftime("%Y-%m-%d")
-
-    try:
-        with open(USAGE_FILE, "r", encoding="utf-8") as file:
-            data = json.load(file)
-    except Exception:
-        data = {}
-
-    if not isinstance(data, dict) or data.get("date") != today:
-        data = {"date": today, "tokens": 0, "calls": 0}
-
-    return data
-
-
-def add_usage(tokens):
-    try:
-        tokens = int(tokens)
-    except (TypeError, ValueError):
-        return
-
-    data = load_usage()
-
-    data["tokens"] = int(data.get("tokens", 0)) + tokens
-    data["calls"] = int(data.get("calls", 0)) + 1
-
-    try:
-        with open(USAGE_FILE, "w", encoding="utf-8") as file:
-            json.dump(data, file)
-    except Exception:
-        pass
-
-
 def format_token_value(value):
     try:
         return f"{int(value):,}"
