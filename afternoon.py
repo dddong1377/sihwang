@@ -985,18 +985,131 @@ def cached_news(name, day_text):
     return fetch_news(name, datetime.date.fromisoformat(day_text))
 
 
-def enrich_stock(stock, day):
-    """종목별 당일 기사로 상승/하락 이유와 테마를 채웁니다."""
+def toss_stock_headlines(name, symbol):
+    """토스 대시보드 뉴스(주요·최신·급등주)에서 이 종목과 연결된 기사 제목을 찾습니다."""
 
-    headlines = cached_news(stock["name"], day.isoformat())
+    key = _norm_name(name)
+    found = []
 
-    if headlines:
-        stock["reason"] = headlines[0]["title"]
+    for news_type in ("SOARING_STOCK", "ALL_HIGHLIGHT", "HOT"):
+        try:
+            items = fetch_toss_dashboard_news(news_type)
+        except Exception:
+            continue
 
-        stock["theme"] = classify_theme(
-            stock["name"],
-            [headline["title"] for headline in headlines]
+        for item in items:
+            related = set()
+
+            for entry in item.get("related_stocks") or []:
+                if isinstance(entry, dict):
+                    for field in ("name", "stockName", "symbol",
+                                  "productCode", "code", "stockCode"):
+                        value = entry.get(field)
+
+                        if value:
+                            related.add(_norm_name(value))
+
+                elif entry:
+                    related.add(_norm_name(entry))
+
+            title = item.get("title", "")
+
+            matched = (
+                key in related
+                or any(symbol and symbol in value for value in related)
+                or key in _norm_name(title)
+            )
+
+            if matched and title not in found:
+                found.append(title)
+
+    return found
+
+
+def clean_headline(title, name):
+    """기사 제목에서 [특징주] 같은 머리표와 종목명을 걷어 냅니다."""
+
+    title = re.sub(r"^\s*(\[[^\]]{1,10}\]\s*)+", "", str(title))
+    title = title.replace(name, "").strip(" ,·…-:")
+
+    return re.sub(r"\s+", " ", title)[:40]
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def short_reason(name, direction, titles):
+    """기사 제목들로 '왜 올랐는지/내렸는지'를 한 구절로 요약합니다. (1시간 캐시)
+    ANTHROPIC_API_KEY가 없거나 실패하면 첫 기사 제목을 짧게 다듬어 씁니다."""
+
+    fallback = clean_headline(titles[0], name) or "-"
+
+    if not secret("ANTHROPIC_API_KEY"):
+        return fallback
+
+    try:
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": secret("ANTHROPIC_API_KEY"),
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": secret("ANTHROPIC_MODEL", "claude-haiku-5-5"),
+                "max_tokens": 80,
+                "messages": [{
+                    "role": "user",
+                    "content": (
+                        f"종목 '{name}'의 오늘 기사 제목들이다.\n"
+                        + "\n".join(f"- {t}" for t in titles)
+                        + f"\n\n이 종목이 오늘 {direction}한 이유를 제목에 근거해 "
+                        "25자 이내의 한 구절로 쓴다.\n"
+                        "규칙: 제목에 없는 사실·원인을 만들지 않는다. "
+                        "이유를 알 수 없으면 '-' 한 글자만 출력한다. "
+                        "매수·매도 권유 표현 금지. 명사형으로 끝낸다"
+                        "(예: 신규 수주 기대, 실적 부진 우려). "
+                        "따옴표·설명 없이 구절만 출력한다."
+                    ),
+                }],
+            },
+            timeout=15,
         )
+
+        if response.status_code != 200:
+            return fallback
+
+        parts = response.json().get("content", [])
+        text = "".join(
+            p.get("text", "") for p in parts if p.get("type") == "text"
+        ).strip(" \"'“”‘’\n")
+
+        return text[:40] if text else fallback
+
+    except Exception:
+        return fallback
+
+
+def enrich_stock(stock, day):
+    """토스 뉴스(우선) + 네이버 뉴스로 상승/하락 이유와 테마를 채웁니다."""
+
+    naver = cached_news(stock["name"], day.isoformat())
+
+    titles = toss_stock_headlines(stock["name"], stock["symbol"])
+
+    for headline in naver:
+        if headline["title"] not in titles:
+            titles.append(headline["title"])
+
+    if not titles:
+        stock["reason"] = "-"
+        return
+
+    direction = "상승" if stock["pct"] >= 0 else "하락"
+
+    stock["reason"] = short_reason(
+        stock["name"], direction, tuple(titles[:5])
+    )
+
+    stock["theme"] = classify_theme(stock["name"], titles)
 
 
 def parse_naver_market_sum(page_html, market):
@@ -4262,10 +4375,21 @@ def render_stock_section(
         if edited_pct is not None:
             stock["pct"] = edited_pct
 
+        reason_key = f"{prefix}_reason_{key_tag}_{stock['symbol']}"
+        reason_auto_key = f"{reason_key}__auto"
+
+        # 직접 고친 칸은 그대로 두고, 고치지 않은 칸만 새 자동값으로 갱신
+        if (
+            reason_key not in st.session_state
+            or st.session_state[reason_key] == st.session_state.get(reason_auto_key)
+        ):
+            st.session_state[reason_key] = stock["reason"]
+
+        st.session_state[reason_auto_key] = stock["reason"]
+
         stock["reason"] = d.text_input(
             reason_label,
-            value=stock["reason"],
-            key=f"{prefix}_reason_{key_tag}_{stock['symbol']}",
+            key=reason_key,
             label_visibility="collapsed",
             disabled=not show_reason,
         )
@@ -4619,7 +4743,7 @@ def main():
 
         if reset_clicked:
             for key in list(st.session_state.keys()):
-                if "_price_" in key or "_pct_" in key:
+                if "_price_" in key or "_pct_" in key or "_reason_" in key:
                     del st.session_state[key]
 
         stale = (
