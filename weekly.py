@@ -14,6 +14,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from archive import load_post
+from usage_store import load_usage, add_usage
 
 
 st.set_page_config(page_title="MTNW 주간 정리", layout="wide")
@@ -42,7 +43,6 @@ HEADLINE_TEMPERATURE = 0.8
 
 # 장전 시황 페이지와 같은 파일을 써서 하루 사용량을 함께 집계합니다.
 GROQ_DAILY_TOKEN_LIMIT = 200_000
-USAGE_FILE = os.path.join(tempfile.gettempdir(), "mtnw_groq_usage.json")
 
 # 다음 주 일정: 하루에 표시할 최대 행 수
 SCHEDULE_PER_DAY = 6
@@ -121,39 +121,6 @@ def estimate_tokens(text):
         return 0
 
     return math.ceil(len(text) / CHARS_PER_TOKEN_ESTIMATE)
-
-
-def load_usage():
-    today = datetime.datetime.now(KST).strftime("%Y-%m-%d")
-
-    try:
-        with open(USAGE_FILE, "r", encoding="utf-8") as file:
-            data = json.load(file)
-    except Exception:
-        data = {}
-
-    if not isinstance(data, dict) or data.get("date") != today:
-        data = {"date": today, "tokens": 0, "calls": 0}
-
-    return data
-
-
-def add_usage(tokens):
-    try:
-        tokens = int(tokens)
-    except (TypeError, ValueError):
-        return
-
-    data = load_usage()
-
-    data["tokens"] = int(data.get("tokens", 0)) + tokens
-    data["calls"] = int(data.get("calls", 0)) + 1
-
-    try:
-        with open(USAGE_FILE, "w", encoding="utf-8") as file:
-            json.dump(data, file)
-    except Exception:
-        pass
 
 
 def show_token_status(box):
