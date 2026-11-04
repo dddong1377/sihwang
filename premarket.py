@@ -3478,12 +3478,6 @@ def main():
             with st.container(border=True):
                 st.markdown(short)
 
-        if short:
-            copy_buttons(short)
-
-            with st.container(border=True):
-                st.markdown(short)
-
     with tab_long:
         long_text = state.get("pm_long", "").strip()
 
