@@ -5086,6 +5086,12 @@ def main():
 
         copy_buttons(build_markdown(snapshot, NOW_TOKEN))
 
+        # ▼▼▼ 여기에 추가 (들여쓰기 공백 8칸) ▼▼▼
+        if st.button("💾 오늘 오후 시황글 저장 (주간 정리용)", key="save_aft_btn"):
+            save_post("aft", markdown)
+            st.toast("오후 시황글을 저장했습니다.", icon="✅")
+        # ▲▲▲ 여기까지 ▲▲▲
+
         with st.container(border=True, key="preview_container"):
             st.markdown(markdown)
 
