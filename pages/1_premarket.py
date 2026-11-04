@@ -4010,4 +4010,36 @@ def build_compress_source(ctx, parts):
             )
 
         keys.remove(optional_in[-1])
+
+from streamlit.delta_generator import DeltaGenerator
+
+
+def _plain_metric(
+    self,
+    label,
+    value,
+    delta=None,
+    delta_color="normal",
+    help=None,
+    label_visibility="visible",
+    **kwargs,
+):
+    parts = [
+        "<div style='margin:0 0 .4rem'>",
+        f"<div style='font-size:.8rem;color:#8B95A1'>{html.escape(str(label))}</div>",
+        "<div style='font-size:1.45rem;font-weight:800;line-height:1.3'>"
+        f"{html.escape(str(value))}</div>",
+    ]
+
+    if delta is not None:
+        parts.append(
+            f"<div style='font-size:.8rem;color:#8B95A1'>{html.escape(str(delta))}</div>"
+        )
+
+    parts.append("</div>")
+
+    return self.markdown("".join(parts), unsafe_allow_html=True)
+
+
+DeltaGenerator.metric = _plain_metric
 main()
