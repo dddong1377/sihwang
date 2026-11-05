@@ -2788,6 +2788,7 @@ def fetch_toss_dashboard_news(news_type="ALL_HIGHLIGHT", index_code=None, limit=
             "nation": str(row.get("nation", "")).strip(),
             "image_url": str(row.get("imageUrl", "")).strip(),
             "related_stocks": row.get("relatedStocks", []) or [],
+            "raw": row,
         })
         if len(normalized) >= max(1, min(int(limit), 20)):
             break
@@ -5024,6 +5025,11 @@ def main():
                 toss_news_items = st.session_state.get("toss_dashboard_news", []) or []
                 if toss_news_items:
                     news_note_col.caption(f"{len(toss_news_items)}건 표시 · 조회 결과는 최대 3분간 캐시됩니다.")
+
+                    with st.expander("🔧 토스 뉴스 원본 구조 확인 (첫 번째 기사)"):
+                        st.json(toss_news_items[0].get("raw") or {})
+
+                    for news_idx, news_item in enumerate(toss_news_items):
                     for news_idx, news_item in enumerate(toss_news_items):
                         news_title = news_item.get("title", "")
                         metadata = " · ".join(
