@@ -1026,7 +1026,11 @@ def toss_stock_sources(name, symbol):
                 seen.add(title)
                 found.append({
                     "title": title,
-                    "url": item.get("url", ""),
+                    "url": item.get("url") or (
+                        "https://search.naver.com/search.naver?where=news&query="
+                        + quote(title)
+                    ),
+                    "direct": bool(item.get("url")),
                     "press": item.get("source") or "토스증권",
                     "time": item.get("published", ""),
                 })
@@ -2589,6 +2593,40 @@ def _toss_web_request(path, method="GET", params=None, body=None):
         return payload["result"]
     return payload
 
+def _find_news_url(row):
+    """뉴스 항목 안에서 기사 주소로 보이는 값을 찾습니다. (중첩 구조 포함, 이미지 주소 제외)"""
+
+    if isinstance(row, dict):
+        for key, value in row.items():
+            name = str(key).lower()
+
+            if "image" in name or "thumbnail" in name:
+                continue
+
+            if isinstance(value, str) and ("url" in name or "link" in name):
+                value = value.strip()
+
+                if value.startswith(("http://", "https://")):
+                    return value
+
+                if value.startswith("/"):
+                    return "https://www.tossinvest.com" + value
+
+        for value in row.values():
+            if isinstance(value, (dict, list)):
+                found = _find_news_url(value)
+
+                if found:
+                    return found
+
+    elif isinstance(row, list):
+        for value in row:
+            found = _find_news_url(value)
+
+            if found:
+                return found
+
+    return ""
 
 @st.cache_data(ttl=180, show_spinner=False)
 def fetch_toss_dashboard_news(news_type="ALL_HIGHLIGHT", index_code=None, limit=12):
@@ -2724,7 +2762,8 @@ def fetch_toss_dashboard_news(news_type="ALL_HIGHLIGHT", index_code=None, limit=
         seen.add(title)
         url = (
             row.get("url") or row.get("link") or row.get("newsUrl")
-            or row.get("originalUrl") or row.get("articleUrl") or row.get("linkUrl") or ""
+            or row.get("originalUrl") or row.get("articleUrl") or row.get("linkUrl")
+            or _find_news_url(row) or ""
         )
         summary = (
             row.get("summary") or row.get("description") or row.get("content")
@@ -4436,7 +4475,9 @@ def render_stock_section(
                 )
 
                 if source.get("url"):
-                    st.markdown(f"- [{safe_title}]({source['url']})")
+                    safe_url = source["url"].replace(")", "%29").replace(" ", "%20")
+                    suffix = "" if source.get("direct", True) else " 🔍 검색 결과로 이동"
+                    st.markdown(f"- [{safe_title}]({safe_url}){suffix}")
                 else:
                     st.markdown(f"- {safe_title}")
 
