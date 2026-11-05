@@ -1148,8 +1148,7 @@ def fetch_company_news(company_code, day_text):
             "created": created,
         })
 
-    items.sort(key=lambda item: item["created"], reverse=True)
-
+    # API가 준 관련도순을 그대로 유지하고, 오늘 기사 중 앞에서 3건만 사용
     return items[:3]
 
 
