@@ -15,7 +15,7 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
-from archive import save_post
+from archive import save_post, list_posts
 from usage_store import load_usage, add_usage
 
 
