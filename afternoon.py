@@ -5145,6 +5145,12 @@ def main():
 
         render_basis_status(snapshot)
 
+        if st.session_state.get("company_news_error"):
+            st.caption(
+                "⚠️ 토스 종목 뉴스 조회 실패: "
+                + st.session_state["company_news_error"]
+            )
+
         if is_cap and not krx_regular_open():
             st.info(
                 "지금은 KRX 정규장(평일 09:00~15:30) 시간이 아닙니다. "
