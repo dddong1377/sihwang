@@ -1043,6 +1043,150 @@ def toss_stock_sources(name, symbol):
 
     return found
 
+_COMPANY_NEWS_FAIL_AT = {}  # 조회에 실패한 종목은 2분간 재시도하지 않음
+
+
+def _toss_session_headers():
+    cookie = secret("TOSS_NEWS_COOKIE").strip()
+    xsrf_token = secret("TOSS_NEWS_XSRF_TOKEN").strip()
+    app_version = secret("TOSS_NEWS_APP_VERSION").strip()
+    browser_tab_id = secret("TOSS_NEWS_BROWSER_TAB_ID").strip()
+
+    if not (cookie and xsrf_token and app_version):
+        raise TossError("토스 뉴스 인증 정보가 없습니다.")
+
+    headers = {
+        "User-Agent": TOSS_WEB_HEADERS["User-Agent"],
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://www.tossinvest.com",
+        "Referer": "https://www.tossinvest.com/",
+        "app-version": app_version,
+        "x-xsrf-token": xsrf_token,
+        "Cookie": cookie,
+    }
+
+    if browser_tab_id:
+        headers["browser-tab-id"] = browser_tab_id
+
+    return headers
+
+
+def _news_rows(payload):
+    """응답이 어떻게 감싸져 있어도 기사 목록 배열을 찾아 돌려줍니다."""
+
+    if isinstance(payload, dict) and isinstance(payload.get("result"), (dict, list)):
+        payload = payload["result"]
+
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+
+    if isinstance(payload, dict):
+        for key in ("news", "items", "list", "contents", "results",
+                    "body", "articles", "data", "content"):
+            value = payload.get(key)
+
+            if isinstance(value, list):
+                rows = [row for row in value if isinstance(row, dict)]
+
+                if rows:
+                    return rows
+
+            elif isinstance(value, dict):
+                rows = _news_rows(value)
+
+                if rows:
+                    return rows
+
+    return []
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_company_news(company_code, day_text):
+    """토스 종목 뉴스(관련도순 20건) 중 오늘 기사만 최신순으로 3건. (10분 캐시)
+    실패하면 예외(캐시되지 않음)."""
+
+    response = requests.get(
+        f"{TOSS_WEB_BASE}/api/v2/news/companies/{quote(company_code, safe='')}",
+        params={"size": 20, "orderBy": "relevant"},
+        headers=_toss_session_headers(),
+        timeout=(5, 10),
+    )
+
+    if not response.ok:
+        raise TossError(f"토스 종목 뉴스 HTTP {response.status_code}")
+
+    payload = response.json()
+    rows = _news_rows(payload)
+
+    if not rows:
+        keys = ", ".join(map(str, list(payload.keys())[:10])) if isinstance(payload, dict) else type(payload).__name__
+        raise TossError(f"종목 뉴스 목록을 찾지 못했습니다. 응답 키: {keys}")
+
+    items = []
+
+    for row in rows:
+        news_id = str(row.get("id") or row.get("newsId") or "").strip()
+        title = re.sub(r"\s+", " ", str(row.get("title") or "")).strip()
+        created = str(row.get("createdAt") or row.get("publishedAt") or "")
+
+        if not news_id or not title or created[:10] != day_text:
+            continue
+
+        publisher = row.get("publisher")
+        source = row.get("source")
+
+        press = (
+            (publisher.get("name") if isinstance(publisher, dict) else "")
+            or (source.get("name") if isinstance(source, dict) else source if isinstance(source, str) else "")
+            or ""
+        )
+
+        items.append({
+            "id": news_id,
+            "title": title,
+            "press": str(press).strip(),
+            "created": created,
+        })
+
+    items.sort(key=lambda item: item["created"], reverse=True)
+
+    return items[:3]
+
+
+def toss_company_sources(symbol, day):
+    """종목 뉴스 → 출처 목록(토스 화면 링크 + 원문 링크)."""
+
+    code = re.sub(r"^[Aa]", "", str(symbol or "").strip())
+
+    if not re.fullmatch(r"\d{6}", code):
+        return []
+
+    if _COMPANY_NEWS_FAIL_AT.get(code, 0) > time.time() - 120:
+        return []
+
+    try:
+        items = fetch_company_news(code, day.isoformat())
+
+    except Exception as error:
+        _COMPANY_NEWS_FAIL_AT[code] = time.time()
+        st.session_state["company_news_error"] = f"{code}: {str(error)[:200]}"
+        return []
+
+    sources = []
+
+    for item in items:
+        detail = toss_news_detail(item["id"])
+
+        sources.append({
+            "title": item["title"],
+            "url": toss_news_web_link(item["id"], code),
+            "original": detail.get("link", ""),
+            "direct": True,
+            "press": item["press"] or detail.get("press") or "토스증권",
+            "time": item["created"][11:16],
+        })
+
+    return sources
 
 def clean_headline(title, name):
     """기사 제목에서 [특징주] 같은 머리표와 종목명을 걷어 냅니다."""
@@ -1107,24 +1251,32 @@ def short_reason(name, direction, titles):
 
 
 def enrich_stock(stock, day):
-    """토스 뉴스(우선) + 네이버 뉴스로 상승/하락 이유와 테마를 채우고, 출처를 함께 저장합니다."""
+    """토스 종목 뉴스(관련도순, 오늘 최신) → 토스 하이라이트 → 네이버 순으로 이유를 채웁니다."""
 
     stock["sources"] = []
 
-    sources = toss_stock_sources(stock["name"], stock["symbol"])
+    sources = toss_company_sources(stock["symbol"], day)
     seen = {source["title"] for source in sources}
 
-    for headline in cached_news(stock["name"], day.isoformat()):
-        if headline["title"] in seen:
-            continue
+    # 종목 뉴스가 3건 미만이면 대시보드 뉴스·네이버 뉴스로 보충
+    if len(sources) < 3:
+        for source in toss_stock_sources(stock["name"], stock["symbol"]):
+            if source["title"] not in seen:
+                seen.add(source["title"])
+                sources.append(source)
 
-        seen.add(headline["title"])
-        sources.append({
-            "title": headline["title"],
-            "url": headline.get("link", ""),
-            "press": "네이버 뉴스",
-            "time": headline.get("time", ""),
-        })
+    if len(sources) < 3:
+        for headline in cached_news(stock["name"], day.isoformat()):
+            if headline["title"] in seen:
+                continue
+
+            seen.add(headline["title"])
+            sources.append({
+                "title": headline["title"],
+                "url": headline.get("link", ""),
+                "press": "네이버 뉴스",
+                "time": headline.get("time", ""),
+            })
 
     sources = sources[:5]
 
