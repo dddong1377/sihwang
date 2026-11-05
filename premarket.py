@@ -2837,103 +2837,164 @@ def request_run(mode):
 # ===============================================================
 
 def md_to_html(markdown):
+    """마크다운을 HTML로 변환 (복사 (서식 포함) 버튼용).
+    - 표 머리글(첫 줄)은 연한 회색 배경
+    - 표의 열 너비는 칸 안 글자 길이에 비례해 첫 줄에 직접 지정
+      (게시판이 열 너비를 고정해도 긴 종목명이 옆 칸을 덮지 않게 합니다)
+    - 목록(- ), 제목(#, ##, ###), 인용(> ) 지원
+    - 빈 줄 없이 이어진 글줄은 한 문단 안에서 <br>로 줄바꿈"""
+
+    import unicodedata
+
     output = []
-    in_table = False
-    in_list = False
+    table_rows = []
+    list_items = []
+    para = []
 
     def inline(text):
         safe = html.escape(text)
+        return re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", safe)
 
-        return re.sub(
-            r"\*\*(.*?)\*\*",
-            r"<b>\1</b>",
-            safe,
+    def visual_width(text):
+        text = text.replace("*", "")
+        return sum(
+            2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+            for ch in text
         )
+
+    def flush_para():
+        if para:
+            output.append(
+                "<p style='margin:0 0 10px'>" + "<br>".join(para) + "</p>"
+            )
+            para.clear()
+
+    def flush_list():
+        if list_items:
+            output.append(
+                "<ul style='margin:0 0 10px'>"
+                + "".join(f"<li>{item}</li>" for item in list_items)
+                + "</ul>"
+            )
+            list_items.clear()
+
+    def flush_table():
+        if not table_rows:
+            return
+
+        columns = max(len(row) for row in table_rows)
+
+        weights = []
+
+        for index in range(columns):
+            longest = max(
+                visual_width(row[index]) if index < len(row) else 0
+                for row in table_rows
+            )
+            weights.append(max(longest, 6) + 3)
+
+        total = sum(weights)
+        widths = [round(weight * 100 / total) for weight in weights]
+        widths[-1] = 100 - sum(widths[:-1])  # 합계가 정확히 100%가 되도록
+
+        output.append(
+            "<table border='1' cellpadding='4' cellspacing='0' "
+            "style='border-collapse:collapse;margin:0 0 10px;width:100%'>"
+        )
+
+        for row_index, row in enumerate(table_rows):
+            cells_html = []
+
+            for col_index in range(columns):
+                cell = row[col_index] if col_index < len(row) else ""
+                safe = inline(cell)
+
+                numeric = bool(
+                    re.fullmatch(
+                        r"[\s\d,.+\-%원🔺🔻➖▲▼]+",
+                        cell.replace("*", ""),
+                    )
+                )
+
+                wrap_style = (
+                    "white-space:nowrap" if numeric
+                    else "word-break:break-all;overflow-wrap:anywhere"
+                )
+
+                if row_index == 0:
+                    cells_html.append(
+                        f"<th width='{widths[col_index]}%' "
+                        f"style='width:{widths[col_index]}%;"
+                        f"background-color:#F2F3F5;font-weight:normal;"
+                        f"text-align:left;{wrap_style}'>{safe}</th>"
+                    )
+                else:
+                    cells_html.append(
+                        f"<td style='{wrap_style}'>{safe}</td>"
+                    )
+
+            output.append("<tr>" + "".join(cells_html) + "</tr>")
+
+        output.append("</table>")
+        table_rows.clear()
 
     for line in markdown.splitlines():
         stripped = line.strip()
 
         if stripped.startswith("|"):
-            cells = [
-                cell.strip()
-                for cell in stripped.split("|")[1:-1]
-            ]
+            flush_para()
+            flush_list()
 
-            if all(
-                re.fullmatch(r":?-+:?", cell)
-                for cell in cells
-            ):
+            cells = [cell.strip() for cell in stripped.split("|")[1:-1]]
+
+            if all(re.fullmatch(r":?-+:?", cell) for cell in cells):
                 continue
 
-            if in_list:
-                output.append("</ul>")
-                in_list = False
-
-            if not in_table:
-                output.append(
-                    "<table border='1' cellpadding='6' cellspacing='0' "
-                    "style='border-collapse:collapse'>"
-                )
-                in_table = True
-
-            output.append(
-                "<tr>"
-                + "".join(
-                    f"<td>{inline(cell)}</td>"
-                    for cell in cells
-                )
-                + "</tr>"
-            )
+            table_rows.append(cells)
             continue
 
-        if in_table:
-            output.append("</table>")
-            in_table = False
+        flush_table()
 
         if stripped.startswith("- "):
-            if not in_list:
-                output.append("<ul>")
-                in_list = True
-
-            output.append(
-                f"<li>{inline(stripped[2:])}</li>"
-            )
+            flush_para()
+            list_items.append(inline(stripped[2:]))
             continue
 
-        if in_list:
-            output.append("</ul>")
-            in_list = False
+        flush_list()
 
         if stripped.startswith("### "):
+            flush_para()
             output.append(
-                f"<h3>{inline(stripped[4:])}</h3>"
+                "<h3 style='margin:18px 0 6px'>" + inline(stripped[4:]) + "</h3>"
             )
 
         elif stripped.startswith("## "):
+            flush_para()
             output.append(
-                f"<h2>{inline(stripped[3:])}</h2>"
+                "<h2 style='margin:0 0 12px'>" + inline(stripped[3:]) + "</h2>"
             )
 
         elif stripped.startswith("# "):
+            flush_para()
             output.append(
-                f"<h1>{inline(stripped[2:])}</h1>"
+                "<h1 style='margin:0 0 12px'>" + inline(stripped[2:]) + "</h1>"
             )
 
         elif stripped.startswith("> "):
+            flush_para()
             output.append(
-                f"<p>{inline(stripped[2:])}</p>"
+                "<p style='margin:0 0 10px'>" + inline(stripped[2:]) + "</p>"
             )
 
         elif stripped:
-            output.append(
-                f"<p>{inline(stripped)}</p>"
-            )
+            para.append(inline(stripped))
 
-    if in_table:
-        output.append("</table>")
+        else:
+            flush_para()
 
-    if in_list:
-        output.append("</ul>")
+    flush_para()
+    flush_list()
+    flush_table()
 
     return "\n".join(output)
 
