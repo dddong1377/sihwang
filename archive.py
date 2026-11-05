@@ -109,3 +109,18 @@ def save_post(kind, markdown, day=None):
 
 def load_post(kind, day):
     return _load().get(day.isoformat(), {}).get(kind, "")
+
+def list_posts(kind, limit=30):
+    """저장된 글을 최신 날짜순으로 [(날짜 ISO, 본문), ...] 돌려줍니다."""
+
+    data = _load()
+
+    items = [
+        (day, value[kind])
+        for day, value in data.items()
+        if isinstance(value, dict) and value.get(kind)
+    ]
+
+    items.sort(reverse=True)
+
+    return items[:limit]
