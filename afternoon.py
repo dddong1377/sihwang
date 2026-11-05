@@ -2593,6 +2593,9 @@ def _toss_web_request(path, method="GET", params=None, body=None):
         return payload["result"]
     return payload
 
+# 토스 뉴스 기사 주소 규칙. 열리지 않으면 이 한 줄만 고치면 됩니다.
+TOSS_NEWS_URL_TEMPLATE = "https://www.tossinvest.com/feed/news/{news_id}"
+    
 def _find_news_url(row):
     """뉴스 항목 안에서 기사 주소로 보이는 값을 찾습니다. (중첩 구조 포함, 이미지 주소 제외)"""
 
@@ -2765,6 +2768,10 @@ def fetch_toss_dashboard_news(news_type="ALL_HIGHLIGHT", index_code=None, limit=
             or row.get("originalUrl") or row.get("articleUrl") or row.get("linkUrl")
             or _find_news_url(row) or ""
         )
+        if not url and row.get("newsId"):
+            url = TOSS_NEWS_URL_TEMPLATE.format(
+                news_id=quote(str(row["newsId"]), safe="")
+            )
         summary = (
             row.get("summary") or row.get("description") or row.get("content")
             or row.get("subTitle") or row.get("shortDescription") or ""
