@@ -1024,15 +1024,21 @@ def toss_stock_sources(name, symbol):
 
             if matched and title not in seen:
                 seen.add(title)
+
+                news_id = item.get("news_id", "")
+                detail = toss_news_detail(news_id)
+                web_link = toss_news_web_link(news_id, symbol) if news_id else ""
+
                 found.append({
                     "title": title,
-                    "url": item.get("url") or (
+                    "url": web_link or detail.get("link") or item.get("url") or (
                         "https://search.naver.com/search.naver?where=news&query="
                         + quote(title)
                     ),
-                    "direct": bool(item.get("url")),
-                    "press": item.get("source") or "토스증권",
-                    "time": item.get("published", ""),
+                    "original": detail.get("link", ""),
+                    "direct": bool(web_link or detail.get("link") or item.get("url")),
+                    "press": detail.get("press") or item.get("source") or "토스증권",
+                    "time": detail.get("time") or item.get("published", ""),
                 })
 
     return found
@@ -2768,10 +2774,6 @@ def fetch_toss_dashboard_news(news_type="ALL_HIGHLIGHT", index_code=None, limit=
             or row.get("originalUrl") or row.get("articleUrl") or row.get("linkUrl")
             or _find_news_url(row) or ""
         )
-        if not url and row.get("newsId"):
-            url = TOSS_NEWS_URL_TEMPLATE.format(
-                news_id=quote(str(row["newsId"]), safe="")
-            )
         summary = (
             row.get("summary") or row.get("description") or row.get("content")
             or row.get("subTitle") or row.get("shortDescription") or ""
@@ -2807,6 +2809,79 @@ def fetch_toss_dashboard_news(news_type="ALL_HIGHLIGHT", index_code=None, limit=
         )
     return normalized
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_toss_news_detail(news_id):
+    """토스 기사 상세 API에서 원문 주소·언론사·발행 시각을 가져옵니다. (1시간 캐시)"""
+
+    cookie = secret("TOSS_NEWS_COOKIE").strip()
+    xsrf_token = secret("TOSS_NEWS_XSRF_TOKEN").strip()
+    app_version = secret("TOSS_NEWS_APP_VERSION").strip()
+    browser_tab_id = secret("TOSS_NEWS_BROWSER_TAB_ID").strip()
+
+    if not (cookie and xsrf_token and app_version):
+        raise TossError("토스 뉴스 인증 정보가 없습니다.")
+
+    headers = {
+        **TOSS_WEB_HEADERS,
+        "Origin": "https://www.tossinvest.com",
+        "Referer": "https://www.tossinvest.com/",
+        "app-version": app_version,
+        "x-xsrf-token": xsrf_token,
+        "Cookie": cookie,
+    }
+    headers.pop("Content-Type", None)
+
+    if browser_tab_id:
+        headers["browser-tab-id"] = browser_tab_id
+
+    response = requests.get(
+        f"{TOSS_WEB_BASE}/api/v2/news/{quote(str(news_id), safe='')}",
+        headers=headers,
+        timeout=(5, 10),
+    )
+
+    if not response.ok:
+        raise TossError(f"토스 기사 상세 HTTP {response.status_code}")
+
+    article = ((response.json().get("result") or {}).get("kr")) or {}
+
+    created = str(article.get("createdAt") or "")
+
+    return {
+        "link": str(article.get("linkUrl") or "").strip(),
+        "press": str((article.get("source") or {}).get("name") or "").strip(),
+        "time": created[11:16] if len(created) >= 16 else "",
+        "stock_codes": article.get("stockCodes") or [],
+    }
+
+
+def toss_news_detail(news_id):
+    """실패해도 빈 값을 돌려줘서 화면이 멈추지 않게 합니다."""
+
+    if not news_id:
+        return {}
+
+    try:
+        return _fetch_toss_news_detail(news_id)
+    except Exception:
+        return {}
+
+
+def toss_news_web_link(news_id, symbol):
+    """토스증권 웹의 '종목 뉴스' 화면에서 이 기사가 열리는 주소."""
+
+    symbol = str(symbol or "").strip()
+
+    if re.fullmatch(r"\d{6}", symbol):
+        symbol = "A" + symbol
+
+    params = quote(json.dumps({"id": news_id}, separators=(",", ":")), safe="")
+
+    return (
+        f"https://www.tossinvest.com/stocks/{symbol}/news"
+        f"?symbol-or-stock-code={symbol}&contentType=news&sectionName="
+        f"&contentParams={params}&contentPrev="
+    )
 
 def load_toss_dashboard_news(news_type):
     """버튼 콜백. 실패 원인을 화면에 표시합니다."""
@@ -2825,8 +2900,10 @@ def use_toss_news_for_issue(issue_number, item):
     title = item.get("title", "").strip()
     if title:
         state[f"is{issue_number}t"] = clean_title(title)
-    if item.get("url"):
-        state[f"is{issue_number}link"] = item["url"]
+    link = item.get("url") or toss_news_detail(item.get("news_id", "")).get("link", "")
+
+    if link:
+        state[f"is{issue_number}link"] = link
         state[f"is{issue_number}note"] = "토스증권 뉴스에서 제목과 링크를 가져왔습니다. 기사 불러오기를 눌러 본문을 가져오세요."
     elif item.get("summary"):
         state[f"is{issue_number}src"] = f"{title}\\n\\n{item['summary']}"
@@ -4485,6 +4562,13 @@ def render_stock_section(
                 if source.get("url"):
                     safe_url = source["url"].replace(")", "%29").replace(" ", "%20")
                     suffix = "" if source.get("direct", True) else " 🔍 검색 결과로 이동"
+
+                    original = source.get("original")
+
+                    if original and original != source["url"]:
+                        safe_original = original.replace(")", "%29").replace(" ", "%20")
+                        suffix += f" · [원문 보기]({safe_original})"
+
                     st.markdown(f"- [{safe_title}]({safe_url}){suffix}")
                 else:
                     st.markdown(f"- {safe_title}")
@@ -5058,8 +5142,13 @@ def main():
                                 related_names.append(str(related_item))
                         if related_names:
                             st.caption("관련 종목: " + " · ".join(related_names[:8]))
-                        if news_item.get("url"):
-                            st.markdown(f"[기사 링크 열기]({news_item['url']})")
+                        original_link = (
+                            news_item.get("url")
+                            or toss_news_detail(news_item.get("news_id", "")).get("link", "")
+                        )
+
+                        if original_link:
+                            st.markdown(f"[기사 원문 열기]({original_link})")
                         elif news_item.get("news_id"):
                             st.caption("토스 뉴스 ID: " + news_item["news_id"] + " · API 응답에 기사 URL이 없어 직접 링크는 표시하지 않습니다.")
                         pick_cols = st.columns([1, 1, 1, 4])
