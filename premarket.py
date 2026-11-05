@@ -3269,6 +3269,55 @@ def show_api_diagnostics():
         if not preview and not compress_preview and not diagnostics:
             st.caption("아직 API 실행 기록이 없습니다.")
 
+def refresh_archive_list():
+    """Gist에 저장된 장전 시황글 목록을 세션에 담습니다."""
+
+    state = st.session_state
+
+    try:
+        state["pm_archive"] = list_posts("pre")
+        state["pm_archive_note"] = (
+            f"저장된 장전 시황글 {len(state['pm_archive'])}건 · "
+            f"조회 {datetime.datetime.now(KST).strftime('%H:%M:%S')}"
+        )
+
+    except Exception as error:
+        state["pm_archive_note"] = f"목록 불러오기 실패: {str(error)[:200]}"
+
+
+def archive_day_label(day_iso):
+    day = datetime.date.fromisoformat(day_iso)
+
+    return f"{day.month}월 {day.day}일({WEEKDAYS[day.weekday()]})"
+
+
+def archive_preview(text, limit=34):
+    """저장된 글의 '한 줄 요약' 줄을 목록 버튼에 보여 줄 미리보기로 뽑습니다."""
+
+    found = re.search(r"한 줄 요약[^\n:：]*[:：]\s*\**\s*(.+)", str(text or ""))
+
+    if not found:
+        return ""
+
+    preview = re.sub(r"[*>]", "", found.group(1)).strip()
+
+    return preview if len(preview) <= limit else preview[:limit - 1] + "…"
+
+
+def load_archived_post(day_iso):
+    """목록에서 고른 글을 '한눈에 보이는 시황글' 칸에 불러옵니다."""
+
+    state = st.session_state
+
+    for day, text in state.get("pm_archive") or []:
+        if day == day_iso:
+            state["pm_short"] = text
+            state["pm_headline_alts"] = []
+            state["pm_archive_note"] = (
+                f"{archive_day_label(day_iso)} 글을 불러왔습니다. "
+                "'한눈에 보이는 시황글' 탭에서 확인하세요."
+            )
+            return
 
 # ===============================================================
 # 17. 화면
@@ -3407,10 +3456,11 @@ def main():
 
     st.markdown("### 📝 ③ 결과")
 
-    tab_short, tab_long = st.tabs(
+    tab_short, tab_long, tab_archive = st.tabs(
         [
             "한눈에 보이는 시황글",
             "원본 상세 리포트",
+            "이전 글 목록",
         ]
     )
 
@@ -3439,6 +3489,7 @@ def main():
             # ▼▼▼ 여기에 추가 (들여쓰기 공백 12칸) ▼▼▼
             if st.button("💾 오늘 장전 시황글 저장 (주간 정리용)", key="save_pre_btn"):
                 save_post("pre", short)
+                refresh_archive_list() 
                 st.success("장전 시황글을 저장했습니다.")
             # ▲▲▲ 여기까지 ▲▲▲
 
@@ -3460,6 +3511,50 @@ def main():
                 "직접 붙여넣은 원문만 압축한 경우에는 표시되지 않습니다."
             )
 
+    with tab_archive:
+        if "pm_archive" not in state:
+            refresh_archive_list()
+
+        col_btn, col_note = st.columns(
+            [1.6, 5],
+            vertical_alignment="center",
+        )
+
+        col_btn.button(
+            "🔄 목록 새로고침",
+            key="pm_archive_refresh",
+            on_click=refresh_archive_list,
+        )
+
+        if state.get("pm_archive_note"):
+            col_note.caption(state["pm_archive_note"])
+
+        items = state.get("pm_archive") or []
+
+        if not items:
+            st.caption(
+                "저장된 장전 시황글이 없습니다. 시황글을 생성한 뒤 "
+                "'오늘 장전 시황글 저장'을 누르면 여기에 쌓입니다."
+            )
+
+        for day_iso, text in items:
+            preview = archive_preview(text)
+
+            st.button(
+                archive_day_label(day_iso)
+                + (f" · {preview}" if preview else ""),
+                key=f"pm_arch_{day_iso}",
+                on_click=load_archived_post,
+                args=(day_iso,),
+                use_container_width=True,
+            )
+
+        if items:
+            st.caption(
+                "글을 누르면 '한눈에 보이는 시황글' 칸의 내용이 그 글로 바뀝니다. "
+                "지금 작성 중인 내용은 사라지니 필요하면 먼저 저장하세요."
+            )
+    
     # -----------------------------------------------------------
     # ④ API 진단
     # -----------------------------------------------------------
