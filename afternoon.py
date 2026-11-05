@@ -5030,7 +5030,6 @@ def main():
                         st.json(toss_news_items[0].get("raw") or {})
 
                     for news_idx, news_item in enumerate(toss_news_items):
-                    for news_idx, news_item in enumerate(toss_news_items):
                         news_title = news_item.get("title", "")
                         metadata = " · ".join(
                             part for part in [news_item.get("source", ""), news_item.get("published", "")]
