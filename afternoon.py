@@ -17,6 +17,7 @@ import streamlit.components.v1 as components
 
 from realtime_feed import TossFeed
 from archive import save_post
+from usage_store import load_usage, add_usage
 
 st.set_page_config(page_title="MTNW 오후 시황", layout="wide")
 
@@ -3623,6 +3624,181 @@ __ARTICLES__
 """
 
 
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_HEADLINE_MAX_TOKENS = 900  # 추론 토큰이 출력 한도를 먼저 쓰지 않도록 여유 있게
+GROQ_PROMPT_ARTICLE_CHARS = 4500  # 무료 분당 토큰(TPM) 한도를 넘지 않도록 기사 분량 제한
+
+# 무료 플랜 하루 토큰 한도 (장전·주간 페이지의 GROQ_DAILY_TOKEN_LIMIT과 같은 값으로 맞추세요)
+GROQ_DAILY_TOKEN_LIMIT = 200_000
+
+
+def refresh_token_usage():
+    """저장된 하루 사용량을 읽어 세션에 담습니다."""
+
+    try:
+        st.session_state["afternoon_usage"] = load_usage()
+    except Exception:
+        pass
+
+
+def render_token_usage():
+    """오늘 Groq 사용 토큰 현황 한 줄 (장전·주간·오후 시황 합산)."""
+
+    state = st.session_state
+
+    if "afternoon_usage" not in state:
+        refresh_token_usage()
+
+    usage = state.get("afternoon_usage") or {}
+
+    used = int(usage.get("tokens", 0) or 0)
+    calls = int(usage.get("calls", 0) or 0)
+    remaining = max(0, GROQ_DAILY_TOKEN_LIMIT - used)
+
+    col_text, col_btn = st.columns([5, 1.4], vertical_alignment="center")
+
+    col_text.caption(
+        f"🔢 Groq 오늘 사용 {used:,} / {GROQ_DAILY_TOKEN_LIMIT:,} 토큰 "
+        f"· 남은 토큰 {remaining:,} (추정) · API 호출 {calls}회 "
+        "· 장전·주간 시황 페이지와 합산"
+    )
+
+    col_btn.button(
+        "🔄 새로고침",
+        key="token_usage_refresh",
+        on_click=refresh_token_usage,
+    )
+
+def call_groq_headline(prompt):
+    """Groq API로 헤드라인 후보를 받아 원문 텍스트를 돌려줍니다."""
+
+    api_key = secret("GROQ_API_KEY").strip()
+
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY가 Streamlit Secrets에 없습니다.")
+
+    payload = {
+        "model": secret("GROQ_MODEL", "openai/gpt-oss-120b"),
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "당신은 한국 주식시장 전문 시황 에디터입니다. "
+                    "제공된 자료에 없는 사실이나 수치를 만들어내지 마세요."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.8,
+        "max_tokens": GROQ_HEADLINE_MAX_TOKENS,
+        "reasoning_effort": "low",
+        "include_reasoning": False,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    response = None
+
+    for attempt in range(3):
+        response = requests.post(
+            GROQ_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=60,
+        )
+
+        if response.status_code == 200:
+            break
+
+        body = response.text[:1500]
+        lowered = body.lower()
+
+        # 추론 옵션을 지원하지 않는 모델이면 옵션을 빼고 재시도
+        if (
+            response.status_code == 400
+            and "reasoning_effort" in payload
+            and "reasoning" in lowered
+        ):
+            payload.pop("reasoning_effort", None)
+            payload.pop("include_reasoning", None)
+            continue
+
+        # 분당 토큰 제한: 안내된 시간만큼 기다린 뒤 재시도
+        if (
+            response.status_code == 429
+            and attempt < 2
+            and ("tokens per minute" in lowered or "tpm" in lowered)
+        ):
+            wait = None
+
+            retry_after = response.headers.get("retry-after")
+
+            if retry_after:
+                try:
+                    wait = float(retry_after)
+                except ValueError:
+                    wait = None
+
+            if wait is None:
+                found = re.search(r"try again in\s+([0-9.]+)s", body, re.I)
+                wait = float(found.group(1)) if found else 20.0
+
+            time.sleep(min(wait + 2, 30))
+            continue
+
+        hint = (
+            " (일일 사용 한도일 수 있습니다)"
+            if response.status_code == 429
+            and ("per day" in lowered or "daily" in lowered)
+            else ""
+        )
+
+        raise RuntimeError(
+            f"Groq HTTP {response.status_code}{hint}: {body[:200]}"
+        )
+
+    if response is None or response.status_code != 200:
+        raise RuntimeError("Groq 응답을 받지 못했습니다.")
+
+    data = response.json()
+
+    # 처리된 토큰은 하루 한도에서 차감되므로 기록 (실패해도 무시)
+    try:
+        add_usage((data.get("usage") or {}).get("total_tokens"))
+        refresh_token_usage()
+    except Exception:
+        pass
+
+    choices = data.get("choices") or []
+
+    if not choices:
+        raise RuntimeError("Groq 응답에 choices가 없습니다.")
+
+    choice = choices[0]
+
+    if choice.get("finish_reason") == "length":
+        raise RuntimeError("출력 한도에 도달해 응답이 잘렸습니다. 다시 시도해 주세요.")
+
+    content = (choice.get("message") or {}).get("content")
+
+    if isinstance(content, list):
+        content = "\n".join(
+            str(item.get("text", ""))
+            for item in content
+            if isinstance(item, dict)
+        )
+
+    content = str(content or "").strip()
+
+    if not content:
+        raise RuntimeError("Groq 응답이 비어 있습니다.")
+
+    return content
+
+
 def ai_market_summary(data):
     """스타 기자 프롬프트로 헤드라인 3개를 받아 안전한 첫 번째를 돌려줍니다.
     나머지 후보는 st.session_state['summary_alts']에 담습니다."""
@@ -3652,35 +3828,10 @@ def ai_market_summary(data):
     prompt = (
         AFTERNOON_HEADLINE_PROMPT
         .replace("__MARKET__", market_context)
-        .replace("__ARTICLES__", article_text[:12000])
+        .replace("__ARTICLES__", article_text[:GROQ_PROMPT_ARTICLE_CHARS])
     )
 
-    response = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": secret("ANTHROPIC_API_KEY"),
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": secret("ANTHROPIC_MODEL", "claude-haiku-5-5"),
-            "max_tokens": 500,
-            "temperature": 0.8,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=40,
-    )
-
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"AI 요약 HTTP {response.status_code}: {response.text[:200]}"
-        )
-
-    parts = response.json().get("content", [])
-
-    raw = "".join(
-        part.get("text", "") for part in parts if part.get("type") == "text"
-    )
+    raw = call_groq_headline(prompt)
 
     headlines = []
 
@@ -3784,24 +3935,25 @@ def generate_market_summary(snapshot=None):
     """기사 입력 여부와 관계없이 현재 데이터로 한 줄 요약을 생성합니다."""
     data = collect_summary_inputs(snapshot)
 
-    if secret("ANTHROPIC_API_KEY"):
+    if secret("GROQ_API_KEY"):
         try:
             result = ai_market_summary(data)
             st.session_state["summary_note"] = (
-                "AI 요약 완료 · "
+                "AI 요약 완료(Groq) · "
                 + ("입력 기사와 시장 데이터를 종합했습니다." if data["articles"]
                    else "기사 없이 현재 시장 데이터를 바탕으로 생성했습니다.")
             )
             return result
         except Exception as error:
             result = fallback_market_summary(data)
-            st.session_state["summary_note"] = f"AI 요약 실패로 자동 조합 방식을 사용했습니다: {error}"
+            st.session_state["summary_note"] = (
+                f"AI 요약 실패로 자동 조합 방식을 사용했습니다: {str(error)[:200]}"
+            )
             return result
 
     result = fallback_market_summary(data)
     st.session_state["summary_note"] = (
-        "규칙 기반 요약 · 기사 내용이 있으면 핵심 문장과 시장 데이터를 조합합니다. "
-        "기사 전체를 의미적으로 종합하는 AI 요약은 ANTHROPIC_API_KEY 설정 시 사용할 수 있습니다."
+        "규칙 기반 요약 · 기사 전체를 종합하는 AI 요약은 GROQ_API_KEY 설정 시 사용할 수 있습니다."
     )
     return result
 
@@ -5282,6 +5434,8 @@ def main():
             )
             if st.session_state.get("summary_note"):
                 summary_note_col.caption(st.session_state["summary_note"])
+
+            render_token_usage()          # ← 이 줄 추가
 
             st.text_area(
                 "한 줄 요약",
