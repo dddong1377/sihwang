@@ -49,6 +49,12 @@ SCHEDULE_PER_DAY = 6
 
 TOSS_CALENDAR_BASE = "https://wts-cert-api.tossinvest.com"
 
+# 지수 장마감 등락률 (토스증권 공개 지수 일봉)
+TOSS_INFO_BASE = "https://wts-info-api.tossinvest.com"
+INDEX_CODES = {"코스피": "KGG01P", "코스닥": "QGG01P"}
+# 이 시각 이후의 당일 봉만 '장마감'으로 인정 (KRX 정규장 15:30 마감)
+MARKET_CLOSE_CONFIRM = datetime.time(15, 40)
+
 # 법적·윤리적 위험이 있는 표현: 포함된 제목은 코드가 버립니다.
 BANNED_HEADLINE_WORDS = (
     "무조건", "반드시", "100%", "수익 보장", "수익보장",
@@ -621,33 +627,6 @@ def parse_watch_table(section):
     return result
 
 
-def parse_index_pcts(aft_text):
-    """오후 시황글의 '장중 지수 현황' 표에서 코스피·코스닥 등락률을 뽑습니다."""
-
-    section = find_section(aft_text, ["장중 지수 현황"])
-    rows = first_table(section)
-
-    result = {}
-
-    for row in rows[1:]:
-        if len(row) < 3:
-            continue
-
-        label = clean_cell(row[0])
-        pct = parse_pct(row[-1])
-
-        if pct is None:
-            continue
-
-        if "코스피" in label:
-            result["코스피"] = pct
-
-        elif "코스닥" in label:
-            result["코스닥"] = pct
-
-    return result
-
-
 def related_stock_names(text):
     """'관련 종목: A, B' 줄에서 종목명을 뽑습니다."""
 
@@ -671,27 +650,12 @@ def name_key(name):
     return re.sub(r"\s+", "", name).upper()
 
 
-def week_composite(pcts):
-    values = [value for value in pcts if value is not None]
-
-    if not values:
-        return None
-
-    total = 1.0
-
-    for value in values:
-        total *= 1 + value / 100
-
-    return (total - 1) * 100
-
-
 def collect_week(days):
-    """요일별 시황글에서 급등·급락·주목 종목, 지수 등락률을 모읍니다."""
+    """요일별 시황글에서 급등·급락·주목 종목을 모읍니다. (지수 등락률은 토스에서 따로 가져옵니다.)"""
 
     surge = {}
     plunge = {}
     watch = {}
-    index_pcts = {"코스피": {}, "코스닥": {}}
 
     for day in days:
         i = day["i"]
@@ -699,9 +663,6 @@ def collect_week(days):
         aft = day["aft"]
 
         if aft:
-            for label, pct in parse_index_pcts(aft).items():
-                index_pcts[label][i] = pct
-
             for row in parse_stock_table(find_section(aft, ["급등 특징주"])):
                 if row["pct"] <= 0:
                     continue
@@ -783,7 +744,7 @@ def collect_week(days):
         "surge": surge_top,
         "plunge": plunge_top,
         "watch": watch_top,
-        "index": index_pcts,
+        "index": {"코스피": {}, "코스닥": {}},
     }
 
 
@@ -842,7 +803,7 @@ WEEKLY_HEADLINE_PROMPT = """# 당신의 정체
 4. 특정 종목의 매수·매도·보유를 권하거나 수익이 날 것처럼 읽히는 표현은 금지한다.
 5. 공포를 부추기지 않는다. "폭망", "붕괴 임박" 같은 선동 표현은 쓰지 않고, 확인된 하락은 사실 그대로 쓴다.
 6. 특정 기업·인물을 비방하거나 근거 없는 의혹을 암시하지 않는다.
-7. 주간 등락률은 일간 값을 합성한 근사치다. 정확한 주간 수익률처럼 쓰지 말고, 숫자를 쓸 때는 일간 수치를 쓰거나 '안팎'처럼 완화한다.
+7. 지수 등락률은 토스증권의 KRX 장마감 일간 값이다. 주간 수익률을 새로 계산해 쓰지 말고, 일간 수치만 인용한다.
 8. 낚시 금지. 제목이 던진 궁금증은 본문에서 풀려야 한다.
 
 # 이번 주 팩트
@@ -1011,11 +972,8 @@ def build_facts(days, week, issues, flow):
             for i in sorted(daily)
         ]
 
-        composite = week_composite(list(daily.values()))
-
         lines.append(
-            f"{label} 일간 등락률(오후 시황 작성 시점): " + ", ".join(parts)
-            + f" / 합성 근사 {pct_text(composite)}"
+            f"{label} 장마감 일간 등락률(토스증권, KRX 정규장): " + ", ".join(parts)
         )
 
     if week["surge"]:
@@ -1047,7 +1005,134 @@ def build_facts(days, week, issues, flow):
 
 
 # ===============================================================
-# 6. 다음 주 일정 (토스 증시 캘린더)
+# 6. 지수 장마감 등락률 (토스증권 지수 일봉)
+# ===============================================================
+
+def to_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def candle_date(candle):
+    try:
+        dt = datetime.datetime.fromisoformat(
+            str(candle.get("dt")).replace("Z", "+00:00")
+        )
+    except ValueError:
+        return None
+
+    if dt.tzinfo:
+        dt = dt.astimezone(KST)
+
+    return dt.date()
+
+
+def fetch_index_candles(code, count=10, cursor=None):
+    params = {"count": count, "useAdjustedRate": "true"}
+
+    if cursor:
+        params["from"] = cursor
+
+    try:
+        response = requests.get(
+            f"{TOSS_INFO_BASE}/api/v1/c-chart/kr-s/{code}/day:1",
+            params=params,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                ),
+                "Accept": "application/json, text/plain, */*",
+                "Origin": "https://www.tossinvest.com",
+                "Referer": f"https://www.tossinvest.com/indices/{code}",
+            },
+            timeout=(5, 15),
+        )
+    except requests.RequestException as error:
+        raise RuntimeError(f"토스 지수 조회 실패({code}): {error}") from error
+
+    if not response.ok:
+        raise RuntimeError(
+            f"토스 지수 조회 실패({code}, HTTP {response.status_code})"
+        )
+
+    try:
+        result = response.json().get("result") or {}
+    except ValueError as error:
+        raise RuntimeError(f"토스 지수 응답이 JSON이 아닙니다({code}).") from error
+
+    candles = result.get("candles")
+
+    if not isinstance(candles, list):
+        raise RuntimeError(f"토스 지수 응답에 candles가 없습니다({code}).")
+
+    return candles, result.get("nextDateTime")
+
+
+def fetch_index_week(monday):
+    """월~금 코스피·코스닥의 KRX 장마감 등락률(%)을 {라벨: {요일index: 등락률}}로 돌려줍니다."""
+
+    friday = monday + datetime.timedelta(days=4)
+    now = datetime.datetime.now(KST)
+    today = now.date()
+
+    # 지난 주면 금요일 다음 날 0시를 기준으로 과거 방향 조회
+    first_cursor = None
+
+    if friday < today:
+        first_cursor = datetime.datetime.combine(
+            friday + datetime.timedelta(days=1),
+            datetime.time(0, 0),
+            tzinfo=KST,
+        ).isoformat()
+
+    result = {}
+
+    for label, code in INDEX_CODES.items():
+        found = {}
+        cursor = first_cursor
+
+        for _ in range(3):
+            candles, next_cursor = fetch_index_candles(code, 10, cursor)
+            dates = []
+
+            for candle in candles:
+                day = candle_date(candle)
+
+                if day is None:
+                    continue
+
+                dates.append(day)
+
+                if not (monday <= day <= friday):
+                    continue
+
+                # 장 마감 전 진행 중인 봉은 제외
+                if day == today and now.time() < MARKET_CLOSE_CONFIRM:
+                    continue
+
+                close = to_float(candle.get("close"))
+                base = to_float(candle.get("base"))
+
+                if close is None or not base:
+                    continue
+
+                found[day.weekday()] = (close - base) / base * 100
+
+            if not next_cursor or not dates or min(dates) <= monday:
+                break
+
+            cursor = next_cursor
+
+        result[label] = found
+
+    return result
+
+
+# ===============================================================
+# 7. 다음 주 일정 (토스 증시 캘린더)
 # ===============================================================
 
 def calendar_session_headers():
@@ -1337,7 +1422,7 @@ def load_schedule(next_monday):
 
 
 # ===============================================================
-# 7. 결과 조립
+# 8. 결과 조립
 # ===============================================================
 
 def index_table_md(week, days):
@@ -1347,7 +1432,7 @@ def index_table_md(week, days):
     header = ["지수"] + [
         f"{DAY_LABELS[day['i']]} {day['date'].month}/{day['date'].day}"
         for day in days
-    ] + ["주간(합성 근사)"]
+    ]
 
     lines = [
         "| " + " | ".join(header) + " |",
@@ -1356,18 +1441,11 @@ def index_table_md(week, days):
 
     for label in ("코스피", "코스닥"):
         daily = week["index"][label]
-
-        if not daily:
-            continue
-
         cells = [label]
 
         for day in days:
             value = daily.get(day["i"])
             cells.append("-" if value is None else f"{arrow(value)} {value:+.2f}%")
-
-        composite = week_composite(list(daily.values()))
-        cells.append("-" if composite is None else f"{arrow(composite)} {composite:+.2f}%")
 
         lines.append("| " + " | ".join(cells) + " |")
 
@@ -1433,8 +1511,8 @@ def build_report(monday, headline, days, week, issues, flow, checks, schedule, a
         lines += ["### 📊 한 주 시장 성적표", "", table, ""]
 
         lines += [
-            "※ 오후 시황 작성 시점의 일간 등락률이며 실제 종가와 다를 수 있습니다. "
-            "주간 값은 일간 등락률을 합성한 근사치입니다.",
+            "※ 토스증권 기준 KRX 정규장(09:00~15:30) 장마감 지수의 전일 대비 등락률입니다. "
+            "휴장일은 '-'로 표시됩니다.",
             "",
         ]
 
@@ -1500,7 +1578,7 @@ def build_report(monday, headline, days, week, issues, flow, checks, schedule, a
 
 
 # ===============================================================
-# 8. 실행
+# 9. 실행
 # ===============================================================
 
 def request_generate(next_monday):
@@ -1530,7 +1608,7 @@ def run_weekly(monday, status):
             "붙여넣은 시황글이 없습니다. ① 요일 탭에 장전·오후 시황글을 붙여넣어 주세요."
         )
 
-    status.write("📊 요일별 시황글에서 지수·급등락·주목 종목을 정리하는 중...")
+    status.write("📊 요일별 시황글에서 급등락·주목 종목을 정리하는 중...")
 
     week = collect_week(days)
 
@@ -1538,6 +1616,26 @@ def run_weekly(monday, status):
         f"✅ 급등 {len(week['surge'])}·급락 {len(week['plunge'])}·"
         f"주목 {len(week['watch'])}종목 정리"
     )
+
+    # 0) 지수 장마감 등락률 (토스증권)
+    index_error = ""
+
+    status.write("📈 토스증권에서 코스피·코스닥 장마감 등락률을 가져오는 중...")
+
+    try:
+        week["index"] = fetch_index_week(monday)
+
+        status.write(
+            "✅ 지수 조회 완료 · "
+            + " · ".join(
+                f"{label} {len(week['index'][label])}일"
+                for label in ("코스피", "코스닥")
+            )
+        )
+
+    except Exception as error:
+        index_error = str(error)[:200]
+        status.write(f"⚠️ 지수 조회 실패: {index_error}")
 
     # 1) 핵심 이슈 정리
     issues, flow, checks, ai_error = [], "", [], ""
@@ -1607,11 +1705,13 @@ def run_weekly(monday, status):
 
     state["wk_alts"] = alternatives
 
+    problems = " / ".join(item for item in (ai_error, index_error) if item)
+
     state["wk_note"] = (
         f"생성 완료 · {datetime.datetime.now(KST).strftime('%H:%M:%S')}"
-        + (f" · 일부 실패: {ai_error}" if ai_error else "")
+        + (f" · 일부 실패: {problems}" if problems else "")
     )
-    state["wk_note_level"] = "warn" if ai_error else "ok"
+    state["wk_note_level"] = "warn" if problems else "ok"
 
 
 def run_with_status(monday):
@@ -1631,7 +1731,7 @@ def run_with_status(monday):
 
 
 # ===============================================================
-# 9. 마크다운 → HTML / 복사 버튼
+# 10. 마크다운 → HTML / 복사 버튼
 # ===============================================================
 
 def md_to_html(markdown):
@@ -1797,8 +1897,9 @@ def copy_buttons(markdown):
 
 
 # ===============================================================
-# 10. 화면
+# 11. 화면
 # ===============================================================
+
 def fill_from_archive(monday):
     """저장된 장전·오후 시황글을 월~금 입력칸에 채웁니다."""
 
@@ -1823,7 +1924,8 @@ def fill_from_archive(monday):
         if (found_pre or found_aft)
         else "이 주에 저장된 시황글이 없습니다. 직접 붙여넣어 주세요."
     )
-    
+
+
 def main():
     state = st.session_state
 
@@ -1855,7 +1957,6 @@ def main():
 
         days = [monday + datetime.timedelta(days=i) for i in range(5)]
 
-        # ▼▼▼ 여기에 추가 (들여쓰기 공백 8칸) ▼▼▼
         load_col, load_note = st.columns([1.8, 5], vertical_alignment="center")
 
         load_col.button(
@@ -1866,7 +1967,6 @@ def main():
 
         if state.get("wk_archive_note"):
             load_note.caption(state["wk_archive_note"])
-        # ▲▲▲ 여기까지 ▲▲▲
 
         tabs = st.tabs(
             [f"{DAY_LABELS[i]} {day.month}/{day.day}" for i, day in enumerate(days)]
