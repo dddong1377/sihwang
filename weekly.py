@@ -1452,49 +1452,52 @@ def index_table_md(week, days):
     return "\n".join(lines)
 
 
-def movers_table_md(rows):
+def movers_table_md(rows, show_note=True):
     if not rows:
         return "- 붙여넣은 오후 시황글에서 읽을 수 있는 종목이 없습니다."
 
     lines = [
-        "| 순위 | 종목 | 최대 등락률 | 일자 | 등장 | 관련 테마 | 비고 |",
-        "|---:|---|---:|---|---:|---|---|",
+        "| 순위 | 종목 | 최대 등락률 | 관련 테마" + (" | 비고 |" if show_note else " |"),
+        "|---:|---|---:|---" + ("|---|" if show_note else "|"),
     ]
 
     for rank, item in enumerate(rows, start=1):
         pct, index = item["best"]
 
-        lines.append(
+        row = (
             f"| {rank} | **{table_cell(item['name'])}** | **{pct:+.2f}%** "
-            f"| {DAY_LABELS[index]} | {len(item['days'])}일 "
-            f"| {table_cell(item['theme']) or '-'} "
-            f"| {table_cell(cut(item['reason'], 40)) or '-'} |"
+            f"| {table_cell(item['theme']) or '-'} |"
         )
+
+        if show_note:
+            row += f" {table_cell(cut(item['reason'], 40)) or '-'} |"
+
+        lines.append(row)
 
     return "\n".join(lines)
 
 
-def watch_table_md(rows):
+def watch_table_md(rows, show_note=True):
     if not rows:
         return "- 붙여넣은 글에서 읽을 수 있는 주목 종목이 없습니다."
 
-    lines = [
-        "| 순위 | 종목 | 언급 일수 | 언급 요일 | 비고(장전 시황 기준) |",
-        "|---:|---|---:|---|---|",
-    ]
+    if show_note:
+        lines = ["| 순위 | 종목 | 비고(장전 시황 기준) |", "|---:|---|---|"]
+    else:
+        lines = ["| 순위 | 종목 |", "|---:|---|"]
 
     for rank, item in enumerate(rows, start=1):
-        days = "·".join(DAY_LABELS[i] for i in sorted(item["days"]))
+        row = f"| {rank} | **{table_cell(item['name'])}** |"
 
-        lines.append(
-            f"| {rank} | **{table_cell(item['name'])}** | {len(item['days'])}일 "
-            f"| {days} | {table_cell(cut(item['reason'], 40)) or '-'} |"
-        )
+        if show_note:
+            row += f" {table_cell(cut(item['reason'], 40)) or '-'} |"
+
+        lines.append(row)
 
     return "\n".join(lines)
 
 
-def build_report(monday, headline, days, week, issues, flow, checks, schedule, ai_error):
+def build_report(monday, headline, days, week, issues, flow, checks, schedule, ai_error, show_note=True):
     friday = monday + datetime.timedelta(days=4)
 
     lines = [
@@ -1544,15 +1547,15 @@ def build_report(monday, headline, days, week, issues, flow, checks, schedule, a
     lines += [
         "### 🔺 주간 급등 TOP 3 (일간 상승률 기준)",
         "",
-        movers_table_md(week["surge"]),
+        movers_table_md(week["surge"], show_note),
         "",
         "### 🔻 주간 급락 TOP 3 (일간 하락률 기준)",
         "",
-        movers_table_md(week["plunge"]),
+        movers_table_md(week["plunge"], show_note),
         "",
         "### 📌 주간 주목 종목 TOP 3 (언급 일수 기준)",
         "",
-        watch_table_md(week["watch"]),
+        watch_table_md(week["watch"], show_note),
         "",
         "### 📆 다음 주 장 체크 일정",
         "",
@@ -1701,6 +1704,7 @@ def run_weekly(monday, status):
         checks,
         state.get("wk_schedule", ""),
         ai_error,
+        state.get("wk_show_note", True),
     )
 
     state["wk_alts"] = alternatives
@@ -2137,6 +2141,13 @@ def main():
     st.markdown("### ✨ ③ 주간 핵심 정리 생성")
 
     with st.container(border=True):
+        st.checkbox(
+            "급등·급락·주목 종목 표에 '비고' 열 포함",
+            value=True,
+            key="wk_show_note",
+            help="시황글에 적힌 종목별 이유(40자 이내)를 비고에 옮깁니다. 이유가 없으면 '-'로 나옵니다. 생성 버튼을 누를 때 적용됩니다.",
+        )
+
         st.button(
             "✨ 주간 핵심 정리 생성",
             type="primary",
