@@ -1705,6 +1705,15 @@ def run_weekly(monday, status):
 
     state["wk_alts"] = alternatives
 
+    # 꺾은선형 그래프 미리보기에 쓸 지수 데이터 (글 텍스트와 별도로 보관)
+    state["wk_index"] = {
+        "index": week["index"],
+        "labels": {
+            day["i"]: f"{DAY_LABELS[day['i']]} {day['date'].month}/{day['date'].day}"
+            for day in days
+        },
+    }
+
     problems = " / ".join(item for item in (ai_error, index_error) if item)
 
     state["wk_note"] = (
@@ -1900,6 +1909,107 @@ def copy_buttons(markdown):
 # 11. 화면
 # ===============================================================
 
+INDEX_LINE_COLORS = {"코스피": "#191F28", "코스닥": "#03C75A"}
+
+
+def render_index_chart(info):
+    """코스피·코스닥 장마감 일간 등락률 꺾은선형 그래프. 휴장일은 선이 끊깁니다."""
+
+    import pandas as pd
+
+    order = [info["labels"][i] for i in sorted(info["labels"])]
+    rows = []
+
+    for label in ("코스피", "코스닥"):
+        daily = info["index"].get(label) or {}
+
+        for i in sorted(info["labels"]):
+            rows.append({
+                "요일": info["labels"][i],
+                "지수": label,
+                "등락률": daily.get(i),
+            })
+
+    df = pd.DataFrame(rows)
+
+    try:
+        import altair as alt
+
+        x = alt.X("요일:N", sort=order, axis=alt.Axis(title=None, labelAngle=0))
+        y = alt.Y(
+            "등락률:Q",
+            axis=alt.Axis(title="전일 대비 등락률 (%)", format="+.1f"),
+        )
+        color = alt.Color(
+            "지수:N",
+            scale=alt.Scale(
+                domain=list(INDEX_LINE_COLORS),
+                range=list(INDEX_LINE_COLORS.values()),
+            ),
+            legend=alt.Legend(title=None, orient="top"),
+        )
+
+        base = alt.Chart(df).encode(x=x, y=y, color=color)
+
+        line = base.mark_line(point=True, strokeWidth=2.5)
+        labels = base.mark_text(dy=-12, fontSize=12).encode(
+            text=alt.Text("등락률:Q", format="+.2f"),
+        )
+        zero = (
+            alt.Chart(pd.DataFrame({"기준": [0]}))
+            .mark_rule(color="#8B95A1", strokeDash=[4, 4])
+            .encode(y="기준:Q")
+        )
+
+        chart = (zero + line + labels).properties(height=320)
+
+        st.altair_chart(chart, use_container_width=True)
+
+    except Exception:
+        # altair를 쓸 수 없는 환경에서는 기본 꺾은선 차트로 대신 보여줍니다.
+        wide = df.pivot(index="요일", columns="지수", values="등락률").reindex(order)
+
+        st.line_chart(wide)
+
+    st.caption(
+        "토스증권 기준 KRX 정규장 장마감 지수의 전일 대비 등락률입니다. "
+        "휴장일·미집계일은 선이 끊깁니다."
+    )
+
+
+def render_report_with_chart(report, info):
+    """미리보기에서 '한 주 시장 성적표'의 표 자리에 꺾은선형 그래프를 넣습니다."""
+
+    lines = report.splitlines()
+
+    heading = next(
+        (n for n, line in enumerate(lines) if "한 주 시장 성적표" in line),
+        None,
+    )
+
+    if heading is None:
+        st.markdown(report)
+        return
+
+    start = next(
+        (n for n in range(heading + 1, len(lines)) if lines[n].startswith("|")),
+        None,
+    )
+
+    if start is None:
+        st.markdown(report)
+        return
+
+    end = start
+
+    while end < len(lines) and lines[end].startswith("|"):
+        end += 1
+
+    st.markdown("\n".join(lines[:start]))
+    render_index_chart(info)
+    st.markdown("\n".join(lines[end:]))
+
+
 def fill_from_archive(monday):
     """저장된 장전·오후 시황글을 월~금 입력칸에 채웁니다."""
 
@@ -2081,8 +2191,24 @@ def main():
     if report:
         copy_buttons(report)
 
+        info = state.get("wk_index")
+        use_chart = False
+
+        if info and any(info["index"].get(label) for label in ("코스피", "코스닥")):
+            use_chart = st.checkbox(
+                "지수 등락률을 꺾은선형 그래프로 보기 (체크 해제하면 표)",
+                key="wk_index_chart",
+                help=(
+                    "미리보기에서만 바뀝니다. 위 글칸과 복사 버튼의 내용은 "
+                    "항상 표 형태입니다."
+                ),
+            )
+
         with st.container(border=True):
-            st.markdown(report)
+            if use_chart:
+                render_report_with_chart(report, info)
+            else:
+                st.markdown(report)
 
 
 main()
