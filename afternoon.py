@@ -4794,8 +4794,8 @@ def render_stock_section(
     head.subheader(title)
 
     head.markdown(
-        "<span style='color:#D93025;font-weight:700;font-size:1.05rem'>"
-        "⚠️ 종목은 정확하지만 현재가·등락률은 실시간과 다를 수 있어 "
+        "<span style='color:#D93025;font-weight:600;font-size:1rem'>"
+        "종목은 정확하지만 현재가·등락률은 실시간과 다를 수 있어 "
         "확인 필수 (칸을 눌러 직접 수정 가능)</span>",
         unsafe_allow_html=True,
     )
@@ -4914,7 +4914,7 @@ def render_stock_section(
 
                 if source.get("url"):
                     safe_url = source["url"].replace(")", "%29").replace(" ", "%20")
-                    suffix = "" if source.get("direct", True) else " 🔍 검색 결과로 이동"
+                    suffix = "" if source.get("direct", True) else " · 검색 결과로 이동"
 
                     original = source.get("original")
 
@@ -4943,214 +4943,6 @@ def pick_universe(changed):
     other = "uni_all" if changed == "uni_cap100" else "uni_cap100"
 
     st.session_state[other] = not st.session_state[changed]
-
-
-def apply_label_style(theme_mode="라이트"):
-    """라이트/블랙 테마와 큰 글자 스타일을 적용합니다. 미리보기 내용 생성 로직은 유지합니다."""
-
-    if theme_mode == "블랙":
-        page_bg = "#080D18"
-        panel_bg = "#111A2A"
-        panel_alt = "#172338"
-        panel_border = "#34445F"
-        text_main = "#F8FAFF"
-        text_muted = "#C0CBDA"
-        input_bg = "#0D1728"
-        accent = "#75A7FF"
-        positive = "#FF7777"
-        negative = "#69A7FF"
-        shadow = "rgba(0, 0, 0, .28)"
-    else:
-        page_bg = "#EEF3FA"
-        panel_bg = "#FFFFFF"
-        panel_alt = "#F7F9FD"
-        panel_border = "#CBD6E5"
-        text_main = "#101B2D"
-        text_muted = "#45546A"
-        input_bg = "#FFFFFF"
-        accent = "#174EA6"
-        positive = "#D92D20"
-        negative = "#175CD3"
-        shadow = "rgba(28, 48, 78, .08)"
-
-    st.markdown(
-        f"""
-        <style>
-        :root {{
-            --mtnw-page: {page_bg};
-            --mtnw-panel: {panel_bg};
-            --mtnw-panel-alt: {panel_alt};
-            --mtnw-border: {panel_border};
-            --mtnw-text: {text_main};
-            --mtnw-muted: {text_muted};
-            --mtnw-input: {input_bg};
-            --mtnw-accent: {accent};
-            --mtnw-positive: {positive};
-            --mtnw-negative: {negative};
-            color-scheme: {'dark' if theme_mode == '블랙' else 'light'};
-        }}
-
-        .stApp {{ background: var(--mtnw-page); color: var(--mtnw-text); }}
-        .main .block-container {{
-            max-width: 1500px;
-            padding-top: 1.35rem;
-            padding-bottom: 3rem;
-            padding-left: clamp(1rem, 3vw, 2.8rem);
-            padding-right: clamp(1rem, 3vw, 2.8rem);
-        }}
-
-        /* 기본 글자: 크고 진하게 */
-        .stMarkdown, .stMarkdown p, .stMarkdown li,
-        [data-testid="stText"], [data-testid="stCaptionContainer"] p {{
-            color: var(--mtnw-text) !important;
-            font-size: 1.02rem !important;
-            font-weight: 550 !important;
-            line-height: 1.62 !important;
-        }}
-        h1 {{
-            color: var(--mtnw-text) !important;
-            font-size: clamp(2rem, 2.8vw, 2.55rem) !important;
-            font-weight: 900 !important;
-            letter-spacing: -.045em !important;
-            margin-bottom: .5rem !important;
-        }}
-        h2 {{
-            color: var(--mtnw-text) !important;
-            font-size: 1.62rem !important;
-            font-weight: 900 !important;
-            letter-spacing: -.03em !important;
-            margin-top: 1.65rem !important;
-            margin-bottom: .85rem !important;
-        }}
-        h3 {{
-            color: var(--mtnw-text) !important;
-            font-size: 1.32rem !important;
-            font-weight: 850 !important;
-            letter-spacing: -.02em !important;
-            margin-top: 1.2rem !important;
-            margin-bottom: .7rem !important;
-        }}
-        strong, b {{ color: var(--mtnw-text) !important; font-weight: 850 !important; }}
-
-        [data-testid="stVerticalBlock"] {{ gap: .9rem; }}
-        [data-testid="stHorizontalBlock"] {{ gap: .9rem; }}
-        [data-testid="stCaptionContainer"] p {{
-            color: var(--mtnw-muted) !important;
-            font-size: .94rem !important;
-            font-weight: 600 !important;
-            line-height: 1.55 !important;
-        }}
-
-        /* 라벨 및 입력 글자 */
-        [data-testid="stWidgetLabel"] p,
-        [data-testid="stWidgetLabel"] span,
-        [data-testid="stCheckbox"] label p,
-        [data-testid="stRadio"] label p {{
-            color: var(--mtnw-text) !important;
-            font-size: 1.04rem !important;
-            font-weight: 800 !important;
-            opacity: 1 !important;
-        }}
-        [data-testid="stTextInput"] input,
-        [data-testid="stTextArea"] textarea,
-        [data-testid="stNumberInput"] input,
-        [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
-        [data-testid="stMultiSelect"] div[data-baseweb="select"] > div {{
-            background: var(--mtnw-input) !important;
-            color: var(--mtnw-text) !important;
-            border: 1px solid var(--mtnw-border) !important;
-            border-radius: 11px !important;
-            font-size: 1.02rem !important;
-            font-weight: 650 !important;
-        }}
-        [data-testid="stTextArea"] textarea {{ line-height: 1.65 !important; }}
-
-        /* 버튼 */
-        .stButton > button {{
-            min-height: 2.9rem;
-            border-radius: 11px;
-            border: 1px solid var(--mtnw-border);
-            color: var(--mtnw-text) !important;
-            font-size: 1rem !important;
-            font-weight: 850 !important;
-            background: var(--mtnw-panel) !important;
-            box-shadow: 0 2px 8px {shadow};
-            transition: border-color .15s ease, transform .15s ease;
-        }}
-        .stButton > button:hover {{ border-color: var(--mtnw-accent); transform: translateY(-1px); }}
-        .stButton > button[kind="primary"] {{
-            background: var(--mtnw-accent) !important;
-            color: #FFFFFF !important;
-            border: 0;
-            box-shadow: 0 3px 12px {shadow};
-        }}
-
-        /* 데이터 표 / 카드 / 접이식 영역 */
-        [data-testid="stDataFrame"], [data-testid="stTable"] {{
-            border: 1px solid var(--mtnw-border);
-            border-radius: 13px;
-            overflow: hidden;
-            background: var(--mtnw-panel);
-        }}
-        [data-testid="stExpander"] {{
-            border: 1px solid var(--mtnw-border) !important;
-            border-radius: 14px !important;
-            background: var(--mtnw-panel) !important;
-            overflow: hidden;
-            box-shadow: 0 3px 12px {shadow};
-        }}
-        [data-testid="stExpander"] summary {{ padding: .95rem 1.1rem !important; }}
-        [data-testid="stExpander"] summary p {{
-            color: var(--mtnw-text) !important;
-            font-size: 1.12rem !important;
-            font-weight: 850 !important;
-        }}
-        [data-testid="stSidebar"] {{
-            background: var(--mtnw-panel);
-            border-right: 1px solid var(--mtnw-border);
-        }}
-        [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {{ gap: .85rem; }}
-        [data-testid="stAlert"] {{ border-radius: 12px; }}
-        [data-testid="stAlert"] p {{ font-size: 1rem !important; font-weight: 650 !important; }}
-
-        /* 상단 테마 선택 컨트롤 */
-        [data-testid="stRadio"] > div {{ gap: .45rem; }}
-        [data-testid="stRadio"] label {{
-            background: var(--mtnw-panel) !important;
-            border: 1px solid var(--mtnw-border) !important;
-            border-radius: 10px !important;
-            padding: .35rem .7rem !important;
-        }}
-
-        /* 시황글 미리보기는 기존 글자 크기와 밀도를 유지 */
-        .st-key-preview_container .stMarkdown p,
-        .st-key-preview_container .stMarkdown li {{
-            font-size: 1rem !important;
-            font-weight: 400 !important;
-            line-height: 1.5 !important;
-        }}
-        .st-key-preview_container .stMarkdown h1 {{
-            font-size: clamp(1.7rem, 2.4vw, 2.25rem) !important;
-            font-weight: 800 !important;
-        }}
-        .st-key-preview_container .stMarkdown h2,
-        .st-key-preview_container .stMarkdown h3 {{
-            font-size: revert !important;
-            font-weight: 750 !important;
-        }}
-
-        @media (max-width: 760px) {{
-            .main .block-container {{ padding: 1rem .8rem 2rem .8rem; }}
-            [data-testid="stHorizontalBlock"] {{ gap: .5rem; }}
-            h1 {{ font-size: 1.8rem !important; }}
-            h2 {{ font-size: 1.4rem !important; }}
-            h3 {{ font-size: 1.2rem !important; }}
-            [data-testid="stWidgetLabel"] p {{ font-size: .98rem !important; }}
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 def main():
@@ -5261,7 +5053,7 @@ def main():
     @st.fragment(run_every=refresh_every if refresh_every else None)
     def body():
 
-        st.markdown("### ⚙️ 시세 조회")
+        st.markdown("### 시세 조회")
         with st.container(border=True):
             reset_col, fetch_col, info_col = st.columns([1.35, 1.35, 3.3], vertical_alignment="center")
             reset_clicked = reset_col.button(
@@ -5270,7 +5062,8 @@ def main():
                 help="직접 수정한 현재가와 등락률을 조회 데이터 기준으로 초기화합니다.",
             )
             fetch_clicked = fetch_col.button(
-                "🔄 지금 시세 조회",
+                "지금 시세 조회",
+                icon=":material/refresh:",
                 type="primary",
                 use_container_width=True,
             )
@@ -5348,7 +5141,7 @@ def main():
 
         if st.session_state.get("company_news_error"):
             st.caption(
-                "⚠️ 토스 종목 뉴스 조회 실패: "
+                "토스 종목 뉴스 조회 실패: "
                 + st.session_state["company_news_error"]
             )
 
@@ -5375,10 +5168,10 @@ def main():
         st.markdown("### 시장 지표")
         render_market_cards(snapshot)
 
-        st.markdown("### 🔎 오늘의 급등·급락 종목")
+        st.markdown("### 오늘의 급등·급락 종목")
         with st.container(border=True):
             render_stock_section(
-                f"🔺 급등 특징주 TOP 5{CAP_SUFFIX if is_cap else ''}",
+                f"급등 특징주 TOP 5{CAP_SUFFIX if is_cap else ''}",
                 snapshot["gainers"],
                 "up",
                 "🔺",
@@ -5391,7 +5184,7 @@ def main():
 
         with st.container(border=True):
             render_stock_section(
-                f"🔻 급락 특징주 TOP 5{CAP_SUFFIX if is_cap else ''}",
+                f"급락 특징주 TOP 5{CAP_SUFFIX if is_cap else ''}",
                 snapshot["losers"],
                 "down",
                 "🔻",
@@ -5408,7 +5201,7 @@ def main():
             autofill_themes()
 
         with st.expander(
-            "📝 시황글 추가 내용 편집 · 이슈·뉴스·테마·체크포인트",
+            "시황글 추가 내용 편집 · 이슈·뉴스·테마·체크포인트",
             expanded=False
         ):
             st.caption(
@@ -5427,7 +5220,7 @@ def main():
 
             summary_btn_col, summary_note_col = st.columns([1.7, 5], vertical_alignment="center")
             summary_btn_col.button(
-                "✨ 한 줄 요약 자동 생성 / 다시 생성",
+                "한 줄 요약 자동 생성 / 다시 생성",
                 key="summary_generate_btn",
                 on_click=autofill_summary,
                 use_container_width=True,
@@ -5451,11 +5244,11 @@ def main():
             summary_alts = st.session_state.get("summary_alts") or []
 
             if summary_alts:
-                with st.expander("✍️ 다른 헤드라인 후보 (마음에 들면 위 칸에 직접 붙여넣으세요)"):
+                with st.expander("다른 헤드라인 후보 (마음에 들면 위 칸에 직접 붙여넣으세요)"):
                     for alt in summary_alts:
                         st.markdown(f"- {alt}")
             
-            with st.expander("📰 토스증권 주요 뉴스 불러오기", expanded=False):
+            with st.expander("토스증권 주요 뉴스 불러오기", expanded=False):
                 st.caption(
                     "토스증권 공개 대시보드 뉴스입니다. 개인화 추천 피드나 커뮤니티 댓글은 불러오지 않습니다. "
                     "뉴스 제목/링크를 이슈 입력칸으로 옮긴 뒤 기사 본문을 확인할 수 있습니다."
@@ -5473,7 +5266,8 @@ def main():
                 )
                 news_btn_col, news_note_col = st.columns([1.6, 5], vertical_alignment="center")
                 news_btn_col.button(
-                    "🔄 토스 뉴스 불러오기",
+                    "토스 뉴스 불러오기",
+                    icon=":material/refresh:",
                     key="toss_news_fetch_btn",
                     on_click=load_toss_dashboard_news,
                     args=(news_type_labels[st.session_state.get("toss_news_type_label", "최신 뉴스")],),
@@ -5485,7 +5279,7 @@ def main():
                 if toss_news_items:
                     news_note_col.caption(f"{len(toss_news_items)}건 표시 · 조회 결과는 최대 3분간 캐시됩니다.")
 
-                    with st.expander("🔧 토스 뉴스 원본 구조 확인 (첫 번째 기사)"):
+                    with st.expander("토스 뉴스 원본 구조 확인 (첫 번째 기사)"):
                         st.json(toss_news_items[0].get("raw") or {})
 
                     for news_idx, news_item in enumerate(toss_news_items):
@@ -5538,10 +5332,9 @@ def main():
                 [class*="st-key-issue_card_"] {
                     background: var(--card);
                     border: 1px solid var(--line) !important;
-                    border-radius: 14px !important;
+                    border-radius: 16px !important;
                     overflow: hidden;
-                    box-shadow: 0 1px 3px rgba(25, 31, 40, .05);
-                    margin-bottom: .6rem;
+                    margin-bottom: .5rem;
                 }
                 .is-head {
                     margin: -1rem -1rem .9rem;
@@ -5549,7 +5342,7 @@ def main():
                     background: var(--alt);
                     border-bottom: 1px solid var(--hair);
                     font-size: 1.05rem;
-                    font-weight: 800;
+                    font-weight: 600;
                     color: var(--text);
                 }
                 .is-head span {
@@ -5563,7 +5356,7 @@ def main():
                     padding-top: .8rem;
                     border-top: 1px solid var(--hair);
                     font-size: .82rem;
-                    font-weight: 700;
+                    font-weight: 600;
                     color: var(--muted);
                 }
                 </style>
@@ -5642,7 +5435,7 @@ def main():
                     s1, s2 = st.columns([1.4, 5], vertical_alignment="center")
 
                     s1.button(
-                        "✨ 핵심 정리",
+                        "핵심 정리",
                         key=f"is{i}sum",
                         on_click=summarize_issue,
                         args=(i,),
@@ -5668,7 +5461,8 @@ def main():
             t1, t2 = st.columns([1.6, 5], vertical_alignment="center")
 
             t1.button(
-                "🔄 강한 테마 자동 불러오기",
+                "강한 테마 자동 불러오기",
+                icon=":material/refresh:",
                 key="themes_btn",
                 on_click=autofill_themes,
             )
@@ -5689,7 +5483,7 @@ def main():
                 reverse=True,
             )
             if sector_items_for_ui:
-                with st.expander("🏭 토스증권 산업별 주요 종목", expanded=False):
+                with st.expander("토스증권 산업별 주요 종목", expanded=False):
                     st.caption(
                         "토스증권 공개 산업 데이터 기준 · 대표 종목은 시가총액 내림차순 상위 최대 5개입니다. "
                         "데이터는 조회 시점의 스냅샷이며, 실시간 체결 오버레이와 다를 수 있습니다."
@@ -5727,7 +5521,8 @@ def main():
             c1, c2 = st.columns([1.6, 5], vertical_alignment="center")
 
             c1.button(
-                "🔄 다음 영업일 정보 넣기",
+                "다음 영업일 정보 넣기",
+                icon=":material/refresh:",
                 key="checks_btn",
                 on_click=autofill_checks,
             )
@@ -5745,7 +5540,7 @@ def main():
                 "keywords", "#코스피 #코스닥 #급등주 #급락주 #주식시황"
             )
             keyword_col, keyword_note_col = st.columns([1.6, 5], vertical_alignment="center")
-            if keyword_col.button("🔄 핵심 키워드 자동 생성", key="keywords_btn"):
+            if keyword_col.button("핵심 키워드 자동 생성", key="keywords_btn", icon=":material/refresh:"):
                 st.session_state["keywords"] = generate_core_keywords(snapshot)
                 st.session_state["keywords_note"] = (
                     "당일 강세 산업·급등/급락 종목·주요 이슈를 반영했습니다."
@@ -5769,9 +5564,9 @@ def main():
         copy_buttons(build_markdown(snapshot, NOW_TOKEN))
 
         # ▼▼▼ 여기에 추가 (들여쓰기 공백 8칸) ▼▼▼
-        if st.button("💾 오늘 오후 시황글 저장 (주간 정리용)", key="save_aft_btn"):
+        if st.button("오늘 오후 시황글 저장 (주간 정리용)", key="save_aft_btn", icon=":material/save:"):
             save_post("aft", markdown)
-            st.toast("오후 시황글을 저장했습니다.", icon="✅")
+            st.toast("오후 시황글을 저장했습니다.", icon=":material/check:")
         # ▲▲▲ 여기까지 ▲▲▲
 
         with st.container(border=True, key="preview_container"):
@@ -5792,7 +5587,7 @@ def main():
 #
 # [2단계] app.py에서 Ctrl+F 로  주요 시장 지표  를 검색.
 #         `st.markdown("### 📊 주요 시장 지표")` 줄부터
-#         `st.markdown("### 🔎 오늘의 급등·급락 종목")` 줄 "바로 위"까지
+#         `st.markdown("### 오늘의 급등·급락 종목")` 줄 "바로 위"까지
 #         (지표 박스 2개, 약 45줄)를 지우고 아래 두 줄로 교체:
 #
 #             st.markdown("### 시장 지표")
@@ -5825,7 +5620,7 @@ def apply_label_style(theme_mode="라이트"):
     st.markdown(
         f"""
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700&display=swap');
 
         :root {{
             --bg: {page_bg}; --card: {card_bg}; --alt: {card_alt};
@@ -5870,10 +5665,10 @@ def apply_label_style(theme_mode="라이트"):
             font-size: .82rem !important;
             font-weight: 400 !important;
         }}
-        h1 {{ font-size: 1.7rem !important; font-weight: 800 !important; letter-spacing: -.03em !important; color: var(--text) !important; }}
-        h2 {{ font-size: 1.3rem !important; font-weight: 800 !important; letter-spacing: -.02em !important; color: var(--text) !important; }}
-        h3 {{ font-size: 1.12rem !important; font-weight: 800 !important; letter-spacing: -.02em !important; color: var(--text) !important; margin: 1.4rem 0 .6rem !important; }}
-        strong, b {{ color: var(--text) !important; font-weight: 700 !important; }}
+        h1 {{ font-size: 1.7rem !important; font-weight: 600 !important; letter-spacing: -.02em !important; color: var(--text) !important; }}
+        h2 {{ font-size: 1.3rem !important; font-weight: 600 !important; letter-spacing: -.01em !important; color: var(--text) !important; }}
+        h3 {{ font-size: 1.12rem !important; font-weight: 600 !important; letter-spacing: normal !important; color: var(--text) !important; margin: 1.5rem 0 .5rem !important; }}
+        strong, b {{ color: var(--text) !important; font-weight: 600 !important; }}
 
         /* 카드: 테두리 있는 컨테이너·접이식 영역 */
         [data-testid="stVerticalBlockBorderWrapper"] {{
@@ -5887,11 +5682,11 @@ def apply_label_style(theme_mode="라이트"):
             border-radius: 16px !important;
             box-shadow: none !important;
         }}
-        [data-testid="stExpander"] summary p {{ font-size: 1rem !important; font-weight: 700 !important; }}
+        [data-testid="stExpander"] summary p {{ font-size: 1rem !important; font-weight: 600 !important; }}
 
         /* 입력창: 얇은 회색 테두리, 포커스 시 그린 */
         [data-testid="stWidgetLabel"] p, [data-testid="stCheckbox"] label p {{
-            color: var(--text) !important; font-size: .88rem !important; font-weight: 600 !important;
+            color: var(--muted) !important; font-size: .88rem !important; font-weight: 500 !important;
         }}
         [data-testid="stTextInput"] input,
         [data-testid="stTextArea"] textarea,
@@ -5918,9 +5713,11 @@ def apply_label_style(theme_mode="라이트"):
             background: var(--card) !important;
             color: var(--text) !important;
             font-size: .9rem !important;
-            font-weight: 700 !important;
+            font-weight: 600 !important;
             box-shadow: none;
+            transition: border-color .15s ease, color .15s ease, background-color .15s ease;
         }}
+        .stButton > button:focus-visible {{ outline: 2px solid var(--green); outline-offset: 2px; }}
         .stButton > button:hover {{ border-color: var(--green); color: var(--green) !important; }}
         .stButton > button[kind="primary"] {{
             background: var(--green) !important;
@@ -5936,7 +5733,7 @@ def apply_label_style(theme_mode="라이트"):
             border-radius: 999px !important;
             padding: .2rem .8rem !important;
         }}
-        [data-testid="stRadio"] label p {{ font-size: .82rem !important; font-weight: 700 !important; }}
+        [data-testid="stRadio"] label p {{ font-size: .82rem !important; font-weight: 600 !important; }}
 
         [data-testid="stSidebar"] {{ background: var(--card); border-right: 1px solid var(--hair); }}
         [data-testid="stAlert"] {{ border-radius: 12px; }}
@@ -5956,12 +5753,12 @@ def apply_label_style(theme_mode="라이트"):
         }}
         .mk-card.sel {{ background: var(--card); border-color: var(--text); }}
         .mk-name {{ font-size: .8rem; font-weight: 600; color: var(--muted); }}
-        .mk-name b {{ color: var(--text) !important; font-weight: 700 !important; margin-right: 4px; }}
+        .mk-name b {{ color: var(--text) !important; font-weight: 600 !important; margin-right: 6px; }}
         .mk-price {{
-            margin-top: 6px; font-size: 1.45rem; font-weight: 800;
-            letter-spacing: -.02em; color: var(--text); font-variant-numeric: tabular-nums;
+            margin-top: 8px; font-size: 1.45rem; font-weight: 600;
+            letter-spacing: -.01em; color: var(--text); font-variant-numeric: tabular-nums;
         }}
-        .mk-chg {{ margin-top: 2px; font-size: .8rem; font-weight: 600; font-variant-numeric: tabular-nums; }}
+        .mk-chg {{ margin-top: 4px; font-size: .8rem; font-weight: 600; font-variant-numeric: tabular-nums; }}
         .mk-up {{ color: var(--up); }}
         .mk-down {{ color: var(--down); }}
         .mk-flat {{ color: var(--muted); }}
