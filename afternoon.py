@@ -4702,6 +4702,12 @@ def copy_buttons(markdown):
     ).replace("</", "<\\/")
 
     page = f"""
+    <style>
+      body {{ margin: 0; font-family: sans-serif; color: #8E9299; font-size: 13px; }}
+      button {{ background: #1E1F21; color: #ECEDEF; border: 1px solid #2A2B2E;
+               border-radius: 10px; padding: 8px 14px; font-size: 13px; cursor: pointer; margin-right: 6px; }}
+      button:hover {{ border-color: #03C75A; }}
+    </style>
     <button id="rich">복사 (서식 포함)</button>
     <button id="plain">복사 (마크다운)</button>
     <span id="status"></span>
@@ -4794,7 +4800,7 @@ def render_stock_section(
     head.subheader(title)
 
     head.markdown(
-        "<span style='color:#D93025;font-weight:600;font-size:1rem'>"
+        "<span style='color:#FF6B6B;font-weight:600;font-size:1rem'>"
         "종목은 정확하지만 현재가·등락률은 실시간과 다를 수 있어 "
         "확인 필수 (칸을 눌러 직접 수정 가능)</span>",
         unsafe_allow_html=True,
@@ -5600,13 +5606,13 @@ def main():
 def apply_label_style(theme_mode="라이트"):
     """네이버페이 증권 느낌의 화이트 카드 UI. 상승=빨강, 하락=파랑(국내 증권 관례)."""
 
-    dark = False  # 라이트 전용
+    dark = True  # 어두운 화면 (라이트로 되돌리려면 False)
 
     if dark:
-        page_bg, card_bg, card_alt = "#101215", "#1A1D21", "#23272D"
-        border, text, muted = "#2E343B", "#F2F4F6", "#9AA4AF"
+        page_bg, card_bg, card_alt = "#0F1011", "#161718", "#1E1F21"
+        border, text, muted = "#2A2B2E", "#ECEDEF", "#8E9299"
         up, down = "#FF6B6B", "#5B9BFF"
-        hair = "#2E343B"
+        hair = "#222325"
     else:
         page_bg, card_bg, card_alt = "#FFFFFF", "#FFFFFF", "#F5F6F8"
         border, text, muted = "#E3E6EA", "#191F28", "#8B95A1"
@@ -5720,11 +5726,11 @@ def apply_label_style(theme_mode="라이트"):
         .stButton > button:focus-visible {{ outline: 2px solid var(--green); outline-offset: 2px; }}
         .stButton > button:hover {{ border-color: var(--green); color: var(--green) !important; }}
         .stButton > button[kind="primary"] {{
-            background: var(--green) !important;
-            border-color: var(--green);
-            color: #FFFFFF !important;
+            background: var(--text) !important;
+            border-color: var(--text);
+            color: var(--bg) !important;
         }}
-        .stButton > button[kind="primary"]:hover {{ filter: brightness(.95); color: #FFFFFF !important; }}
+        .stButton > button[kind="primary"]:hover {{ filter: brightness(.9); color: var(--bg) !important; }}
 
         /* 상단 테마 토글: 작은 알약 */
         [data-testid="stRadio"] label {{
@@ -5751,7 +5757,7 @@ def apply_label_style(theme_mode="라이트"):
             border-radius: 12px;
             padding: 12px 14px 12px;
         }}
-        .mk-card.sel {{ background: var(--card); border-color: var(--text); }}
+        .mk-card.sel {{ background: var(--card); border-color: var(--muted); }}
         .mk-name {{ font-size: .8rem; font-weight: 600; color: var(--muted); }}
         .mk-name b {{ color: var(--text) !important; font-weight: 600 !important; margin-right: 6px; }}
         .mk-price {{
