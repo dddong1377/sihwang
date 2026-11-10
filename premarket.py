@@ -1246,10 +1246,9 @@ def toss_chart_get(market, code, step, count):
         return []
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_toss_index_candle(code):
+def fetch_toss_index_minute(code):
     """
-    지수 개별 차트에서 최신 1분봉의 종가·시각과 전일 종가를 가져옵니다.
+    (백업) 지수 개별 차트에서 최신 1분봉의 종가·시각과 전일 종가를 가져옵니다.
     반환: {'latest','base','time','market'} / 실패하면 None.
     """
 
@@ -1293,6 +1292,78 @@ def fetch_toss_index_candle(code):
         }
 
     return None
+
+
+def toss_info_get(path):
+    """wts-info-api(공개) GET → result 딕셔너리. 실패하면 None."""
+
+    try:
+        response = requests.get(
+            f"{TOSS_INFO_BASE}{path}",
+            headers={
+                "User-Agent": TOSS_HEADERS["User-Agent"],
+                "Accept": "application/json, text/plain, */*",
+                "Origin": "https://www.tossinvest.com",
+                "Referer": "https://www.tossinvest.com/",
+            },
+            timeout=(5, 10),
+        )
+
+        if response.status_code != 200:
+            return None
+
+        result = response.json().get("result")
+
+        return result if isinstance(result, dict) else None
+
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_toss_index_candle(code):
+    """
+    지수 한 개의 현재값·전일 종가·기준 시각을 토스 공개 API에서 가져옵니다.
+    - 값: /api/v1/index-prices/{code} 의 close, base
+    - 시각: /api/v2/index-infos/{code} 의 tradingEndAt (장마감 후) / 장중이면 현재 시각
+    값을 못 가져오면 1분봉 방식으로 한 번 더 시도합니다.
+    반환: {'latest','base','time','market'} / 실패하면 None.
+    """
+
+    quote = toss_info_get(f"/api/v1/index-prices/{code}") or {}
+
+    latest = safe_float(quote.get("close"))
+    base = safe_float(quote.get("base"))
+
+    if latest is None or not base:
+        return fetch_toss_index_minute(code)
+
+    meta = toss_info_get(f"/api/v2/index-infos/{code}") or {}
+
+    time_value = None
+
+    if meta.get("isMarketOpen") is True:
+        time_value = datetime.datetime.now(KST).isoformat()
+
+    elif meta.get("isMarketOpen") is False:
+        end_at = meta.get("tradingEndAt")
+
+        # 미래 시각(다음 세션 정보)이면 쓰지 않습니다.
+        if parse_timestamp(end_at) is not None:
+            time_value = end_at
+
+    if time_value is None:
+        backup = fetch_toss_index_minute(code)
+
+        if backup:
+            time_value = backup.get("time")
+
+    return {
+        "latest": latest,
+        "base": base,
+        "time": time_value,
+        "market": "index-prices",
+    }
 
 
 def toss_chart_row(label, kind, digits, code, data):
