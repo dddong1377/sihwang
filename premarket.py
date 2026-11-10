@@ -759,10 +759,10 @@ def toss_session_headers():
 # ===============================================================
 
 @st.cache_data(ttl=60, show_spinner=False)
-def get_toss_indicators():
+def get_toss_indicators(market="kr"):
     response = requests.get(
         TOSS_INDICATOR_URL,
-        params={"market": "kr"},
+        params={"market": market},
         headers=toss_session_headers(),
         timeout=15,
     )
@@ -785,6 +785,42 @@ def get_toss_indicators():
         raise RuntimeError(
             "Toss API 응답에서 majorIndicatorInfos를 찾을 수 없습니다."
         )
+
+    return infos
+
+
+# kr 응답에 없는 해외 지수(다우존스 등)를 찾기 위해 추가로 조회하는 시장 값
+EXTRA_INDICATOR_MARKETS = ("us",)
+
+
+def get_all_toss_indicators():
+    """kr 지표에 더해 다른 시장 값의 지표를 합칩니다. 추가 조회가 실패해도 kr 결과는 유지합니다."""
+
+    infos = list(get_toss_indicators("kr"))
+
+    seen = {
+        str(info.get("code"))
+        for info in infos
+        if isinstance(info, dict)
+    }
+
+    for market in EXTRA_INDICATOR_MARKETS:
+        try:
+            extra = get_toss_indicators(market)
+        except Exception:
+            continue
+
+        for info in extra:
+            if not isinstance(info, dict):
+                continue
+
+            code = str(info.get("code"))
+
+            if code in seen:
+                continue
+
+            seen.add(code)
+            infos.append(info)
 
     return infos
 
@@ -988,6 +1024,88 @@ def is_futures_index(info):
 # 9. Toss 데이터 행 구성
 # ===============================================================
 
+# Toss가 내려주지 않는 지수는 야후 파이낸스(비공식)로 보충합니다.
+# 지금은 Toss만 사용합니다. 야후로 보충하려면 {"다우존스": "^DJI"}로 바꾸세요.
+YAHOO_FALLBACK_SYMBOLS = {}
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_yahoo_index(symbol):
+    """야후 차트 API에서 (현재가, 전일 종가, 시각)을 가져옵니다. 실패하면 None."""
+
+    from urllib.parse import quote
+
+    try:
+        response = requests.get(
+            "https://query1.finance.yahoo.com/v8/finance/chart/"
+            f"{quote(symbol, safe='')}",
+            params={"range": "5d", "interval": "1d"},
+            headers={"User-Agent": "Mozilla/5.0 (compatible; MTNW-Market/1.0)"},
+            timeout=8,
+        )
+
+        if response.status_code != 200:
+            return None
+
+        result = response.json()["chart"]["result"][0]
+        meta = result.get("meta") or {}
+
+        closes = [
+            safe_float(value)
+            for value in (
+                (result.get("indicators", {}).get("quote") or [{}])[0].get("close")
+                or []
+            )
+        ]
+        closes = [value for value in closes if value is not None]
+
+        price = safe_float(meta.get("regularMarketPrice"))
+
+        if price is None and closes:
+            price = closes[-1]
+
+        if price is None or not closes:
+            return None
+
+        # 마지막 봉이 현재가와 같으면 확정 종가이므로 그 앞 봉이 전일 종가
+        if len(closes) >= 2 and abs(closes[-1] - price) < 1e-6:
+            base = closes[-2]
+        else:
+            base = closes[-1]
+
+        return {
+            "latest": price,
+            "base": base,
+            "time": meta.get("regularMarketTime"),
+        }
+
+    except Exception:
+        return None
+
+
+def yahoo_index_row(label, kind, digits, code, symbol, data):
+    latest = data["latest"]
+    base = data["base"]
+    change = latest - base
+    pct = (change / base) * 100 if base else None
+
+    arrow = "🔺" if change > 0 else "🔻" if change < 0 else "➖"
+
+    if pct is None:
+        text = f"{latest:,.{digits}f} (등락 확인 불가)"
+    else:
+        text = f"{latest:,.{digits}f} ({change:+,.{digits}f}, {pct:+.2f}%) {arrow}"
+
+    return {
+        "label": label,
+        "kind": kind,
+        "text": text,
+        "date": format_timestamp(data.get("time")),
+        "note": f"야후 파이낸스({symbol}) 기준 · Toss 미제공",
+        "code": code,
+    }
+
+
 def find_info_by_alias(by_code, label, used_codes):
     """코드가 달라 못 찾은 지수를 Toss가 내려준 이름으로 찾습니다."""
 
@@ -1035,6 +1153,16 @@ def build_toss_rows(infos):
                 actual = str(info.get("code") or "").strip()
                 used_codes.add(actual)
                 matched_note = f"Toss 코드 {actual} (이름으로 찾음)"
+
+        if not info and label in YAHOO_FALLBACK_SYMBOLS:
+            symbol = YAHOO_FALLBACK_SYMBOLS[label]
+            fallback = fetch_yahoo_index(symbol)
+
+            if fallback:
+                rows.append(
+                    yahoo_index_row(label, kind, digits, code, symbol, fallback)
+                )
+                continue
 
         if not info:
             rows.append({
@@ -1222,7 +1350,7 @@ def fetch_indices():
     state = st.session_state
 
     try:
-        infos = get_toss_indicators()
+        infos = get_all_toss_indicators()
         rows = build_toss_rows(infos)
 
         state["pm_indices"] = rows
@@ -2654,7 +2782,7 @@ def run_pipeline(mode, status):
         rows = state.get("pm_indices")
 
         if not rows:
-            infos = get_toss_indicators()
+            infos = get_all_toss_indicators()
             rows = build_toss_rows(infos)
 
             state["pm_indices"] = rows
