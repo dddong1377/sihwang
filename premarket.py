@@ -1366,6 +1366,130 @@ def fetch_toss_index_candle(code):
     }
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_toss_index_time(code):
+    """기준 시각만 필요할 때: 장마감 후면 장 마감 시각, 장중이면 현재 시각."""
+
+    meta = toss_info_get(f"/api/v2/index-infos/{code}") or {}
+
+    if meta.get("isMarketOpen") is True:
+        return datetime.datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+
+    if meta.get("isMarketOpen") is False:
+        return format_timestamp(meta.get("tradingEndAt"))
+
+    return "확인 불가"
+
+
+def verify_index_report(rows, code="DJI.DJI", label="다우존스"):
+    """
+    다우존스의 값이 토스 원천 데이터와 맞는지, 기준 시각이 다른 미국 지수와 같은지 점검합니다.
+    반환: (마크다운 표, 설명 줄 목록)
+    """
+
+    row = next((r for r in rows if r.get("label") == label), None)
+
+    price = toss_info_get(f"/api/v1/index-prices/{code}") or {}
+    meta = toss_info_get(f"/api/v2/index-infos/{code}") or {}
+    minute = fetch_toss_index_minute(code) or {}
+
+    src_close = safe_float(price.get("close"))
+    src_base = safe_float(price.get("base"))
+    src_pct = (
+        (src_close / src_base - 1) * 100
+        if src_close is not None and src_base
+        else None
+    )
+
+    min_close = minute.get("latest")
+    min_base = minute.get("base")
+    min_pct = (
+        (min_close / min_base - 1) * 100
+        if min_close is not None and min_base
+        else None
+    )
+
+    # 화면 표의 값 읽기
+    shown_close = shown_pct = shown_base = None
+
+    if row:
+        value_text, change_text = split_index_text(row.get("text"))
+        shown_close = safe_float(value_text)
+
+        found = re.search(r"([+-]?\d+(?:\.\d+)?)%", change_text or "")
+        shown_pct = float(found.group(1)) if found else None
+
+        diff = re.search(r"\(([+-][\d,\.]+),", str(row.get("text")))
+
+        if shown_close is not None and diff:
+            shown_base = shown_close - safe_float(diff.group(1))
+
+    def fmt(value, digits=2, suffix=""):
+        return "-" if value is None else f"{value:,.{digits}f}{suffix}"
+
+    def judge(a, b, tolerance):
+        if a is None or b is None:
+            return "비교 불가"
+
+        return "일치" if abs(a - b) <= tolerance else "불일치"
+
+    table = [
+        "| 항목 | 화면 표 | 토스 index-prices | 토스 1분봉 | 판정(표↔index-prices) |",
+        "|---|---:|---:|---:|---|",
+        f"| 현재값 | {fmt(shown_close)} | {fmt(src_close)} | {fmt(min_close)} | {judge(shown_close, src_close, 0.011)} |",
+        f"| 전일 종가 | {fmt(shown_base)} | {fmt(src_base)} | {fmt(min_base)} | {judge(shown_base, src_base, 0.02)} |",
+        f"| 등락률 | {fmt(shown_pct, 2, '%')} | {fmt(src_pct, 2, '%')} | {fmt(min_pct, 2, '%')} | {judge(shown_pct, src_pct, 0.011)} |",
+    ]
+
+    notes = []
+
+    # 기준 시각 비교
+    dow_time = (row or {}).get("date", "확인 불가")
+
+    others = {
+        name: next((r.get("date") for r in rows if r.get("label") == name), None)
+        for name in ("S&P500", "나스닥")
+    }
+
+    ref_times = {name: value for name, value in others.items() if value and value != "확인 불가"}
+
+    if dow_time == "확인 불가":
+        notes.append("다우존스 기준 시각을 확인하지 못했습니다.")
+
+    elif ref_times and all(value == dow_time for value in ref_times.values()):
+        notes.append(
+            f"기준 시각 동일: 다우존스 {dow_time} = "
+            + " · ".join(f"{name} {value}" for name, value in ref_times.items())
+        )
+
+    elif ref_times:
+        notes.append(
+            f"기준 시각 다름: 다우존스 {dow_time} / "
+            + " · ".join(f"{name} {value}" for name, value in ref_times.items())
+        )
+
+    else:
+        notes.append(f"다우존스 기준 시각 {dow_time} (비교할 다른 미국 지수 시각 없음)")
+
+    end_at = format_timestamp(meta.get("tradingEndAt"))
+    state_text = (
+        "장중" if meta.get("isMarketOpen") is True
+        else "장마감" if meta.get("isMarketOpen") is False
+        else "확인 불가"
+    )
+
+    notes.append(
+        f"토스 지수 정보: 상태 {state_text} · 세션 종료 {end_at} (한국 시간)"
+    )
+
+    if minute.get("time"):
+        notes.append(
+            f"토스 1분봉 마지막 봉 시각: {format_timestamp(minute.get('time'))}"
+        )
+
+    return "\n".join(table), notes
+
+
 def toss_chart_row(label, kind, digits, code, data):
     latest = data["latest"]
     base = data["base"]
@@ -1504,12 +1628,25 @@ def build_toss_rows(infos):
             )
             note = ""
 
+        row_note = note or matched_note
+
+        # 시각을 못 읽은 지수는 토스 지수 정보(index-infos)의 장 마감·현재 시각으로 보충
+        if date_text == "확인 불가" and code in TOSS_CHART_FALLBACK.values():
+            extra_time = fetch_toss_index_time(code)
+
+            if extra_time != "확인 불가":
+                date_text = extra_time
+                row_note = (
+                    (row_note + " · " if row_note else "")
+                    + "시각: Toss 지수 정보(index-infos)"
+                )
+
         rows.append({
             "label": label,
             "kind": kind,
             "text": text,
             "date": date_text,
-            "note": note or matched_note,
+            "note": row_note,
             "code": code,
         })
 
@@ -3850,6 +3987,122 @@ def load_archived_post(day_iso):
 # 17. 화면
 # ===============================================================
 
+US_REFERENCE_LABELS = ("S&P500", "나스닥", "필라델피아 반도체")
+
+
+def render_dow_check(rows):
+    """다우존스의 값과 기준 시각을 여러 토스 주소·다른 미국 지수와 비교해 보여줍니다. (확인용)"""
+
+    code = "DJI.DJI"
+    records = []
+
+    # 1) index-prices(값) + index-infos(시각) : 화면 표에 쓰는 방식
+    quote = toss_info_get(f"/api/v1/index-prices/{code}") or {}
+    meta = toss_info_get(f"/api/v2/index-infos/{code}") or {}
+
+    if meta.get("isMarketOpen") is False:
+        meta_time = format_timestamp(meta.get("tradingEndAt"))
+    elif meta.get("isMarketOpen") is True:
+        meta_time = "장중(실시간)"
+    else:
+        meta_time = "확인 불가"
+
+    records.append((
+        "index-prices + index-infos",
+        safe_float(quote.get("close")),
+        safe_float(quote.get("base")),
+        meta_time,
+    ))
+
+    # 2) 1분봉 차트
+    minute = fetch_toss_index_minute(code)
+
+    if minute:
+        records.append((
+            "c-chart 1분봉",
+            minute["latest"],
+            minute["base"],
+            format_timestamp(minute["time"]),
+        ))
+
+    # 3) 미니차트(쿠키 필요)
+    for info in get_toss_minichart_infos():
+        if str(info.get("code")) == code:
+            price = info.get("price") or {}
+
+            records.append((
+                "mini-chart(쿠키)",
+                safe_float(price.get("latestPrice")),
+                safe_float(price.get("basePrice")),
+                get_info_timestamp(info),
+            ))
+            break
+
+    lines = [
+        "| 출처 | 현재값 | 전일 종가 | 등락률 | 시각 |",
+        "|---|---|---|---|---|",
+    ]
+
+    for name, latest, base, when in records:
+        if latest is not None and base:
+            pct = f"{(latest / base - 1) * 100:+.2f}%"
+        else:
+            pct = "확인 불가"
+
+        latest_text = f"{latest:,.2f}" if latest is not None else "확인 불가"
+        base_text = f"{base:,.2f}" if base else "확인 불가"
+
+        lines.append(f"| {name} | {latest_text} | {base_text} | {pct} | {when} |")
+
+    row = next((r for r in rows if r.get("label") == "다우존스"), None)
+
+    if row:
+        lines.append(
+            f"| 화면 표의 다우존스 | {row['text']} | - | - | {row['date']} |"
+        )
+
+    st.markdown("\n".join(lines))
+
+    # 값 비교: 출처끼리 같은지
+    values = [r[1] for r in records if r[1] is not None]
+    bases = [r[2] for r in records if r[2]]
+
+    if len(values) >= 2 and max(values) - min(values) <= 0.01 and (
+        not bases or max(bases) - min(bases) <= 0.01
+    ):
+        st.success(f"값 일치: {len(values)}개 출처의 현재값·전일 종가가 같습니다.")
+    elif len(values) >= 2:
+        st.warning("출처마다 값이 다릅니다. 위 표를 확인해 주세요.")
+    else:
+        st.info("비교할 수 있는 출처가 1개뿐입니다.")
+
+    # 시각 비교: 다른 미국 지수의 기준 시각과 같은지
+    dow_time = records[0][3]
+
+    refs = {
+        r["label"]: r["date"]
+        for r in rows
+        if r.get("label") in US_REFERENCE_LABELS and r.get("date") != "확인 불가"
+    }
+
+    if refs and dow_time not in ("확인 불가", "장중(실시간)"):
+        same = [label for label, when in refs.items() if when == dow_time]
+        other = {label: when for label, when in refs.items() if when != dow_time}
+
+        if not other:
+            st.success(
+                f"기준 시각 일치: 다우존스 {dow_time} = "
+                + ", ".join(f"{label} {when}" for label, when in refs.items())
+            )
+        else:
+            st.warning(
+                f"기준 시각 차이: 다우존스 {dow_time} / "
+                + ", ".join(f"{label} {when}" for label, when in refs.items())
+            )
+    else:
+        st.info("기준 시각을 비교할 수 없습니다(다른 미국 지수의 시각이 없거나 장중입니다).")
+
+
 def main():
     state = st.session_state
 
@@ -3901,6 +4154,27 @@ def main():
             if state.get("pm_toss_list"):
                 with st.expander("Toss가 내려준 전체 지표 목록 (코드 확인용)"):
                     st.code("\n".join(state["pm_toss_list"]))
+
+            with st.expander("다우존스 값·시각 검증 (다른 미국 지수와 비교)"):
+                st.caption(
+                    "다우존스를 여러 토스 주소로 조회해 값이 같은지, "
+                    "기준 시각이 S&P500·나스닥 등과 같은지 확인합니다."
+                )
+
+                if st.button("검증 실행", key="dow_check_btn"):
+                    render_dow_check(rows)
+
+            with st.expander("다우존스 값·기준 시각 검증"):
+                try:
+                    verify_table, verify_notes = verify_index_report(rows)
+
+                    st.markdown(verify_table)
+
+                    for note_line in verify_notes:
+                        st.caption(note_line)
+
+                except Exception as error:
+                    st.caption(f"검증 실패: {str(error)[:200]}")
 
         else:
             st.caption(
