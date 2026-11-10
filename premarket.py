@@ -617,7 +617,7 @@ MAIN_INDEX_LABELS = (
 
 INDEX_NAME_ALIASES = {
     "다우존스": (
-        "다우존스", "다우 산업", "Dow Jones",
+        "다우존스", "다우 산업", "다우", "Dow Jones",
         "Dow Jones Industrial Average",
     ),
     "S&P500": (
@@ -1227,6 +1227,13 @@ def fetch_indices():
 
         state["pm_indices"] = rows
         state["pm_main_indices"] = build_main_index_rows(rows)
+
+        # 지수를 못 찾을 때 실제 코드·이름을 확인할 수 있도록 전체 목록 보관
+        state["pm_toss_list"] = [
+            f"{info.get('code')} · {get_info_name(info)}"
+            for info in infos
+            if isinstance(info, dict)
+        ]
 
         state["pm_indices_note"] = (
             f"Toss 조회 완료 · "
@@ -3460,6 +3467,10 @@ def main():
                 "선물 지수는 제외하며, 응답에 없는 지수는 확인 불가로 표시합니다. "
                 "기준 시각은 캔들 데이터에서 확인되는 시간만 표시합니다."
             )
+
+            if state.get("pm_toss_list"):
+                with st.expander("Toss가 내려준 전체 지표 목록 (코드 확인용)"):
+                    st.code("\n".join(state["pm_toss_list"]))
 
         else:
             st.caption(
