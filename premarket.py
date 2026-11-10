@@ -995,38 +995,69 @@ TOSS_INFO_BASE = "https://wts-info-api.tossinvest.com"
 TIME_REFERENCE_LABELS = ("S&P500", "나스닥")
 
 
-def toss_info_get(path):
+def toss_public_headers(code):
+    """브라우저가 wts-info-api에 보내는 것과 같은 이름의 헤더를 만듭니다."""
+
+    headers = dict(TOSS_HEADERS)
+    headers["Referer"] = f"https://www.tossinvest.com/indices/{code}"
+
+    headers["app-version"] = (
+        secret("TOSS_INDICATOR_APP_VERSION")
+        or secret("TOSS_NEWS_APP_VERSION")
+        or secret("TOSS_CALENDAR_APP_VERSION")
+        or "v261106.2137"
+    )
+
+    tab_id = (
+        secret("TOSS_INDICATOR_BROWSER_TAB_ID")
+        or secret("TOSS_NEWS_BROWSER_TAB_ID")
+        or secret("TOSS_CALENDAR_BROWSER_TAB_ID")
+    )
+
+    if tab_id:
+        headers["browser-tab-id"] = tab_id
+
+    return headers
+
+
+def toss_info_get(path, code):
+    """(result, 오류 설명). 성공하면 오류 설명은 빈 문자열."""
+
     try:
         response = requests.get(
             f"{TOSS_INFO_BASE}{path}",
-            headers=TOSS_HEADERS,
+            headers=toss_public_headers(code),
             timeout=(5, 10),
         )
 
         if response.status_code != 200:
-            return None
+            return None, f"HTTP {response.status_code}"
 
         result = response.json().get("result")
 
-        return result if isinstance(result, dict) else None
+        if isinstance(result, dict):
+            return result, ""
 
-    except Exception:
-        return None
+        return None, "응답 형식 오류"
+
+    except Exception as error:
+        return None, type(error).__name__
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_toss_index_quote(code):
     """값: index-prices의 close/base, 시각: index-infos의 장마감 시각(장중이면 현재)."""
 
-    price = toss_info_get(f"/api/v1/index-prices/{code}") or {}
+    price, error = toss_info_get(f"/api/v1/index-prices/{code}", code)
 
-    latest = safe_float(price.get("close"))
-    base = safe_float(price.get("base"))
+    latest = safe_float((price or {}).get("close"))
+    base = safe_float((price or {}).get("base"))
 
     if latest is None or not base:
-        return None
+        return {"error": f"index-prices {error or '값 없음'}"}
 
-    meta = toss_info_get(f"/api/v2/index-infos/{code}") or {}
+    meta, _ = toss_info_get(f"/api/v2/index-infos/{code}", code)
+    meta = meta or {}
 
     if meta.get("isMarketOpen") is False:
         when = meta.get("tradingEndAt")
@@ -1034,6 +1065,59 @@ def fetch_toss_index_quote(code):
         when = datetime.datetime.now(KST).isoformat()
 
     return {"latest": latest, "base": base, "time": when}
+
+
+# 2순위가 실패하면 쿠키가 필요한 미니차트에서 같은 코드로 찾습니다.
+TOSS_MINICHART_URL = (
+    "https://wts-cert-api.tossinvest.com"
+    "/api/v3/dashboard/wts/overview/indicator/mini-chart"
+)
+
+
+def collect_indicator_infos(value, found):
+    """응답 구조와 상관없이 code + price.latestPrice가 있는 항목을 모읍니다."""
+
+    if isinstance(value, dict):
+        price = value.get("price")
+
+        if value.get("code") and isinstance(price, dict) and "latestPrice" in price:
+            found.append(value)
+
+        for item in value.values():
+            if isinstance(item, (dict, list)):
+                collect_indicator_infos(item, found)
+
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, (dict, list)):
+                collect_indicator_infos(item, found)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_toss_minichart_infos():
+    headers = toss_session_headers()
+    headers.update({
+        k: v for k, v in toss_public_headers("DJI.DJI").items()
+        if k in ("app-version", "browser-tab-id", "Referer")
+    })
+
+    try:
+        response = requests.get(
+            TOSS_MINICHART_URL,
+            headers=headers,
+            timeout=(5, 12),
+        )
+
+        if response.status_code != 200:
+            return []
+
+        found = []
+        collect_indicator_infos(response.json(), found)
+
+        return found
+
+    except Exception:
+        return []
 
 
 def quote_row(label, kind, digits, code, quote):
@@ -1097,12 +1181,21 @@ def build_toss_rows(infos):
     for label, code, digits, kind in TOSS_INDEX_ITEMS:
         info = by_code.get(code)
 
+        quote_error = ""
+
         if not info:
             quote = fetch_toss_index_quote(code)
 
-            if quote:
+            if "error" not in quote:
                 rows.append(quote_row(label, kind, digits, code, quote))
                 continue
+
+            quote_error = quote["error"]
+
+            for candidate in get_toss_minichart_infos():
+                if str(candidate.get("code")) == code:
+                    info = candidate
+                    break
 
         if not info:
             rows.append({
@@ -1110,7 +1203,7 @@ def build_toss_rows(infos):
                 "kind": kind,
                 "text": "확인 불가",
                 "date": "확인 불가",
-                "note": "Toss 응답에서 해당 지수 미확인",
+                "note": "Toss 응답에서 해당 지수 미확인" + (f" ({quote_error})" if quote_error else ""),
                 "code": code,
             })
             continue
