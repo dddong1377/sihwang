@@ -617,7 +617,7 @@ MAIN_INDEX_LABELS = (
 
 INDEX_NAME_ALIASES = {
     "다우존스": (
-        "다우존스", "다우 산업", "다우", "Dow Jones",
+        "다우존스", "다우 산업", "Dow Jones",
         "Dow Jones Industrial Average",
     ),
     "S&P500": (
@@ -759,10 +759,10 @@ def toss_session_headers():
 # ===============================================================
 
 @st.cache_data(ttl=60, show_spinner=False)
-def get_toss_indicators(market="kr"):
+def get_toss_indicators():
     response = requests.get(
         TOSS_INDICATOR_URL,
-        params={"market": market},
+        params={"market": "kr"},
         headers=toss_session_headers(),
         timeout=15,
     )
@@ -785,138 +785,6 @@ def get_toss_indicators(market="kr"):
         raise RuntimeError(
             "Toss API 응답에서 majorIndicatorInfos를 찾을 수 없습니다."
         )
-
-    return infos
-
-
-# 2순위: 지표 목록(kr/us)에 없는 지수는 미니차트 API(v3)에서 찾습니다.
-TOSS_MINICHART_URL = (
-    "https://wts-cert-api.tossinvest.com"
-    "/api/v3/dashboard/wts/overview/indicator/mini-chart"
-)
-
-
-def collect_indicator_infos(value, found):
-    """응답 구조를 몰라도 code + price.latestPrice가 있는 지표 항목을 모두 찾습니다."""
-
-    if isinstance(value, dict):
-        price = value.get("price")
-
-        if (
-            value.get("code")
-            and isinstance(price, dict)
-            and "latestPrice" in price
-        ):
-            found.append(value)
-
-        for item in value.values():
-            if isinstance(item, (dict, list)):
-                collect_indicator_infos(item, found)
-
-    elif isinstance(value, list):
-        for item in value:
-            if isinstance(item, (dict, list)):
-                collect_indicator_infos(item, found)
-
-
-def collect_chart_blocks(value, found):
-    """code + candles 목록이 있는 차트 블록을 {코드: 블록}으로 모읍니다."""
-
-    if isinstance(value, dict):
-        if value.get("code") and isinstance(value.get("candles"), list):
-            found[str(value["code"])] = value
-
-        for item in value.values():
-            if isinstance(item, (dict, list)):
-                collect_chart_blocks(item, found)
-
-    elif isinstance(value, list):
-        for item in value:
-            if isinstance(item, (dict, list)):
-                collect_chart_blocks(item, found)
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def get_toss_minichart_infos():
-    """미니차트 API(GET) 응답에서 지표 항목 목록을 돌려줍니다. 실패하면 빈 목록."""
-
-    headers = toss_session_headers()
-
-    # 브라우저가 보내는 헤더 이름(app-version, browser-tab-id)으로도 함께 보냅니다.
-    app_version = headers.get("x-app-version") or "v261106.2137"
-    headers["app-version"] = app_version
-
-    if headers.get("x-browser-tab-id"):
-        headers["browser-tab-id"] = headers["x-browser-tab-id"]
-
-    headers["Accept"] = "application/json"
-    headers["Accept-Encoding"] = "gzip, deflate"
-    headers["Referer"] = "https://www.tossinvest.com/indices/DJI.DJI"
-
-    try:
-        response = requests.get(
-            TOSS_MINICHART_URL,
-            headers=headers,
-            timeout=(5, 12),
-        )
-
-        if response.status_code != 200:
-            return []
-
-        data = response.json()
-
-        found = []
-        collect_indicator_infos(data, found)
-
-        # 차트가 가격 항목과 따로 내려오는 구조여도 코드로 이어 붙입니다.
-        charts = {}
-        collect_chart_blocks(data, charts)
-
-        for info in found:
-            if not info.get("miniChart"):
-                chart = charts.get(str(info.get("code")))
-
-                if chart:
-                    info["miniChart"] = chart
-
-        return found
-
-    except Exception:
-        return []
-
-
-# kr 응답에 없는 해외 지수(다우존스 등)를 찾기 위해 추가로 조회하는 시장 값
-EXTRA_INDICATOR_MARKETS = ("us",)
-
-
-def get_all_toss_indicators():
-    """kr 지표에 더해 다른 시장 값의 지표를 합칩니다. 추가 조회가 실패해도 kr 결과는 유지합니다."""
-
-    infos = list(get_toss_indicators("kr"))
-
-    seen = {
-        str(info.get("code"))
-        for info in infos
-        if isinstance(info, dict)
-    }
-
-    for market in EXTRA_INDICATOR_MARKETS:
-        try:
-            extra = get_toss_indicators(market)
-        except Exception:
-            continue
-
-        for info in extra:
-            if not isinstance(info, dict):
-                continue
-
-            code = str(info.get("code"))
-
-            if code in seen:
-                continue
-
-            seen.add(code)
-            infos.append(info)
 
     return infos
 
@@ -985,10 +853,6 @@ def parse_timestamp(value):
                 ).replace(tzinfo=KST)
 
             else:
-                # '[Asia/Seoul]' 꼬리표나 +0900 형태의 오프셋도 읽을 수 있게 정리
-                value = re.sub(r"\[[^\]]*\]$", "", value).strip()
-                value = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", value) if "T" in value else value
-
                 dt = datetime.datetime.fromisoformat(
                     value.replace("Z", "+00:00")
                 )
@@ -1030,7 +894,6 @@ def find_candle_timestamps(value, results=None):
         "tradingDate", "startTime", "endTime",
         "startDate", "endDate", "baseDateTime",
         "localDateTime", "tradeDate", "chartTime",
-        "tradingStart", "tradingEnd",
         "x", "t",
     }
 
@@ -1084,22 +947,17 @@ def get_info_price(info):
 
 
 def get_info_timestamp(info):
-    """기준 시각: 미니차트 캔들의 가장 늦은 시각. 캔들이 없으면 차트·항목 안의 다른 시각을 씁니다."""
-
     mini_chart = info.get("miniChart") or {}
-    timestamps = []
 
-    if isinstance(mini_chart, dict):
-        candles = mini_chart.get("candles")
+    if not isinstance(mini_chart, dict):
+        return "확인 불가"
 
-        if isinstance(candles, list) and candles:
-            timestamps = find_candle_timestamps(candles)
+    candles = mini_chart.get("candles")
 
-        if not timestamps:
-            timestamps = find_candle_timestamps(mini_chart)
+    if not isinstance(candles, list) or not candles:
+        return "확인 불가"
 
-    if not timestamps:
-        timestamps = find_candle_timestamps(info)
+    timestamps = find_candle_timestamps(candles)
 
     if not timestamps:
         return "확인 불가"
@@ -1130,182 +988,18 @@ def is_futures_index(info):
 # 9. Toss 데이터 행 구성
 # ===============================================================
 
-# Toss가 내려주지 않는 지수는 야후 파이낸스(비공식)로 보충합니다.
-# 지금은 Toss만 사용합니다. 야후로 보충하려면 {"다우존스": "^DJI"}로 바꾸세요.
-YAHOO_FALLBACK_SYMBOLS = {}
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_yahoo_index(symbol):
-    """야후 차트 API에서 (현재가, 전일 종가, 시각)을 가져옵니다. 실패하면 None."""
-
-    from urllib.parse import quote
-
-    try:
-        response = requests.get(
-            "https://query1.finance.yahoo.com/v8/finance/chart/"
-            f"{quote(symbol, safe='')}",
-            params={"range": "5d", "interval": "1d"},
-            headers={"User-Agent": "Mozilla/5.0 (compatible; MTNW-Market/1.0)"},
-            timeout=8,
-        )
-
-        if response.status_code != 200:
-            return None
-
-        result = response.json()["chart"]["result"][0]
-        meta = result.get("meta") or {}
-
-        closes = [
-            safe_float(value)
-            for value in (
-                (result.get("indicators", {}).get("quote") or [{}])[0].get("close")
-                or []
-            )
-        ]
-        closes = [value for value in closes if value is not None]
-
-        price = safe_float(meta.get("regularMarketPrice"))
-
-        if price is None and closes:
-            price = closes[-1]
-
-        if price is None or not closes:
-            return None
-
-        # 마지막 봉이 현재가와 같으면 확정 종가이므로 그 앞 봉이 전일 종가
-        if len(closes) >= 2 and abs(closes[-1] - price) < 1e-6:
-            base = closes[-2]
-        else:
-            base = closes[-1]
-
-        return {
-            "latest": price,
-            "base": base,
-            "time": meta.get("regularMarketTime"),
-        }
-
-    except Exception:
-        return None
-
-
-def yahoo_index_row(label, kind, digits, code, symbol, data):
-    latest = data["latest"]
-    base = data["base"]
-    change = latest - base
-    pct = (change / base) * 100 if base else None
-
-    arrow = "🔺" if change > 0 else "🔻" if change < 0 else "➖"
-
-    if pct is None:
-        text = f"{latest:,.{digits}f} (등락 확인 불가)"
-    else:
-        text = f"{latest:,.{digits}f} ({change:+,.{digits}f}, {pct:+.2f}%) {arrow}"
-
-    return {
-        "label": label,
-        "kind": kind,
-        "text": text,
-        "date": format_timestamp(data.get("time")),
-        "note": f"야후 파이낸스({symbol}) 기준 · Toss 미제공",
-        "code": code,
-    }
-
-
-# 2순위: 주요 지표 목록에 없을 때, 지수 개별 차트(일봉)에서 값을 가져옵니다.
+# 지표 목록에 없는 지수(다우존스 등)는 토스 공개 API로 보충합니다.
 TOSS_INFO_BASE = "https://wts-info-api.tossinvest.com"
-TOSS_CHART_FALLBACK = {"다우존스": "DJI.DJI"}
-# 토스 차트 주소의 시장 구분 후보 (먼저 성공하는 것을 사용)
-TOSS_CHART_MARKETS = ("us-s", "kr-s")
 
-
-def toss_chart_get(market, code, step, count):
-    """지수 차트 API(공개)를 호출해 캔들 목록을 돌려줍니다. 실패하면 빈 목록."""
-
-    try:
-        response = requests.get(
-            f"{TOSS_INFO_BASE}/api/v1/c-chart/{market}/{code}/{step}",
-            params={"count": count, "useAdjustedRate": "true"},
-            headers={
-                "User-Agent": TOSS_HEADERS["User-Agent"],
-                "Accept": "application/json, text/plain, */*",
-                "Origin": "https://www.tossinvest.com",
-                "Referer": f"https://www.tossinvest.com/indices/{code}",
-            },
-            timeout=(5, 10),
-        )
-
-        if response.status_code != 200:
-            return []
-
-        candles = (response.json().get("result") or {}).get("candles")
-
-        return candles if isinstance(candles, list) else []
-
-    except Exception:
-        return []
-
-
-def fetch_toss_index_minute(code):
-    """
-    (백업) 지수 개별 차트에서 최신 1분봉의 종가·시각과 전일 종가를 가져옵니다.
-    반환: {'latest','base','time','market'} / 실패하면 None.
-    """
-
-    for market in TOSS_CHART_MARKETS:
-        minutes = toss_chart_get(market, code, "min:1", 5)
-
-        newest = None
-        newest_time = None
-
-        for candle in minutes:
-            moment = parse_timestamp(candle.get("dt"))
-
-            if moment is None or safe_float(candle.get("close")) is None:
-                continue
-
-            if newest_time is None or moment > newest_time:
-                newest, newest_time = candle, moment
-
-        if newest is None:
-            continue
-
-        latest = safe_float(newest.get("close"))
-        base = safe_float(newest.get("base"))
-
-        # 분봉에 전일 종가(base)가 없으면 일봉의 base를 사용
-        if not base:
-            for day in toss_chart_get(market, code, "day:1", 3):
-                base = safe_float(day.get("base"))
-
-                if base:
-                    break
-
-        if latest is None or not base:
-            continue
-
-        return {
-            "latest": latest,
-            "base": base,
-            "time": newest.get("dt"),
-            "market": market,
-        }
-
-    return None
+# 기준 시각을 맞춰 볼 다른 해외 지수
+TIME_REFERENCE_LABELS = ("S&P500", "나스닥")
 
 
 def toss_info_get(path):
-    """wts-info-api(공개) GET → result 딕셔너리. 실패하면 None."""
-
     try:
         response = requests.get(
             f"{TOSS_INFO_BASE}{path}",
-            headers={
-                "User-Agent": TOSS_HEADERS["User-Agent"],
-                "Accept": "application/json, text/plain, */*",
-                "Origin": "https://www.tossinvest.com",
-                "Referer": "https://www.tossinvest.com/",
-            },
+            headers=TOSS_HEADERS,
             timeout=(5, 10),
         )
 
@@ -1321,217 +1015,67 @@ def toss_info_get(path):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_toss_index_candle(code):
-    """
-    지수 한 개의 현재값·전일 종가·기준 시각을 토스 공개 API에서 가져옵니다.
-    - 값: /api/v1/index-prices/{code} 의 close, base
-    - 시각: /api/v2/index-infos/{code} 의 tradingEndAt (장마감 후) / 장중이면 현재 시각
-    값을 못 가져오면 1분봉 방식으로 한 번 더 시도합니다.
-    반환: {'latest','base','time','market'} / 실패하면 None.
-    """
-
-    quote = toss_info_get(f"/api/v1/index-prices/{code}") or {}
-
-    latest = safe_float(quote.get("close"))
-    base = safe_float(quote.get("base"))
-
-    if latest is None or not base:
-        return fetch_toss_index_minute(code)
-
-    meta = toss_info_get(f"/api/v2/index-infos/{code}") or {}
-
-    time_value = None
-
-    if meta.get("isMarketOpen") is True:
-        time_value = datetime.datetime.now(KST).isoformat()
-
-    elif meta.get("isMarketOpen") is False:
-        end_at = meta.get("tradingEndAt")
-
-        # 미래 시각(다음 세션 정보)이면 쓰지 않습니다.
-        if parse_timestamp(end_at) is not None:
-            time_value = end_at
-
-    if time_value is None:
-        backup = fetch_toss_index_minute(code)
-
-        if backup:
-            time_value = backup.get("time")
-
-    return {
-        "latest": latest,
-        "base": base,
-        "time": time_value,
-        "market": "index-prices",
-    }
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_toss_index_time(code):
-    """기준 시각만 필요할 때: 장마감 후면 장 마감 시각, 장중이면 현재 시각."""
-
-    meta = toss_info_get(f"/api/v2/index-infos/{code}") or {}
-
-    if meta.get("isMarketOpen") is True:
-        return datetime.datetime.now(KST).strftime("%Y-%m-%d %H:%M")
-
-    if meta.get("isMarketOpen") is False:
-        return format_timestamp(meta.get("tradingEndAt"))
-
-    return "확인 불가"
-
-
-def verify_index_report(rows, code="DJI.DJI", label="다우존스"):
-    """
-    다우존스의 값이 토스 원천 데이터와 맞는지, 기준 시각이 다른 미국 지수와 같은지 점검합니다.
-    반환: (마크다운 표, 설명 줄 목록)
-    """
-
-    row = next((r for r in rows if r.get("label") == label), None)
+def fetch_toss_index_quote(code):
+    """값: index-prices의 close/base, 시각: index-infos의 장마감 시각(장중이면 현재)."""
 
     price = toss_info_get(f"/api/v1/index-prices/{code}") or {}
+
+    latest = safe_float(price.get("close"))
+    base = safe_float(price.get("base"))
+
+    if latest is None or not base:
+        return None
+
     meta = toss_info_get(f"/api/v2/index-infos/{code}") or {}
-    minute = fetch_toss_index_minute(code) or {}
 
-    src_close = safe_float(price.get("close"))
-    src_base = safe_float(price.get("base"))
-    src_pct = (
-        (src_close / src_base - 1) * 100
-        if src_close is not None and src_base
-        else None
-    )
-
-    min_close = minute.get("latest")
-    min_base = minute.get("base")
-    min_pct = (
-        (min_close / min_base - 1) * 100
-        if min_close is not None and min_base
-        else None
-    )
-
-    # 화면 표의 값 읽기
-    shown_close = shown_pct = shown_base = None
-
-    if row:
-        value_text, change_text = split_index_text(row.get("text"))
-        shown_close = safe_float(value_text)
-
-        found = re.search(r"([+-]?\d+(?:\.\d+)?)%", change_text or "")
-        shown_pct = float(found.group(1)) if found else None
-
-        diff = re.search(r"\(([+-][\d,\.]+),", str(row.get("text")))
-
-        if shown_close is not None and diff:
-            shown_base = shown_close - safe_float(diff.group(1))
-
-    def fmt(value, digits=2, suffix=""):
-        return "-" if value is None else f"{value:,.{digits}f}{suffix}"
-
-    def judge(a, b, tolerance):
-        if a is None or b is None:
-            return "비교 불가"
-
-        return "일치" if abs(a - b) <= tolerance else "불일치"
-
-    table = [
-        "| 항목 | 화면 표 | 토스 index-prices | 토스 1분봉 | 판정(표↔index-prices) |",
-        "|---|---:|---:|---:|---|",
-        f"| 현재값 | {fmt(shown_close)} | {fmt(src_close)} | {fmt(min_close)} | {judge(shown_close, src_close, 0.011)} |",
-        f"| 전일 종가 | {fmt(shown_base)} | {fmt(src_base)} | {fmt(min_base)} | {judge(shown_base, src_base, 0.02)} |",
-        f"| 등락률 | {fmt(shown_pct, 2, '%')} | {fmt(src_pct, 2, '%')} | {fmt(min_pct, 2, '%')} | {judge(shown_pct, src_pct, 0.011)} |",
-    ]
-
-    notes = []
-
-    # 기준 시각 비교
-    dow_time = (row or {}).get("date", "확인 불가")
-
-    others = {
-        name: next((r.get("date") for r in rows if r.get("label") == name), None)
-        for name in ("S&P500", "나스닥")
-    }
-
-    ref_times = {name: value for name, value in others.items() if value and value != "확인 불가"}
-
-    if dow_time == "확인 불가":
-        notes.append("다우존스 기준 시각을 확인하지 못했습니다.")
-
-    elif ref_times and all(value == dow_time for value in ref_times.values()):
-        notes.append(
-            f"기준 시각 동일: 다우존스 {dow_time} = "
-            + " · ".join(f"{name} {value}" for name, value in ref_times.items())
-        )
-
-    elif ref_times:
-        notes.append(
-            f"기준 시각 다름: 다우존스 {dow_time} / "
-            + " · ".join(f"{name} {value}" for name, value in ref_times.items())
-        )
-
+    if meta.get("isMarketOpen") is False:
+        when = meta.get("tradingEndAt")
     else:
-        notes.append(f"다우존스 기준 시각 {dow_time} (비교할 다른 미국 지수 시각 없음)")
+        when = datetime.datetime.now(KST).isoformat()
 
-    end_at = format_timestamp(meta.get("tradingEndAt"))
-    state_text = (
-        "장중" if meta.get("isMarketOpen") is True
-        else "장마감" if meta.get("isMarketOpen") is False
-        else "확인 불가"
-    )
-
-    notes.append(
-        f"토스 지수 정보: 상태 {state_text} · 세션 종료 {end_at} (한국 시간)"
-    )
-
-    if minute.get("time"):
-        notes.append(
-            f"토스 1분봉 마지막 봉 시각: {format_timestamp(minute.get('time'))}"
-        )
-
-    return "\n".join(table), notes
+    return {"latest": latest, "base": base, "time": when}
 
 
-def toss_chart_row(label, kind, digits, code, data):
-    latest = data["latest"]
-    base = data["base"]
+def quote_row(label, kind, digits, code, quote):
+    latest, base = quote["latest"], quote["base"]
     change = latest - base
-    pct = (change / base) * 100
-
+    pct = change / base * 100
     arrow = "🔺" if change > 0 else "🔻" if change < 0 else "➖"
-
-    date_text = format_timestamp(data.get("time"))
-    note = f"Toss 지수 차트 기준({data['market']}/{code})"
-
-    # 시각을 못 읽으면 원문을 남겨 형식을 확인할 수 있게 합니다.
-    if date_text == "확인 불가":
-        note += f" · 시각 원문: {data.get('time')}"
 
     return {
         "label": label,
         "kind": kind,
         "text": f"{latest:,.{digits}f} ({change:+,.{digits}f}, {pct:+.2f}%) {arrow}",
-        "date": date_text,
-        "note": note,
+        "date": format_timestamp(quote["time"]),
+        "note": "",
         "code": code,
+        "quote": True,
     }
 
 
-def find_info_by_alias(by_code, label, used_codes):
-    """코드가 달라 못 찾은 지수를 Toss가 내려준 이름으로 찾습니다."""
+def mark_time_match(rows):
+    """보충한 지수의 기준 시각이 S&P500·나스닥과 같은지 비고에 표시합니다."""
 
-    aliases = [label.lower()] + [
-        alias.lower() for alias in INDEX_NAME_ALIASES.get(label, ())
-    ]
+    refs = {
+        row["date"]
+        for row in rows
+        if row["label"] in TIME_REFERENCE_LABELS
+        and row["date"] != "확인 불가"
+    }
 
-    for code, info in by_code.items():
-        if code in KNOWN_INDEX_CODES or code in used_codes:
+    if not refs:
+        return
+
+    for row in rows:
+        if not row.get("quote"):
             continue
 
-        name = get_info_name(info).lower()
-
-        if name and any(alias in name for alias in aliases):
-            return info
-
-    return None
+        if row["date"] in refs:
+            row["note"] = "기준 시각 일치 (S&P500·나스닥과 동일)"
+        else:
+            row["note"] = (
+                f"기준 시각 차이 (S&P500·나스닥 {', '.join(sorted(refs))})"
+            )
 
 
 def build_toss_rows(infos):
@@ -1549,45 +1093,15 @@ def build_toss_rows(infos):
         by_code[code] = info
 
     rows = []
-    used_codes = set()
 
     for label, code, digits, kind in TOSS_INDEX_ITEMS:
         info = by_code.get(code)
-        matched_note = ""
 
         if not info:
-            info = find_info_by_alias(by_code, label, used_codes)
+            quote = fetch_toss_index_quote(code)
 
-            if info:
-                actual = str(info.get("code") or "").strip()
-                used_codes.add(actual)
-                matched_note = f"Toss 코드 {actual} (이름으로 찾음)"
-
-        if not info and label in TOSS_CHART_FALLBACK:
-            chart = fetch_toss_index_candle(TOSS_CHART_FALLBACK[label])
-
-            if chart:
-                rows.append(
-                    toss_chart_row(label, kind, digits, code, chart)
-                )
-                continue
-
-        if not info:
-            # 3순위: 미니차트 API에서 같은 코드로 찾습니다.
-            for candidate in get_toss_minichart_infos():
-                if str(candidate.get("code")) == code:
-                    info = candidate
-                    used_codes.add(code)
-                    break
-
-        if not info and label in YAHOO_FALLBACK_SYMBOLS:
-            symbol = YAHOO_FALLBACK_SYMBOLS[label]
-            fallback = fetch_yahoo_index(symbol)
-
-            if fallback:
-                rows.append(
-                    yahoo_index_row(label, kind, digits, code, symbol, fallback)
-                )
+            if quote:
+                rows.append(quote_row(label, kind, digits, code, quote))
                 continue
 
         if not info:
@@ -1628,25 +1142,12 @@ def build_toss_rows(infos):
             )
             note = ""
 
-        row_note = note or matched_note
-
-        # 시각을 못 읽은 지수는 토스 지수 정보(index-infos)의 장 마감·현재 시각으로 보충
-        if date_text == "확인 불가" and code in TOSS_CHART_FALLBACK.values():
-            extra_time = fetch_toss_index_time(code)
-
-            if extra_time != "확인 불가":
-                date_text = extra_time
-                row_note = (
-                    (row_note + " · " if row_note else "")
-                    + "시각: Toss 지수 정보(index-infos)"
-                )
-
         rows.append({
             "label": label,
             "kind": kind,
             "text": text,
             "date": date_text,
-            "note": row_note,
+            "note": note,
             "code": code,
         })
 
@@ -1658,7 +1159,7 @@ def build_toss_rows(infos):
 
         code = str(info.get("code") or "").strip()
 
-        if not code or code in known_codes or code in used_codes:
+        if not code or code in known_codes:
             continue
 
         if is_futures_index(info):
@@ -1704,6 +1205,8 @@ def build_toss_rows(infos):
             "note": note,
             "code": code,
         })
+
+    mark_time_match(rows)
 
     return rows
 
@@ -1789,18 +1292,11 @@ def fetch_indices():
     state = st.session_state
 
     try:
-        infos = get_all_toss_indicators()
+        infos = get_toss_indicators()
         rows = build_toss_rows(infos)
 
         state["pm_indices"] = rows
         state["pm_main_indices"] = build_main_index_rows(rows)
-
-        # 지수를 못 찾을 때 실제 코드·이름을 확인할 수 있도록 전체 목록 보관
-        state["pm_toss_list"] = [
-            f"{info.get('code')} · {get_info_name(info)}"
-            for info in infos
-            if isinstance(info, dict)
-        ]
 
         state["pm_indices_note"] = (
             f"Toss 조회 완료 · "
@@ -3221,7 +2717,7 @@ def run_pipeline(mode, status):
         rows = state.get("pm_indices")
 
         if not rows:
-            infos = get_all_toss_indicators()
+            infos = get_toss_indicators()
             rows = build_toss_rows(infos)
 
             state["pm_indices"] = rows
@@ -3987,122 +3483,6 @@ def load_archived_post(day_iso):
 # 17. 화면
 # ===============================================================
 
-US_REFERENCE_LABELS = ("S&P500", "나스닥", "필라델피아 반도체")
-
-
-def render_dow_check(rows):
-    """다우존스의 값과 기준 시각을 여러 토스 주소·다른 미국 지수와 비교해 보여줍니다. (확인용)"""
-
-    code = "DJI.DJI"
-    records = []
-
-    # 1) index-prices(값) + index-infos(시각) : 화면 표에 쓰는 방식
-    quote = toss_info_get(f"/api/v1/index-prices/{code}") or {}
-    meta = toss_info_get(f"/api/v2/index-infos/{code}") or {}
-
-    if meta.get("isMarketOpen") is False:
-        meta_time = format_timestamp(meta.get("tradingEndAt"))
-    elif meta.get("isMarketOpen") is True:
-        meta_time = "장중(실시간)"
-    else:
-        meta_time = "확인 불가"
-
-    records.append((
-        "index-prices + index-infos",
-        safe_float(quote.get("close")),
-        safe_float(quote.get("base")),
-        meta_time,
-    ))
-
-    # 2) 1분봉 차트
-    minute = fetch_toss_index_minute(code)
-
-    if minute:
-        records.append((
-            "c-chart 1분봉",
-            minute["latest"],
-            minute["base"],
-            format_timestamp(minute["time"]),
-        ))
-
-    # 3) 미니차트(쿠키 필요)
-    for info in get_toss_minichart_infos():
-        if str(info.get("code")) == code:
-            price = info.get("price") or {}
-
-            records.append((
-                "mini-chart(쿠키)",
-                safe_float(price.get("latestPrice")),
-                safe_float(price.get("basePrice")),
-                get_info_timestamp(info),
-            ))
-            break
-
-    lines = [
-        "| 출처 | 현재값 | 전일 종가 | 등락률 | 시각 |",
-        "|---|---|---|---|---|",
-    ]
-
-    for name, latest, base, when in records:
-        if latest is not None and base:
-            pct = f"{(latest / base - 1) * 100:+.2f}%"
-        else:
-            pct = "확인 불가"
-
-        latest_text = f"{latest:,.2f}" if latest is not None else "확인 불가"
-        base_text = f"{base:,.2f}" if base else "확인 불가"
-
-        lines.append(f"| {name} | {latest_text} | {base_text} | {pct} | {when} |")
-
-    row = next((r for r in rows if r.get("label") == "다우존스"), None)
-
-    if row:
-        lines.append(
-            f"| 화면 표의 다우존스 | {row['text']} | - | - | {row['date']} |"
-        )
-
-    st.markdown("\n".join(lines))
-
-    # 값 비교: 출처끼리 같은지
-    values = [r[1] for r in records if r[1] is not None]
-    bases = [r[2] for r in records if r[2]]
-
-    if len(values) >= 2 and max(values) - min(values) <= 0.01 and (
-        not bases or max(bases) - min(bases) <= 0.01
-    ):
-        st.success(f"값 일치: {len(values)}개 출처의 현재값·전일 종가가 같습니다.")
-    elif len(values) >= 2:
-        st.warning("출처마다 값이 다릅니다. 위 표를 확인해 주세요.")
-    else:
-        st.info("비교할 수 있는 출처가 1개뿐입니다.")
-
-    # 시각 비교: 다른 미국 지수의 기준 시각과 같은지
-    dow_time = records[0][3]
-
-    refs = {
-        r["label"]: r["date"]
-        for r in rows
-        if r.get("label") in US_REFERENCE_LABELS and r.get("date") != "확인 불가"
-    }
-
-    if refs and dow_time not in ("확인 불가", "장중(실시간)"):
-        same = [label for label, when in refs.items() if when == dow_time]
-        other = {label: when for label, when in refs.items() if when != dow_time}
-
-        if not other:
-            st.success(
-                f"기준 시각 일치: 다우존스 {dow_time} = "
-                + ", ".join(f"{label} {when}" for label, when in refs.items())
-            )
-        else:
-            st.warning(
-                f"기준 시각 차이: 다우존스 {dow_time} / "
-                + ", ".join(f"{label} {when}" for label, when in refs.items())
-            )
-    else:
-        st.info("기준 시각을 비교할 수 없습니다(다른 미국 지수의 시각이 없거나 장중입니다).")
-
-
 def main():
     state = st.session_state
 
@@ -4150,31 +3530,6 @@ def main():
                 "선물 지수는 제외하며, 응답에 없는 지수는 확인 불가로 표시합니다. "
                 "기준 시각은 캔들 데이터에서 확인되는 시간만 표시합니다."
             )
-
-            if state.get("pm_toss_list"):
-                with st.expander("Toss가 내려준 전체 지표 목록 (코드 확인용)"):
-                    st.code("\n".join(state["pm_toss_list"]))
-
-            with st.expander("다우존스 값·시각 검증 (다른 미국 지수와 비교)"):
-                st.caption(
-                    "다우존스를 여러 토스 주소로 조회해 값이 같은지, "
-                    "기준 시각이 S&P500·나스닥 등과 같은지 확인합니다."
-                )
-
-                if st.button("검증 실행", key="dow_check_btn"):
-                    render_dow_check(rows)
-
-            with st.expander("다우존스 값·기준 시각 검증"):
-                try:
-                    verify_table, verify_notes = verify_index_report(rows)
-
-                    st.markdown(verify_table)
-
-                    for note_line in verify_notes:
-                        st.caption(note_line)
-
-                except Exception as error:
-                    st.caption(f"검증 실패: {str(error)[:200]}")
 
         else:
             st.caption(
