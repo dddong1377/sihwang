@@ -5606,7 +5606,7 @@ def main():
 def apply_label_style(theme_mode="라이트"):
     """네이버페이 증권 느낌의 화이트 카드 UI. 상승=빨강, 하락=파랑(국내 증권 관례)."""
 
-    dark = True  # 어두운 화면 (라이트로 되돌리려면 False)
+    dark = False  # 밝은 화면 (라이트로 되돌리려면 False)
 
     if dark:
         page_bg, card_bg, card_alt = "#0F1011", "#161718", "#1E1F21"
