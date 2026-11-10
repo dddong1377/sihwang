@@ -988,6 +988,25 @@ def is_futures_index(info):
 # 9. Toss 데이터 행 구성
 # ===============================================================
 
+def find_info_by_alias(by_code, label, used_codes):
+    """코드가 달라 못 찾은 지수를 Toss가 내려준 이름으로 찾습니다."""
+
+    aliases = [label.lower()] + [
+        alias.lower() for alias in INDEX_NAME_ALIASES.get(label, ())
+    ]
+
+    for code, info in by_code.items():
+        if code in KNOWN_INDEX_CODES or code in used_codes:
+            continue
+
+        name = get_info_name(info).lower()
+
+        if name and any(alias in name for alias in aliases):
+            return info
+
+    return None
+
+
 def build_toss_rows(infos):
     by_code = {}
 
@@ -1003,9 +1022,19 @@ def build_toss_rows(infos):
         by_code[code] = info
 
     rows = []
+    used_codes = set()
 
     for label, code, digits, kind in TOSS_INDEX_ITEMS:
         info = by_code.get(code)
+        matched_note = ""
+
+        if not info:
+            info = find_info_by_alias(by_code, label, used_codes)
+
+            if info:
+                actual = str(info.get("code") or "").strip()
+                used_codes.add(actual)
+                matched_note = f"Toss 코드 {actual} (이름으로 찾음)"
 
         if not info:
             rows.append({
@@ -1050,7 +1079,7 @@ def build_toss_rows(infos):
             "kind": kind,
             "text": text,
             "date": date_text,
-            "note": note,
+            "note": note or matched_note,
             "code": code,
         })
 
@@ -1062,7 +1091,7 @@ def build_toss_rows(infos):
 
         code = str(info.get("code") or "").strip()
 
-        if not code or code in known_codes:
+        if not code or code in known_codes or code in used_codes:
             continue
 
         if is_futures_index(info):
