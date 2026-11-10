@@ -789,6 +789,73 @@ def get_toss_indicators(market="kr"):
     return infos
 
 
+# 2순위: 지표 목록(kr/us)에 없는 지수는 미니차트 API(v3)에서 찾습니다.
+TOSS_MINICHART_URL = (
+    "https://wts-cert-api.tossinvest.com"
+    "/api/v3/dashboard/wts/overview/indicator/mini-chart"
+)
+
+
+def collect_indicator_infos(value, found):
+    """응답 구조를 몰라도 code + price.latestPrice가 있는 지표 항목을 모두 찾습니다."""
+
+    if isinstance(value, dict):
+        price = value.get("price")
+
+        if (
+            value.get("code")
+            and isinstance(price, dict)
+            and "latestPrice" in price
+        ):
+            found.append(value)
+
+        for item in value.values():
+            if isinstance(item, (dict, list)):
+                collect_indicator_infos(item, found)
+
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, (dict, list)):
+                collect_indicator_infos(item, found)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_toss_minichart_infos():
+    """미니차트 API(GET) 응답에서 지표 항목 목록을 돌려줍니다. 실패하면 빈 목록."""
+
+    headers = toss_session_headers()
+
+    # 브라우저가 보내는 헤더 이름(app-version, browser-tab-id)으로도 함께 보냅니다.
+    app_version = headers.get("x-app-version") or "v261106.2137"
+    headers["app-version"] = app_version
+
+    if headers.get("x-browser-tab-id"):
+        headers["browser-tab-id"] = headers["x-browser-tab-id"]
+
+    headers["Accept"] = "application/json"
+    headers["Accept-Encoding"] = "gzip, deflate"
+    headers["Referer"] = "https://www.tossinvest.com/indices/DJI.DJI"
+
+    try:
+        response = requests.get(
+            TOSS_MINICHART_URL,
+            headers=headers,
+            timeout=(5, 12),
+        )
+
+        if response.status_code != 200:
+            return []
+
+        found = []
+
+        collect_indicator_infos(response.json(), found)
+
+        return found
+
+    except Exception:
+        return []
+
+
 # kr 응답에 없는 해외 지수(다우존스 등)를 찾기 위해 추가로 조회하는 시장 값
 EXTRA_INDICATOR_MARKETS = ("us",)
 
@@ -821,6 +888,17 @@ def get_all_toss_indicators():
 
             seen.add(code)
             infos.append(info)
+
+    # 그래도 없는 지수는 미니차트 API에서 같은 코드로 찾습니다.
+    missing = {item[1] for item in TOSS_INDEX_ITEMS} - seen
+
+    if missing:
+        for info in get_toss_minichart_infos():
+            code = str(info.get("code"))
+
+            if code in missing and code not in seen:
+                seen.add(code)
+                infos.append(info)
 
     return infos
 
@@ -1106,6 +1184,76 @@ def yahoo_index_row(label, kind, digits, code, symbol, data):
     }
 
 
+# 2순위: 주요 지표 목록에 없을 때, 지수 개별 차트(일봉)에서 값을 가져옵니다.
+TOSS_INFO_BASE = "https://wts-info-api.tossinvest.com"
+TOSS_CHART_FALLBACK = {"다우존스": "DJI.DJI"}
+# 토스 차트 주소의 시장 구분 후보 (먼저 성공하는 것을 사용)
+TOSS_CHART_MARKETS = ("us-s", "kr-s")
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_toss_index_candle(code):
+    """지수 일봉 중 가장 최근 1개를 {'latest','base','time','market'}로 돌려줍니다. 실패하면 None."""
+
+    for market in TOSS_CHART_MARKETS:
+        try:
+            response = requests.get(
+                f"{TOSS_INFO_BASE}/api/v1/c-chart/{market}/{code}/day:1",
+                params={"count": 3, "useAdjustedRate": "true"},
+                headers={
+                    "User-Agent": TOSS_HEADERS["User-Agent"],
+                    "Accept": "application/json, text/plain, */*",
+                    "Origin": "https://www.tossinvest.com",
+                    "Referer": f"https://www.tossinvest.com/indices/{code}",
+                },
+                timeout=(5, 10),
+            )
+
+            if response.status_code != 200:
+                continue
+
+            candles = (response.json().get("result") or {}).get("candles")
+
+            if not isinstance(candles, list) or not candles:
+                continue
+
+            # 응답은 최신순. 종가가 있는 가장 최근 봉을 사용
+            for candle in candles:
+                latest = safe_float(candle.get("close"))
+                base = safe_float(candle.get("base"))
+
+                if latest is not None and base:
+                    return {
+                        "latest": latest,
+                        "base": base,
+                        "time": candle.get("dt"),
+                        "market": market,
+                    }
+
+        except Exception:
+            continue
+
+    return None
+
+
+def toss_chart_row(label, kind, digits, code, data):
+    latest = data["latest"]
+    base = data["base"]
+    change = latest - base
+    pct = (change / base) * 100
+
+    arrow = "🔺" if change > 0 else "🔻" if change < 0 else "➖"
+
+    return {
+        "label": label,
+        "kind": kind,
+        "text": f"{latest:,.{digits}f} ({change:+,.{digits}f}, {pct:+.2f}%) {arrow}",
+        "date": format_timestamp(data.get("time")),
+        "note": f"Toss 지수 차트 기준({data['market']}/{code})",
+        "code": code,
+    }
+
+
 def find_info_by_alias(by_code, label, used_codes):
     """코드가 달라 못 찾은 지수를 Toss가 내려준 이름으로 찾습니다."""
 
@@ -1153,6 +1301,15 @@ def build_toss_rows(infos):
                 actual = str(info.get("code") or "").strip()
                 used_codes.add(actual)
                 matched_note = f"Toss 코드 {actual} (이름으로 찾음)"
+
+        if not info and label in TOSS_CHART_FALLBACK:
+            chart = fetch_toss_index_candle(TOSS_CHART_FALLBACK[label])
+
+            if chart:
+                rows.append(
+                    toss_chart_row(label, kind, digits, code, chart)
+                )
+                continue
 
         if not info and label in YAHOO_FALLBACK_SYMBOLS:
             symbol = YAHOO_FALLBACK_SYMBOLS[label]
