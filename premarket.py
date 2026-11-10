@@ -985,6 +985,10 @@ def parse_timestamp(value):
                 ).replace(tzinfo=KST)
 
             else:
+                # '[Asia/Seoul]' 꼬리표나 +0900 형태의 오프셋도 읽을 수 있게 정리
+                value = re.sub(r"\[[^\]]*\]$", "", value).strip()
+                value = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", value) if "T" in value else value
+
                 dt = datetime.datetime.fromisoformat(
                     value.replace("Z", "+00:00")
                 )
@@ -1299,12 +1303,19 @@ def toss_chart_row(label, kind, digits, code, data):
 
     arrow = "🔺" if change > 0 else "🔻" if change < 0 else "➖"
 
+    date_text = format_timestamp(data.get("time"))
+    note = f"Toss 지수 차트 기준({data['market']}/{code})"
+
+    # 시각을 못 읽으면 원문을 남겨 형식을 확인할 수 있게 합니다.
+    if date_text == "확인 불가":
+        note += f" · 시각 원문: {data.get('time')}"
+
     return {
         "label": label,
         "kind": kind,
         "text": f"{latest:,.{digits}f} ({change:+,.{digits}f}, {pct:+.2f}%) {arrow}",
-        "date": format_timestamp(data.get("time")),
-        "note": f"Toss 지수 차트 기준({data['market']}/{code})",
+        "date": date_text,
+        "note": note,
         "code": code,
     }
 
