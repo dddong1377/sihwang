@@ -819,6 +819,23 @@ def collect_indicator_infos(value, found):
                 collect_indicator_infos(item, found)
 
 
+def collect_chart_blocks(value, found):
+    """code + candles 목록이 있는 차트 블록을 {코드: 블록}으로 모읍니다."""
+
+    if isinstance(value, dict):
+        if value.get("code") and isinstance(value.get("candles"), list):
+            found[str(value["code"])] = value
+
+        for item in value.values():
+            if isinstance(item, (dict, list)):
+                collect_chart_blocks(item, found)
+
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, (dict, list)):
+                collect_chart_blocks(item, found)
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def get_toss_minichart_infos():
     """미니차트 API(GET) 응답에서 지표 항목 목록을 돌려줍니다. 실패하면 빈 목록."""
@@ -846,9 +863,21 @@ def get_toss_minichart_infos():
         if response.status_code != 200:
             return []
 
-        found = []
+        data = response.json()
 
-        collect_indicator_infos(response.json(), found)
+        found = []
+        collect_indicator_infos(data, found)
+
+        # 차트가 가격 항목과 따로 내려오는 구조여도 코드로 이어 붙입니다.
+        charts = {}
+        collect_chart_blocks(data, charts)
+
+        for info in found:
+            if not info.get("miniChart"):
+                chart = charts.get(str(info.get("code")))
+
+                if chart:
+                    info["miniChart"] = chart
 
         return found
 
@@ -888,17 +917,6 @@ def get_all_toss_indicators():
 
             seen.add(code)
             infos.append(info)
-
-    # 그래도 없는 지수는 미니차트 API에서 같은 코드로 찾습니다.
-    missing = {item[1] for item in TOSS_INDEX_ITEMS} - seen
-
-    if missing:
-        for info in get_toss_minichart_infos():
-            code = str(info.get("code"))
-
-            if code in missing and code not in seen:
-                seen.add(code)
-                infos.append(info)
 
     return infos
 
@@ -1008,6 +1026,7 @@ def find_candle_timestamps(value, results=None):
         "tradingDate", "startTime", "endTime",
         "startDate", "endDate", "baseDateTime",
         "localDateTime", "tradeDate", "chartTime",
+        "tradingStart", "tradingEnd",
         "x", "t",
     }
 
@@ -1061,17 +1080,22 @@ def get_info_price(info):
 
 
 def get_info_timestamp(info):
+    """기준 시각: 미니차트 캔들의 가장 늦은 시각. 캔들이 없으면 차트·항목 안의 다른 시각을 씁니다."""
+
     mini_chart = info.get("miniChart") or {}
+    timestamps = []
 
-    if not isinstance(mini_chart, dict):
-        return "확인 불가"
+    if isinstance(mini_chart, dict):
+        candles = mini_chart.get("candles")
 
-    candles = mini_chart.get("candles")
+        if isinstance(candles, list) and candles:
+            timestamps = find_candle_timestamps(candles)
 
-    if not isinstance(candles, list) or not candles:
-        return "확인 불가"
+        if not timestamps:
+            timestamps = find_candle_timestamps(mini_chart)
 
-    timestamps = find_candle_timestamps(candles)
+    if not timestamps:
+        timestamps = find_candle_timestamps(info)
 
     if not timestamps:
         return "확인 불가"
@@ -1191,47 +1215,78 @@ TOSS_CHART_FALLBACK = {"다우존스": "DJI.DJI"}
 TOSS_CHART_MARKETS = ("us-s", "kr-s")
 
 
+def toss_chart_get(market, code, step, count):
+    """지수 차트 API(공개)를 호출해 캔들 목록을 돌려줍니다. 실패하면 빈 목록."""
+
+    try:
+        response = requests.get(
+            f"{TOSS_INFO_BASE}/api/v1/c-chart/{market}/{code}/{step}",
+            params={"count": count, "useAdjustedRate": "true"},
+            headers={
+                "User-Agent": TOSS_HEADERS["User-Agent"],
+                "Accept": "application/json, text/plain, */*",
+                "Origin": "https://www.tossinvest.com",
+                "Referer": f"https://www.tossinvest.com/indices/{code}",
+            },
+            timeout=(5, 10),
+        )
+
+        if response.status_code != 200:
+            return []
+
+        candles = (response.json().get("result") or {}).get("candles")
+
+        return candles if isinstance(candles, list) else []
+
+    except Exception:
+        return []
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_toss_index_candle(code):
-    """지수 일봉 중 가장 최근 1개를 {'latest','base','time','market'}로 돌려줍니다. 실패하면 None."""
+    """
+    지수 개별 차트에서 최신 1분봉의 종가·시각과 전일 종가를 가져옵니다.
+    반환: {'latest','base','time','market'} / 실패하면 None.
+    """
 
     for market in TOSS_CHART_MARKETS:
-        try:
-            response = requests.get(
-                f"{TOSS_INFO_BASE}/api/v1/c-chart/{market}/{code}/day:1",
-                params={"count": 3, "useAdjustedRate": "true"},
-                headers={
-                    "User-Agent": TOSS_HEADERS["User-Agent"],
-                    "Accept": "application/json, text/plain, */*",
-                    "Origin": "https://www.tossinvest.com",
-                    "Referer": f"https://www.tossinvest.com/indices/{code}",
-                },
-                timeout=(5, 10),
-            )
+        minutes = toss_chart_get(market, code, "min:1", 5)
 
-            if response.status_code != 200:
+        newest = None
+        newest_time = None
+
+        for candle in minutes:
+            moment = parse_timestamp(candle.get("dt"))
+
+            if moment is None or safe_float(candle.get("close")) is None:
                 continue
 
-            candles = (response.json().get("result") or {}).get("candles")
+            if newest_time is None or moment > newest_time:
+                newest, newest_time = candle, moment
 
-            if not isinstance(candles, list) or not candles:
-                continue
-
-            # 응답은 최신순. 종가가 있는 가장 최근 봉을 사용
-            for candle in candles:
-                latest = safe_float(candle.get("close"))
-                base = safe_float(candle.get("base"))
-
-                if latest is not None and base:
-                    return {
-                        "latest": latest,
-                        "base": base,
-                        "time": candle.get("dt"),
-                        "market": market,
-                    }
-
-        except Exception:
+        if newest is None:
             continue
+
+        latest = safe_float(newest.get("close"))
+        base = safe_float(newest.get("base"))
+
+        # 분봉에 전일 종가(base)가 없으면 일봉의 base를 사용
+        if not base:
+            for day in toss_chart_get(market, code, "day:1", 3):
+                base = safe_float(day.get("base"))
+
+                if base:
+                    break
+
+        if latest is None or not base:
+            continue
+
+        return {
+            "latest": latest,
+            "base": base,
+            "time": newest.get("dt"),
+            "market": market,
+        }
 
     return None
 
@@ -1310,6 +1365,14 @@ def build_toss_rows(infos):
                     toss_chart_row(label, kind, digits, code, chart)
                 )
                 continue
+
+        if not info:
+            # 3순위: 미니차트 API에서 같은 코드로 찾습니다.
+            for candidate in get_toss_minichart_infos():
+                if str(candidate.get("code")) == code:
+                    info = candidate
+                    used_codes.add(code)
+                    break
 
         if not info and label in YAHOO_FALLBACK_SYMBOLS:
             symbol = YAHOO_FALLBACK_SYMBOLS[label]
