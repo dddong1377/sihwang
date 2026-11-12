@@ -22,6 +22,19 @@ pages = [
         url_path="weekly",
     ),
 ]
+    st.Page(
+        "weekly.py",
+        title="주간 정리",
+        icon="🗓️",
+        url_path="weekly",
+    ),
+    st.Page(
+        "report_digest.py",
+        title="리포트 압축",
+        icon="📑",
+        url_path="report_digest",
+    ),
+]
 
 st.markdown(
     """
