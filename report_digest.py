@@ -49,8 +49,8 @@ CHUNK_CHARS = 6_000
 # 정리 상세도: 포인트 수 / 핵심 글자 수 / 수치 줄 수 / 리스크 줄 수 / 출력 토큰 / 메모 합계 글자 수
 DETAIL_LEVELS = {
     "간결": {"points": "3~4", "core": 80, "nums": 4, "risks": 1, "tokens": 1_500, "memo_cap": 8_000, "max_points": 4},
-    "보통": {"points": "4~6", "core": 140, "nums": 5, "risks": 2, "tokens": 2_000, "memo_cap": 7_000, "max_points": 6},
-    "상세": {"points": "5~7", "core": 200, "nums": 6, "risks": 3, "tokens": 2_400, "memo_cap": 6_500, "max_points": 7},
+    "보통": {"points": "4~6", "core": 120, "nums": 5, "risks": 2, "tokens": 2_000, "memo_cap": 7_000, "max_points": 6},
+    "상세": {"points": "5~7", "core": 160, "nums": 6, "risks": 3, "tokens": 2_400, "memo_cap": 6_500, "max_points": 7},
 }
 DEFAULT_DETAIL = "상세"
 
@@ -737,6 +737,9 @@ def estimate_run_tokens(entries, char_limit):
 
         total += 700 + detail_params()["tokens"]
 
+        if st.session_state.get("rd_check", True):
+            total += 3_500 * math.ceil((detail_params()["max_points"] + 3) / CHECK_BATCH)
+
     names = [re.sub(r"[\(（].*?[\)）]|\s", "", entry["company"]).lower() for entry in entries]
     total += 2_500 * len({name for name in names if names.count(name) >= 2})
 
@@ -753,7 +756,13 @@ COMMON_RULES = """# 반드시 지킬 규칙
 3. 수치에는 단위와 기준 시점을 붙인다. 원문에 없으면 쓰지 않는다.
 4. 투자 권유로 읽히는 표현(사라, 팔아라, 지금이 기회 등)과 명령형·단정형 표현을 쓰지 않는다.
 5. 의견·전망은 반드시 '증권사가 ~라고 봤다/제시했다'처럼 증권사의 견해로 표현한다.
-6. 증권사 고지·면책·공시 문구는 무시한다."""
+6. 증권사 고지·면책·공시 문구는 무시한다.
+7. 금액은 원문 표기 단위 그대로 쓴다. 억원↔조원 등으로 환산·반올림하지 않는다. 표의 단위(십억원, 백만원 등)를 확인해 그대로 옮긴다.
+8. 확정 실적과 추정·전망 수치를 구분한다. 추정치는 '전망·추정·예상'을 밝히고, 연도 옆에 E·F 표기가 있으면 추정으로 본다.
+9. 투자의견·목표주가는 이 종목에 대한 것만 쓴다. 업종 투자의견과 섞지 않는다. 목표주가는 하나만 쓰고, 이전 목표주가를 언급할 때는 '이전'이라고 밝힌다.
+10. 원문에 가정·조건이 붙은 전망은 조건을 함께 쓴다. 원문이 밝힌 주요 위험은 빠뜨리지 않는다.
+11. 원문에 없는 해석·평가(괜찮은, 우려된다, 필요하다 등)를 덧붙이지 않는다. 원문의 강도보다 세게 쓰지 않는다(예: 원문이 '기대'면 '확실'이라 쓰지 않는다).
+12. 영문 약어는 원문에 풀이가 있을 때만 괄호로 풀어 쓴다. 없으면 약어만 쓰고 뜻을 지어내지 않는다."""
 
 
 MAP_PROMPT = """# 역할
@@ -786,10 +795,10 @@ __RULES__
 __INFO__
 
 # 출력 형식 (아래 형식의 줄만 출력하고 다른 설명은 쓰지 않는다)
-의견: 투자의견 || 목표주가 금액 || 산출 근거 또는 기준 (예: 12개월 목표, PER 10배) (원문에 없으면 각각 -)
-핵심: 리포트의 결론과 논리를 이어 쓴 2~3문장 (__CORE__자 이내, 증권사 견해로 표현)
-포인트: 소제목 || 설명 (p.N)
-포인트: ... (__POINTS__줄)
+의견: 이 종목의 투자의견 || 목표주가 금액 || 목표기간·기준주가·산출 근거 (예: 12개월, 기준주가 28,000원, PER 10배) (원문에 없으면 각각 -)
+핵심: 리포트의 결론과 논리를 이어 쓴 1~2문장 (__CORE__자 이내, 증권사 견해로 표현)
+포인트: 소제목 || 설명 (p.N)   ← 구분 기호는 반드시 '||' 하나만 쓴다
+포인트: ... (__POINTS__줄, 리스크는 포인트에 쓰지 말고 아래 리스크 줄에만 쓴다)
 수치: 항목=값 (p.N)  (가장 중요한 지표만, 0~__NUMS__줄)
 리스크: 원문이 언급한 위험 요인 (p.N) (최대 __RISKS__줄, 없으면 -)
 
@@ -806,8 +815,8 @@ COMPARE_PROMPT = """# 역할
 같은 종목에 대해 나온 여러 증권사 리포트의 요약을 비교하는 에디터다.
 
 __RULES__
-7. 어느 증권사의 견해인지 증권사 이름을 반드시 붙인다. 종목이 서로 다르면 종목명을 함께 적고, 다른 종목끼리의 의견을 같은 종목의 의견처럼 섞지 않는다.
-8. 자료에 없는 내용은 쓰지 않는다. 비교할 근거가 없으면 해당 줄은 -로 쓴다.
+13. 어느 증권사의 견해인지 증권사 이름을 반드시 붙인다. 종목이 서로 다르면 종목명을 함께 적고, 다른 종목끼리의 의견을 같은 종목의 의견처럼 섞지 않는다.
+14. 자료에 없는 내용은 쓰지 않는다. 비교할 근거가 없으면 해당 줄은 -로 쓴다.
 
 # 출력 형식 (아래 형식의 줄만 출력)
 한줄: 전체를 아우르는 사실 중심 한 줄 요약 (25~40자, 투자 권유 금지)
@@ -852,7 +861,7 @@ def parse_summary(text):
         key, value = found.group(1), found.group(2).strip()
 
         if key == "의견":
-            parts = [part.strip() for part in value.split("||")] + ["", "", ""]
+            parts = [part.strip() for part in value.replace("&&", "||").split("||")] + ["", "", ""]
             parts = ["" if part in ("-", "없음") else part for part in parts]
             parts[1] = re.sub(r"^목표주가\s*[=:：]?\s*", "", parts[1]).strip("-: ")
             parts[0] = re.sub(r"^(?:투자의견)\s*[=:：]?\s*", "", parts[0]).strip("-: ")
@@ -864,9 +873,16 @@ def parse_summary(text):
             result["core"] = value
 
         elif key == "포인트" and value not in ("", "-"):
+            value = value.replace("&&", "||")
+
             if "||" in value:
                 head, _, body = value.partition("||")
                 head = head.strip().strip("*")
+
+                if head.startswith("리스크") and body.strip():
+                    note = re.sub(r"\s+", " ", body).strip()
+                    result["risk"] = f"{result['risk']} / {note}" if result["risk"] else note
+                    continue
 
                 if head and body.strip():
                     value = f"**{head}**: {body.strip()}"
@@ -965,6 +981,261 @@ def verify_summary(entry, summary, source):
     for text in summary["points"] + [summary["core"], summary["risk"]]:
         if text and unknown_numbers(text, plain):
             notes.append(f"{label}: 원문에서 확인되지 않는 수치가 있는 문장 → {text[:60]}…")
+
+    return [f"[확인 필요] {note}" for note in notes]
+
+
+TOP_NOTICE = (
+    "※ 투자 참고용 요약입니다. 증권사의 견해이며 투자 권유가 아닙니다. "
+    "정확한 내용은 원문을 확인하시고, 투자 판단과 책임은 투자자 본인에게 있습니다."
+)
+
+CHECK_BATCH = 5
+CHECK_MAX_TOKENS = 1_400
+
+CHECK_PROMPT = """# 역할
+투자정보 콘텐츠의 독립적인 품질 검증 담당자다. 아래 '요약'이 '발췌'(증권사 리포트 원문 일부)와 맞는지 대조한다.
+요약이 정확하다고 가정하지 않는다. 그러나 존재하지 않는 문제를 만들어내지 않는다. 맞으면 반드시 '정상'으로 답한다.
+
+# 확인 항목
+금액의 원문 단위와 변환 / 수치와 적용 연도 / 목표주가·투자의견·목표기간 / 종목 의견과 업종 의견의 구분 /
+확정 실적과 추정치의 구분 / 조건부 전망의 조건 누락 / 원문에 없는 표현·추론 / 의미 왜곡·지나친 단순화 /
+숫자는 맞지만 해석이 틀린 부분 / 일반 독자가 오해할 문장
+
+# 판정
+- 정상: 발췌와 맞다
+- 수정: 발췌와 명백히 다르다 (수정문을 반드시 쓴다. 수정문의 숫자는 발췌에 있는 것만 쓴다)
+- 확인: 발췌만으로 판단할 수 없거나 자료가 충돌한다 (발췌에 근거가 없다는 이유만으로 '수정'을 쓰지 않는다)
+- 가독: 내용은 맞지만 오해 소지가 있거나 더 쉽게 쓸 수 있다
+
+# 출력 형식 (요약 번호마다 한 줄, 다른 설명은 쓰지 않는다)
+번호 || 판정 || 사유 한 문장 || 수정문 (판정이 '수정'일 때만, 아니면 -)
+
+__MATERIAL__
+"""
+
+
+def source_windows(entry):
+    """원문을 240자 조각(120자씩 겹침)으로 나눠 (쪽, 조각) 목록으로 만듭니다."""
+
+    if "windows" not in entry:
+        windows = []
+
+        for page, text in entry["pages"]:
+            flat = re.sub(r"\s+", " ", text)
+
+            for start in range(0, max(1, len(flat)), 120):
+                piece = flat[start:start + 240]
+
+                if piece.strip():
+                    windows.append((page, piece))
+
+        entry["windows"] = windows
+
+    return entry["windows"]
+
+
+def find_evidence(entry, claim, limit=3):
+    """문장과 숫자·단어가 가장 많이 겹치는 원문 조각을 찾습니다."""
+
+    plain = strip_commas(claim)
+    numbers = {t for t in re.findall(r"\d+(?:\.\d+)?", plain) if len(t.replace(".", "")) >= 2}
+    words = set(re.findall(r"[가-힣A-Za-z]{2,}", plain))
+
+    windows = source_windows(entry)
+    scored = []
+
+    for index, (_, piece) in enumerate(windows):
+        flat = strip_commas(piece)
+        score = 3 * sum(1 for n in numbers if n in flat) + sum(1 for w in words if w in piece)
+
+        if score:
+            scored.append((score, index))
+
+    scored.sort(reverse=True)
+
+    picked = []
+
+    for _, index in scored:
+        if all(abs(index - other) > 1 for other in picked):
+            picked.append(index)
+
+        if len(picked) >= limit:
+            break
+
+    return [windows[i] for i in sorted(picked)]
+
+
+def code_checks(entry, summary, source):
+    """AI 없이 코드로 하는 검사: 목표주가 일치, 원문 표 단위, 확정/추정 표현."""
+
+    label = entry["broker"]
+    plain = strip_commas(source)
+    texts = [summary["core"]] + summary["points"] + summary["numbers"] + [summary["risk"]]
+    notes = []
+
+    target = re.sub(r"\D", "", summary["target"] or "")
+
+    if target:
+        for text in texts:
+            for found in re.finditer(r"목표(?:주가|가)[^\d]{0,8}(\d[\d,]{3,8})\s*원", text or ""):
+                before = text[max(0, found.start() - 12):found.start()]
+
+                if re.sub(r"\D", "", found.group(1)) != target and not re.search(r"이전|기존|종전|직전|상향 전|하향 전", before):
+                    notes.append(
+                        f"[확인 필요] {label}: 목표주가가 {found.group(1)}원으로도 적혀 있어 "
+                        f"목표주가 칸({summary['target']})과 다릅니다 → {text[:60]}…"
+                    )
+
+    declared = set(re.findall(r"단위\s*[:：]?\s*\(?\s*(십억원|백만원|억원|조원|천원|만원)", source))
+    nospace = re.sub(r"\s", "", plain)
+    seen = set()
+
+    if declared:
+        for text in texts:
+            for found in re.finditer(r"(\d+(?:\.\d+)?)\s*(조|억|만)\s*원?", strip_commas(text or "")):
+                token = found.group(1) + found.group(2)
+
+                if len(found.group(1)) >= 3 and token not in seen and token not in nospace and found.group(1) in nospace:
+                    seen.add(token)
+                    notes.append(
+                        f"[확인 필요] {label}: '{found.group(0).strip()}'은 원문 표의 단위({', '.join(sorted(declared))})와 "
+                        "달라 환산이 맞는지 확인이 필요합니다."
+                    )
+
+    this_year = datetime.datetime.now(KST).year
+
+    for text in [summary["core"]] + summary["points"]:
+        for sentence in re.split(r"(?<=[다요\.])\s+", text or ""):
+            if re.search(r"전망|예상|추정|목표|예정|가정|기대|것으로", sentence):
+                continue
+
+            found = re.search(r"(20\d{2})년\s*(?:([1-4])\s*분기)?", sentence)
+
+            if not found or not re.search(r"기록|달성|확정|실현", sentence):
+                continue
+
+            year, quarter = int(found.group(1)), int(found.group(2) or 0)
+
+            if year > this_year or (year == this_year and quarter in (0, 4)):
+                notes.append(
+                    f"[확인 필요] {label}: 아직 확정되지 않은 시점의 수치를 확정 실적처럼 쓴 것은 아닌지 확인하세요 → {sentence[:60]}…"
+                )
+
+    return notes
+
+
+def build_claims(summary):
+    """AI 대조를 할 문장 목록 [(종류, 번호, 문장, 검색 보조어)]."""
+
+    claims = []
+
+    rating = " / ".join(
+        part for part in (
+            f"투자의견 {summary['opinion']}" if summary["opinion"] else "",
+            f"목표주가 {summary['target']}" if summary["target"] else "",
+            f"기준 {summary['basis']}" if summary["basis"] else "",
+        ) if part
+    )
+
+    if rating:
+        claims.append(("rating", 0, rating, "투자의견 목표주가 목표기간"))
+
+    if summary["core"]:
+        claims.append(("core", 0, summary["core"], ""))
+
+    for index, text in enumerate(summary["points"]):
+        claims.append(("points", index, text, ""))
+
+    if summary["risk"]:
+        claims.append(("risk", 0, summary["risk"], "리스크 위험"))
+
+    return claims
+
+
+def cross_check(entry, summary, source, status):
+    """요약 문장을 원문 발췌와 AI로 다시 대조합니다. 안전할 때만 자동 수정하고, 나머지는 알립니다."""
+
+    label = entry["broker"]
+    claims = build_claims(summary)
+    plain = strip_commas(source)
+    shingles = make_shingles(source)
+    notes, checked = [], 0
+
+    for start in range(0, len(claims), CHECK_BATCH):
+        batch = claims[start:start + CHECK_BATCH]
+        status.write(f"  · {label} 원문 대조 검증 ({start + 1}~{start + len(batch)}/{len(claims)})")
+
+        blocks, pages = [], {}
+
+        for number, (_, _, text, hint) in enumerate(batch, start=1):
+            evidence = find_evidence(entry, f"{text} {hint}")
+            pages[number] = "·".join(f"p.{p}" for p in sorted({p for p, _ in evidence}))
+            excerpt = " | ".join(f"(p.{p}) {piece}" for p, piece in evidence) or "(관련 발췌를 찾지 못함)"
+            blocks.append(f"[{number}] 요약: {text}\n발췌: {excerpt}")
+
+        prompt = CHECK_PROMPT.replace("__MATERIAL__", "\n\n".join(blocks))
+
+        try:
+            raw = groq_chat(prompt, CHECK_MAX_TOKENS, 0.1, f"{label} 검증")
+
+        except Exception as error:
+            notes.append(f"[확인 필요] {label}: 문장 {len(batch)}개는 AI 대조에 실패해 검증되지 않았습니다 ({str(error)[:60]})")
+            continue
+
+        answered = set()
+
+        for line in raw.splitlines():
+            found = re.match(r"^\W*(\d+)\W*\|\|\s*(정상|수정|확인|가독)\s*\|\|\s*(.*?)\s*(?:\|\|\s*(.*))?$", line.strip())
+
+            if not found:
+                continue
+
+            number, verdict = int(found.group(1)), found.group(2)
+            reason, fix = found.group(3).strip(), (found.group(4) or "").strip()
+
+            if not 1 <= number <= len(batch):
+                continue
+
+            answered.add(number)
+
+            kind, index, text, _ = batch[number - 1]
+            where = f" (원문 {pages[number]})" if pages[number] else ""
+            short = text[:40] + ("…" if len(text) > 40 else "")
+
+            if verdict == "정상":
+                continue
+
+            if verdict == "가독":
+                notes.append(f"[가독성] {label}: {reason} → '{short}'")
+
+            elif verdict == "확인" or not fix or fix == "-":
+                notes.append(f"[확인 필요] {label}: {reason}{where} → '{short}'")
+
+            else:
+                safe = (
+                    kind in ("core", "points")
+                    and not unknown_numbers(fix, plain)
+                    and not has_verbatim(fix, shingles)
+                )
+
+                if safe:
+                    if kind == "points" and text.startswith("**") and not fix.startswith("**"):
+                        head = re.match(r"^\*\*.+?\*\*", text).group(0)
+                        fix = f"{head}: {fix}"
+
+                    apply_item(summary, kind, index, fix)
+                    notes.append(f"[자동 수정] {label}: {reason}{where} — 수정 전: {text[:70]} → 수정 후: {fix[:70]}")
+
+                else:
+                    notes.append(f"[수정 필수] {label}: {reason}{where} → '{short}' / 제안: {fix[:90]}")
+
+        checked += len(answered)
+
+        if len(answered) < len(batch):
+            notes.append(f"[확인 필요] {label}: 문장 {len(batch) - len(answered)}개는 AI 응답을 해석하지 못해 검증되지 않았습니다.")
+
+    entry["checked"] = (checked, len(claims))
 
     return notes
 
@@ -1130,6 +1401,10 @@ def summarize_report(entry, char_limit, status):
 
     entry["verbatim_left"] = reword_flagged(summary, shingles, label, status)
     entry["notes"] = verify_summary(entry, summary, source)
+    entry["notes"] += code_checks(entry, summary, source)
+
+    if st.session_state.get("rd_check", True):
+        entry["notes"] += cross_check(entry, summary, source, status)
 
     return summary
 
@@ -1242,7 +1517,7 @@ def build_report(entries, summaries, comparisons, failures):
         f"{entry['broker']} – {entry['company']}" for entry in entries
     )
 
-    lines += [f"📌 **이번 정리 대상**: {targets}", ""]
+    lines += [f"📌 **이번 정리 대상**: {targets}", "", TOP_NOTICE, ""]
 
     lines += [
         f"※ 아래 {len(entries)}개 증권사 리포트를 요약했습니다. 각 내용은 해당 증권사의 견해입니다.",
@@ -1357,6 +1632,20 @@ def run_digest(entries, char_limit, status):
 
     state["rd_report"] = report
     state["rd_warnings"] = warnings
+
+    done_checks = [entry.get("checked") for entry in done_entries if entry.get("checked")]
+
+    if state.get("rd_check", True):
+        total_done = sum(c[0] for c in done_checks)
+        total_all = sum(c[1] for c in done_checks)
+        scope = (
+            f"검증 범위: 코드 검사(수치 원문 존재·목표주가 일치·단위·확정/추정 표현) + "
+            f"AI 원문 대조 {total_done}/{total_all}문장. 대조하지 못한 문장은 '확인 필요'로 표시됩니다."
+        )
+    else:
+        scope = "검증 범위: 코드 검사(수치 원문 존재·목표주가 일치·단위·확정/추정 표현)만 했습니다. AI 원문 대조는 하지 않았습니다."
+
+    state["rd_scope"] = scope
     state["rd_note"] = (
         f"생성 완료 · {datetime.datetime.now(KST).strftime('%H:%M:%S')} · "
         f"{len(done_entries)}건 정리" + (f" · {len(failures)}건 실패" if failures else "")
@@ -1879,6 +2168,14 @@ def main():
             help="상세할수록 포인트가 많고 근거·수치가 더 담기지만 토큰을 더 씁니다.",
         )
 
+        st.checkbox(
+            "AI 원문 대조 검증 (토큰 추가 사용)",
+            value=True,
+            key="rd_check",
+            help="요약 문장을 원문 발췌와 다시 대조해 수치·목표주가·단위·확정/추정 구분 오류를 찾습니다. "
+                 "원문 숫자로 바로잡을 수 있는 경우만 자동 수정하고 나머지는 알림으로 남깁니다.",
+        )
+
         missing = [entry["file"] for entry in entries if not entry["broker"]]
         missing_company = [entry["file"] for entry in entries if not entry["company"]]
 
@@ -1933,8 +2230,36 @@ def main():
 
     st.markdown("### 📝 ③ 결과")
 
-    for warning in state.get("rd_warnings") or []:
-        st.warning(warning)
+    warnings = state.get("rd_warnings") or []
+
+    groups = (
+        ("[수정 필수]", "① 수정 필수", st.error),
+        ("[확인 필요]", "② 확인 필요", st.warning),
+        ("[가독성]", "③ 가독성 개선 권장", st.info),
+        ("[자동 수정]", "④ 자동 수정된 항목 (수정 전후 확인)", st.info),
+    )
+
+    if state.get("rd_report"):
+        st.caption(state.get("rd_scope") or "")
+
+    shown = set()
+
+    for prefix, title, show in groups:
+        items = [w for w in warnings if w.startswith(prefix)]
+
+        if items:
+            shown.update(items)
+            st.markdown(f"**{title} ({len(items)})**")
+
+            for item in items:
+                show(item[len(prefix):].strip())
+
+    for warning in warnings:
+        if warning not in shown:
+            st.warning(warning)
+
+    if state.get("rd_report") and not warnings:
+        st.success("자동 검증에서 걸린 항목이 없습니다. (정상 판정이 오류 없음을 보증하지는 않으므로 게시 전 원문을 확인하세요.)")
 
     st.text_area(
         "압축 리포트 (수정 가능 · 복사 버튼은 수정한 내용으로 복사됩니다)",
