@@ -1017,6 +1017,9 @@ def broker_block(number, entry, summary):
 
     lines = [f"**{number}. {entry['broker']} | {title}**{date}"]
 
+    if summary["core"]:
+        lines.append(f"- 핵심: {summary['core']}")
+
     if INCLUDE_RATING:
         opinion, target = summary["opinion"], summary["target"]
 
@@ -1029,9 +1032,6 @@ def broker_block(number, entry, summary):
             lines.append(f"- 투자의견·목표주가: {text} ※ 증권사의 견해이며 당사 의견이 아닙니다")
         else:
             lines.append("- 투자의견·목표주가: 원문에서 확인되지 않음")
-
-    if summary["core"]:
-        lines.append(f"- 핵심: {summary['core']}")
 
     if summary["points"]:
         lines.append("- 주요 내용")
