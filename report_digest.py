@@ -1590,6 +1590,17 @@ def main():
     report = state.get("rd_report", "").strip()
 
     if report:
+        stamp = datetime.datetime.now(KST).strftime("%Y%m%d_%H%M")
+
+        st.download_button(
+            "💾 이 리포트 파일로 저장 (.md)",
+            data=report.encode("utf-8"),
+            file_name=f"report_digest_{stamp}.md",
+            mime="text/markdown",
+            key="rd_download",
+            help="수정한 내용 그대로 내 컴퓨터에 저장합니다. 새로고침하면 화면의 결과는 사라지니 필요하면 먼저 저장하세요.",
+        )
+
         confirmed = st.checkbox(
             "게시 전 확인: 각 증권사 리포트의 이용약관·재배포 허용 범위와 "
             "(외부 공개 시) 준법 검토를 확인했습니다",
