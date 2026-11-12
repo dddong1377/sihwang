@@ -609,6 +609,76 @@ def guess_company(first_text):
     return ""
 
 
+def code_from_text(name, pages):
+    """리포트 본문에서 '종목명(6자리 코드)' 표기를 찾아 코드를 돌려줍니다."""
+
+    pattern = re.compile(re.escape(name) + r"\s*[\(（]\s*(\d{6})")
+
+    for _, text in pages:
+        found = pattern.search(text)
+
+        if found:
+            return found.group(1)
+
+    return ""
+
+
+@st.cache_data(ttl=86_400, show_spinner=False)
+def lookup_code_online(name):
+    """본문에서 못 찾았을 때만 네이버 자동완성에서 종목코드를 찾습니다. 이름이 정확히 같을 때만 씁니다."""
+
+    try:
+        response = requests.get(
+            "https://ac.stock.naver.com/ac",
+            params={"q": name, "target": "stock"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=5,
+        )
+
+        if response.status_code != 200:
+            return ""
+
+        stack, matches = [response.json()], []
+
+        while stack:
+            node = stack.pop()
+
+            if isinstance(node, dict):
+                code, title = str(node.get("code", "")), str(node.get("name", ""))
+
+                if re.fullmatch(r"\d{6}", code) and title.strip() == name:
+                    matches.append(code)
+
+                stack.extend(node.values())
+
+            elif isinstance(node, list):
+                stack.extend(node)
+
+        return matches[0] if len(set(matches)) == 1 else ""
+
+    except Exception:
+        return ""
+
+
+def resolve_company(raw, pages):
+    """'삼성전자' → '삼성전자(005930)'. 이미 코드가 있으면 모양만 '이름(코드)'로 맞춥니다."""
+
+    raw = re.sub(r"\s+", " ", str(raw or "")).strip()
+
+    found = re.match(r"^(.*?)\s*[\(（]\s*(\d{6})\s*[\)）]$", raw)
+
+    if found and found.group(1).strip():
+        return f"{found.group(1).strip()}({found.group(2)})"
+
+    if not raw or re.search(r"\d{6}", raw):
+        return raw
+
+    # 산업·시황 리포트처럼 종목이 아닌 입력은 그대로 둡니다. 종목명은 보통 공백이 없거나 짧습니다.
+    code = code_from_text(raw, pages) or (lookup_code_online(raw) if len(raw) <= 15 else "")
+
+    return f"{raw}({code})" if code else raw
+
+
 def guess_title(filename):
     stem = re.sub(r"\.pdf$", "", filename, flags=re.I)
 
@@ -1700,12 +1770,18 @@ def collect_entries(files):
             col5.text_input("리포트 제목", key=f"rd_title_{uid}")
             col6.text_input("원문 링크 (선택)", key=f"rd_link_{uid}")
 
+            typed = state[f"rd_company_{uid}"].strip()
+            shown = resolve_company(typed, pages)
+
+            if typed and shown != typed:
+                st.caption(f"종목 표기: {shown} (종목코드를 자동으로 붙였습니다)")
+
         entries.append({
             "file": uploaded.name,
             "pages": cleaned,
             "total_pages": len(pages),
             "broker": state[f"rd_broker_{uid}"].strip(),
-            "company": state[f"rd_company_{uid}"].strip(),
+            "company": resolve_company(state[f"rd_company_{uid}"], pages),
             "title": state[f"rd_title_{uid}"].strip(),
             "date": state[f"rd_date_{uid}"].strip(),
             "author": state[f"rd_author_{uid}"].strip(),
