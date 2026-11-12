@@ -762,7 +762,8 @@ COMMON_RULES = """# 반드시 지킬 규칙
 9. 투자의견·목표주가는 이 종목에 대한 것만 쓴다. 업종 투자의견과 섞지 않는다. 목표주가는 하나만 쓰고, 이전 목표주가를 언급할 때는 '이전'이라고 밝힌다.
 10. 원문에 가정·조건이 붙은 전망은 조건을 함께 쓴다. 원문이 밝힌 주요 위험은 빠뜨리지 않는다.
 11. 원문에 없는 해석·평가(괜찮은, 우려된다, 필요하다 등)를 덧붙이지 않는다. 원문의 강도보다 세게 쓰지 않는다(예: 원문이 '기대'면 '확실'이라 쓰지 않는다).
-12. 영문 약어는 원문에 풀이가 있을 때만 괄호로 풀어 쓴다. 없으면 약어만 쓰고 뜻을 지어내지 않는다."""
+12. 영문 약어는 원문에 풀이가 있을 때만 괄호로 풀어 쓴다. 없으면 약어만 쓰고 뜻을 지어내지 않는다.
+13. 글자 수('(160자)' 등)를 문장에 쓰지 않는다."""
 
 
 MAP_PROMPT = """# 역할
@@ -815,8 +816,8 @@ COMPARE_PROMPT = """# 역할
 같은 종목에 대해 나온 여러 증권사 리포트의 요약을 비교하는 에디터다.
 
 __RULES__
-13. 어느 증권사의 견해인지 증권사 이름을 반드시 붙인다. 종목이 서로 다르면 종목명을 함께 적고, 다른 종목끼리의 의견을 같은 종목의 의견처럼 섞지 않는다.
-14. 자료에 없는 내용은 쓰지 않는다. 비교할 근거가 없으면 해당 줄은 -로 쓴다.
+14. 어느 증권사의 견해인지 증권사 이름을 반드시 붙인다. 종목이 서로 다르면 종목명을 함께 적고, 다른 종목끼리의 의견을 같은 종목의 의견처럼 섞지 않는다.
+15. 자료에 없는 내용은 쓰지 않는다. 비교할 근거가 없으면 해당 줄은 -로 쓴다.
 
 # 출력 형식 (아래 형식의 줄만 출력)
 한줄: 전체를 아우르는 사실 중심 한 줄 요약 (25~40자, 투자 권유 금지)
@@ -844,6 +845,18 @@ def with_rules(prompt):
 # ===============================================================
 # 6. 요약 / 검사
 # ===============================================================
+
+PAGE_REF_PATTERN = re.compile(r"\s*[\(\[]\s*(?:p|P)\.?\s*\d+(?:\s*[,~\-–]\s*(?:p\.?\s*)?\d+)*\s*[\)\]]")
+CHAR_COUNT_PATTERN = re.compile(r"\s*[\(\[]\s*(?:약\s*)?\d+\s*자\s*(?:이내|내외)?\s*[\)\]]")
+
+
+def clean_text(text):
+    """AI가 붙인 글자 수 표기 (160자)를 지웁니다. 쪽 표기는 화면용 글에 남깁니다."""
+
+    text = CHAR_COUNT_PATTERN.sub("", str(text or ""))
+
+    return re.sub(r"\s+", " ", text).strip()
+
 
 def parse_summary(text):
     result = {
@@ -899,6 +912,11 @@ def parse_summary(text):
             result["risk"] = f"{result['risk']} / {value}" if result["risk"] else value
 
     level = detail_params()
+
+    result["core"] = clean_text(result["core"])
+    result["risk"] = clean_text(result["risk"])
+    result["points"] = [clean_text(item) for item in result["points"]]
+    result["numbers"] = [clean_text(item) for item in result["numbers"]]
 
     result["points"] = result["points"][:level["max_points"]]
     result["numbers"] = result["numbers"][:level["nums"]]
@@ -1875,6 +1893,33 @@ def pdf_inline(text):
     return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text).strip()
 
 
+def publish_text(report):
+    """복사·PDF용 글: 쪽 표기 (p.N)를 지우고, 출처 표의 '참고 쪽' 열을 뺍니다."""
+
+    lines, drop = [], None
+
+    for raw in report.splitlines():
+        line = raw
+
+        if line.lstrip().startswith("|"):
+            cells = line.strip().strip("|").split("|")
+
+            if any(cell.strip() == "참고 쪽" for cell in cells):
+                drop = [cell.strip() for cell in cells].index("참고 쪽")
+
+            if drop is not None and drop < len(cells):
+                del cells[drop]
+                line = "|" + "|".join(cells) + "|"
+
+        else:
+            drop = None
+            line = PAGE_REF_PATTERN.sub("", line)
+
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
 def build_pdf(report):
     """마크다운 형태의 리포트를 PDF 바이트로 바꿉니다."""
 
@@ -2120,7 +2165,7 @@ def main():
             "외부에 공개하기 전에 각 증권사의 약관과 리포트 첫·마지막 쪽 고지를 확인하세요.\n"
             "- **투자 권유**: 투자의견·목표주가는 '증권사의 견해'로만 표시하며 당사 의견처럼 쓰지 않습니다. "
             "외부 공개용 게시는 준법감시(컴플라이언스) 검토를 받는 것을 권장합니다.\n"
-            "- **출처**: 증권사명·리포트 제목·발간일·참고 쪽을 출처 표에 남깁니다. 비어 있는 칸은 직접 채워 주세요.\n"
+            "- **출처**: 증권사명·종목·리포트 제목·발간일을 출처 표에 남깁니다(참고 쪽은 화면에만 표시되고 복사·PDF에서는 빠집니다). 비어 있는 칸은 직접 채워 주세요.\n"
             "- 이 안내는 법률 자문이 아닙니다. 확실하지 않은 부분은 법무·준법 담당자에게 확인하세요."
         )
 
@@ -2282,7 +2327,7 @@ def main():
         )
 
         try:
-            pdf_bytes = build_pdf(report)
+            pdf_bytes = build_pdf(publish_text(report))
 
             st.download_button(
                 "📄 이 리포트 PDF로 저장",
@@ -2308,7 +2353,7 @@ def main():
         )
 
         if confirmed:
-            copy_buttons(report)
+            copy_buttons(publish_text(report))
         else:
             st.info("위 확인란에 체크하면 복사 버튼이 나타납니다.")
 
