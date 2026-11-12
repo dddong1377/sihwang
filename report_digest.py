@@ -48,20 +48,25 @@ CHUNK_CHARS = 6_000
 
 # 정리 상세도: 포인트 수 / 핵심 글자 수 / 수치 줄 수 / 리스크 줄 수 / 출력 토큰 / 메모 합계 글자 수
 DETAIL_LEVELS = {
-    "간결": {"points": "3~5", "core": 60, "nums": 4, "risks": 1, "tokens": 1_500, "memo_cap": 8_000, "max_points": 5},
-    "보통": {"points": "5~7", "core": 90, "nums": 6, "risks": 2, "tokens": 2_000, "memo_cap": 7_000, "max_points": 7},
-    "상세": {"points": "7~10", "core": 120, "nums": 8, "risks": 3, "tokens": 2_400, "memo_cap": 6_500, "max_points": 10},
+    "간결": {"points": "3~4", "core": 80, "nums": 4, "risks": 1, "tokens": 1_500, "memo_cap": 8_000, "max_points": 4},
+    "보통": {"points": "4~6", "core": 140, "nums": 5, "risks": 2, "tokens": 2_000, "memo_cap": 7_000, "max_points": 6},
+    "상세": {"points": "5~7", "core": 200, "nums": 6, "risks": 3, "tokens": 2_400, "memo_cap": 6_500, "max_points": 7},
 }
 DEFAULT_DETAIL = "상세"
 
+STYLE_GUIDE = (
+    "애널리스트 리포트를 압축한 글처럼 쓴다. 수치를 나열하지 말고 '무엇이 → 왜 → 그래서 어떻게 전망하는가'의 "
+    "논리가 이어지는 문장으로 쓰고, 수치는 그 문장의 근거로 곁들인다. "
+    "포인트의 소제목은 핵심 주장을 담은 짧은 구절(15자 안팎)로 쓴다."
+)
+
 DEPTH_GUIDE = {
-    "간결": "포인트는 한 문장으로 짧게 쓴다.",
-    "보통": "포인트는 한두 문장으로, 원문에 있는 수치와 근거를 함께 쓴다.",
+    "간결": "각 포인트는 한 문장으로 쓴다.",
+    "보통": "각 포인트는 두 문장 안팎으로, 이유와 근거 수치를 함께 쓴다.",
     "상세": (
-        "포인트는 가능하면 이 흐름으로 쓴다: ① 실적·사업 현황 ② 전망과 추정의 근거 "
-        "③ 밸류에이션·목표주가 산출 근거 ④ 투자 포인트·촉매 (리포트 성격에 맞게 조정). "
-        "각 포인트는 두 문장 안팎으로 '무엇이, 왜, 얼마나'가 드러나게 쓰고, "
-        "원문에 있는 수치·근거·전제를 빠뜨리지 않는다. 한 줄로 뭉뚱그리지 않는다."
+        "각 포인트는 두세 문장으로, 이유·근거 수치·전망이 이어지게 쓴다. "
+        "포인트는 가능하면 ① 실적·사업 현황 ② 전망과 추정의 근거 ③ 밸류에이션·목표주가 산출 근거 "
+        "④ 투자 포인트·촉매 순서로 구성한다 (리포트 성격에 맞게 조정)."
     ),
 }
 
@@ -662,8 +667,8 @@ def estimate_run_tokens(entries, char_limit):
 
         total += 700 + detail_params()["tokens"]
 
-    if len(entries) >= 2:
-        total += 2_500
+    names = [re.sub(r"[\(（].*?[\)）]|\s", "", entry["company"]).lower() for entry in entries]
+    total += 2_500 * len({name for name in names if names.count(name) >= 2})
 
     return total
 
@@ -682,14 +687,17 @@ COMMON_RULES = """# 반드시 지킬 규칙
 
 
 MAP_PROMPT = """# 역할
-증권사 리포트의 일부를 읽고 '사실 메모'를 만든다.
+증권사 리포트의 일부를 읽고, 나중에 글로 압축할 수 있도록 '논리 메모'를 만든다.
 
 __RULES__
 
 # 출력 형식
-- 한 줄에 메모 하나, 최대 12줄 (수치·근거·전제를 빠뜨리지 않는다)
-- 줄 끝에 쪽 번호를 (p.N) 형식으로 붙인다
-- 다른 설명은 쓰지 않는다
+- 한 줄에 메모 하나, 최대 12줄
+- 각 줄은 '주장·전망 — 근거 — 수치' 형태로, 리포트가 무엇을 왜 그렇게 보는지 드러나게 쓴다
+- 표의 숫자만 나열하지 말고 변화의 원인이나 의미를 함께 적는다
+- 연도별 핵심 추정치(매출·영업이익·EPS 등)는 한 줄로 묶는다
+- 투자의견·목표주가·산출 근거(적용 PER 등)는 반드시 포함한다
+- 줄 끝에 쪽 번호를 (p.N) 형식으로 붙인다. 다른 설명은 쓰지 않는다
 
 # 리포트 정보
 __INFO__
@@ -708,14 +716,15 @@ __RULES__
 __INFO__
 
 # 출력 형식 (아래 형식의 줄만 출력하고 다른 설명은 쓰지 않는다)
-의견: 투자의견 || 목표주가 || 기준일 또는 전제 (원문에 없으면 각각 -)
-핵심: 리포트의 핵심 (__CORE__자 이내, 증권사 견해로 표현)
-포인트: 주요 내용 (p.N)
+의견: 투자의견 || 목표주가 금액 || 산출 근거 또는 기준 (예: 12개월 목표, PER 10배) (원문에 없으면 각각 -)
+핵심: 리포트의 결론과 논리를 이어 쓴 2~3문장 (__CORE__자 이내, 증권사 견해로 표현)
+포인트: 소제목 || 설명 (p.N)
 포인트: ... (__POINTS__줄)
-수치: 항목=값 (p.N)  (원문에 있는 수치만, 0~__NUMS__줄)
+수치: 항목=값 (p.N)  (가장 중요한 지표만, 0~__NUMS__줄)
 리스크: 원문이 언급한 위험 요인 (p.N) (최대 __RISKS__줄, 없으면 -)
 
 # 작성 방침
+__STYLE__
 __DEPTH__
 
 # 자료
@@ -724,7 +733,7 @@ __MATERIAL__
 
 
 COMPARE_PROMPT = """# 역할
-같은 시점에 나온 여러 증권사 리포트의 요약을 비교하는 에디터다.
+같은 종목에 대해 나온 여러 증권사 리포트의 요약을 비교하는 에디터다.
 
 __RULES__
 7. 어느 증권사의 견해인지 증권사 이름을 반드시 붙인다. 종목이 서로 다르면 종목명을 함께 적고, 다른 종목끼리의 의견을 같은 종목의 의견처럼 섞지 않는다.
@@ -775,6 +784,9 @@ def parse_summary(text):
         if key == "의견":
             parts = [part.strip() for part in value.split("||")] + ["", "", ""]
             parts = ["" if part in ("-", "없음") else part for part in parts]
+            parts[1] = re.sub(r"^목표주가\s*[=:：]?\s*", "", parts[1]).strip("-: ")
+            parts[0] = re.sub(r"^(?:투자의견)\s*[=:：]?\s*", "", parts[0]).strip("-: ")
+            parts[2] = re.sub(r"\s*\(p\.\d+(?:~\d+)?\)", "", parts[2]).strip("-: ")
 
             result["opinion"], result["target"], result["basis"] = parts[:3]
 
@@ -782,6 +794,16 @@ def parse_summary(text):
             result["core"] = value
 
         elif key == "포인트" and value not in ("", "-"):
+            if "||" in value:
+                head, _, body = value.partition("||")
+                head = head.strip().strip("*")
+
+                if head and body.strip():
+                    value = f"**{head}**: {body.strip()}"
+
+                else:
+                    value = (head or body).strip()
+
             result["points"].append(value)
 
         elif key == "수치" and value not in ("", "-"):
@@ -1019,6 +1041,7 @@ def summarize_report(entry, char_limit, status):
         .replace("__POINTS__", level["points"])
         .replace("__NUMS__", str(level["nums"]))
         .replace("__RISKS__", str(level["risks"]))
+        .replace("__STYLE__", STYLE_GUIDE)
         .replace("__DEPTH__", DEPTH_GUIDE[detail_name])
         .replace("__MATERIAL__", material)
     )
@@ -1111,7 +1134,7 @@ def broker_block(number, entry, summary):
         opinion, target = summary["opinion"], summary["target"]
 
         if opinion or target:
-            text = f"{entry['broker']} 의견 {opinion or '-'} / 목표주가 {target or '-'}"
+            text = f"{entry['broker']} 의견 {opinion or '미제시'} / 목표주가 {target or '미제시'}"
 
             if summary["basis"]:
                 text += f" ({summary['basis']})"
@@ -1127,10 +1150,7 @@ def broker_block(number, entry, summary):
             lines.append(f"  - {point}")
 
     if summary["numbers"]:
-        lines.append("- 주요 수치 (원문 기준)")
-
-        for item in summary["numbers"]:
-            lines.append(f"  - {item}")
+        lines.append("- 주요 수치(원문 기준): " + " · ".join(re.sub(r"\s*\(p\.\d+(?:~\d+)?\)", "", item) for item in summary["numbers"]))
 
     if summary["risk"]:
         lines.append(f"- 리스크: {summary['risk']}")
@@ -1140,7 +1160,7 @@ def broker_block(number, entry, summary):
     return lines
 
 
-def build_report(entries, summaries, headline, common, diff, failures):
+def build_report(entries, summaries, comparisons, failures):
     now = datetime.datetime.now(KST)
 
     lines = [
@@ -1148,8 +1168,11 @@ def build_report(entries, summaries, headline, common, diff, failures):
         "",
     ]
 
-    if headline:
-        lines += [f"📌 **한 줄 요약**: {headline}", ""]
+    targets = " · ".join(
+        f"{entry['broker']} – {entry['company']}" for entry in entries
+    )
+
+    lines += [f"📌 **이번 정리 대상**: {targets}", ""]
 
     lines += [
         f"※ 아래 {len(entries)}개 증권사 리포트를 요약했습니다. 각 내용은 해당 증권사의 견해입니다.",
@@ -1161,8 +1184,8 @@ def build_report(entries, summaries, headline, common, diff, failures):
     for number, (entry, summary) in enumerate(zip(entries, summaries), start=1):
         lines += broker_block(number, entry, summary)
 
-    if common or diff:
-        lines += ["### 🔎 증권사 간 비교", ""]
+    for company, common, diff in comparisons:
+        lines += [f"### 🔎 {company} 증권사 간 비교", ""]
 
         for item in common:
             lines.append(f"- 공통: {item}")
@@ -1233,22 +1256,31 @@ def run_digest(entries, char_limit, status):
     if not done_entries:
         raise RuntimeError("정리된 리포트가 없습니다. 아래 경고를 확인해 주세요: " + " / ".join(warnings))
 
-    headline, common, diff = "", [], []
+    # 같은 종목을 다룬 리포트가 2건 이상일 때만 비교합니다. 종목이 다르면 비교하지 않습니다.
+    groups = {}
 
-    if len(done_entries) >= 2:
+    for entry, summary in zip(done_entries, summaries):
+        key = re.sub(r"[\(（].*?[\)）]|\s", "", entry["company"]).lower()
+        groups.setdefault(key, []).append((entry, summary))
+
+    comparisons = []
+
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+
         try:
-            headline, common, diff = compare_summaries(done_entries, summaries, status)
+            _, common, diff = compare_summaries(
+                [entry for entry, _ in members], [summary for _, summary in members], status
+            )
+
+            if common or diff:
+                comparisons.append((members[0][0]["company"], common, diff))
 
         except Exception as error:
             warnings.append(f"증권사 비교 실패: {str(error)[:150]}")
 
-    if not headline:
-        headline = summaries[0]["core"] if len(done_entries) == 1 else ""
-
-        if any(word in headline for word in BANNED_WORDS):
-            headline = ""
-
-    report = build_report(done_entries, summaries, headline, common, diff, failures)
+    report = build_report(done_entries, summaries, comparisons, failures)
 
     for match in SOLICITATION_PATTERN.finditer(report):
         warnings.append(f"권유성 표현 의심: '{match.group(0)}' — 게시 전에 확인해 주세요.")
