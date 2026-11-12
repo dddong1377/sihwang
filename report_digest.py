@@ -46,6 +46,30 @@ MAX_CHAR_LIMIT = 60_000
 # 긴 리포트를 나눠 읽을 때 한 번에 AI에 보내는 글자 수
 CHUNK_CHARS = 6_000
 
+# 정리 상세도: 포인트 수 / 핵심 글자 수 / 수치 줄 수 / 리스크 줄 수 / 출력 토큰 / 메모 합계 글자 수
+DETAIL_LEVELS = {
+    "간결": {"points": "3~5", "core": 60, "nums": 4, "risks": 1, "tokens": 1_500, "memo_cap": 8_000, "max_points": 5},
+    "보통": {"points": "5~7", "core": 90, "nums": 6, "risks": 2, "tokens": 2_000, "memo_cap": 7_000, "max_points": 7},
+    "상세": {"points": "7~10", "core": 120, "nums": 8, "risks": 3, "tokens": 2_400, "memo_cap": 6_500, "max_points": 10},
+}
+DEFAULT_DETAIL = "상세"
+
+DEPTH_GUIDE = {
+    "간결": "포인트는 한 문장으로 짧게 쓴다.",
+    "보통": "포인트는 한두 문장으로, 원문에 있는 수치와 근거를 함께 쓴다.",
+    "상세": (
+        "포인트는 가능하면 이 흐름으로 쓴다: ① 실적·사업 현황 ② 전망과 추정의 근거 "
+        "③ 밸류에이션·목표주가 산출 근거 ④ 투자 포인트·촉매 (리포트 성격에 맞게 조정). "
+        "각 포인트는 두 문장 안팎으로 '무엇이, 왜, 얼마나'가 드러나게 쓰고, "
+        "원문에 있는 수치·근거·전제를 빠뜨리지 않는다. 한 줄로 뭉뚱그리지 않는다."
+    ),
+}
+
+
+def detail_params():
+    return DETAIL_LEVELS.get(st.session_state.get("rd_detail"), DETAIL_LEVELS[DEFAULT_DETAIL])
+
+
 MAP_MAX_TOKENS = 1_100
 REDUCE_MAX_TOKENS = 1_500
 COMPARE_MAX_TOKENS = 1_200
@@ -636,7 +660,7 @@ def estimate_run_tokens(entries, char_limit):
             if len(chunks) > 1:
                 total += 800
 
-        total += 700 + 900
+        total += 700 + detail_params()["tokens"]
 
     if len(entries) >= 2:
         total += 2_500
@@ -663,7 +687,7 @@ MAP_PROMPT = """# 역할
 __RULES__
 
 # 출력 형식
-- 한 줄에 메모 하나, 최대 10줄
+- 한 줄에 메모 하나, 최대 12줄 (수치·근거·전제를 빠뜨리지 않는다)
 - 줄 끝에 쪽 번호를 (p.N) 형식으로 붙인다
 - 다른 설명은 쓰지 않는다
 
@@ -685,11 +709,14 @@ __INFO__
 
 # 출력 형식 (아래 형식의 줄만 출력하고 다른 설명은 쓰지 않는다)
 의견: 투자의견 || 목표주가 || 기준일 또는 전제 (원문에 없으면 각각 -)
-핵심: 리포트의 핵심 한 문장 (60자 이내, 증권사 견해로 표현)
-포인트: 주요 내용 한 문장 (p.N)
-포인트: ... (3~5줄)
-수치: 항목=값 (p.N)  (원문에 있는 수치만, 0~4줄)
-리스크: 원문이 언급한 위험 요인 한 문장 (p.N) (없으면 -)
+핵심: 리포트의 핵심 (__CORE__자 이내, 증권사 견해로 표현)
+포인트: 주요 내용 (p.N)
+포인트: ... (__POINTS__줄)
+수치: 항목=값 (p.N)  (원문에 있는 수치만, 0~__NUMS__줄)
+리스크: 원문이 언급한 위험 요인 (p.N) (최대 __RISKS__줄, 없으면 -)
+
+# 작성 방침
+__DEPTH__
 
 # 자료
 __MATERIAL__
@@ -760,11 +787,13 @@ def parse_summary(text):
         elif key == "수치" and value not in ("", "-"):
             result["numbers"].append(value)
 
-        elif key == "리스크":
-            result["risk"] = "" if value in ("-", "없음") else value
+        elif key == "리스크" and value not in ("", "-", "없음"):
+            result["risk"] = f"{result['risk']} / {value}" if result["risk"] else value
 
-    result["points"] = result["points"][:5]
-    result["numbers"] = result["numbers"][:4]
+    level = detail_params()
+
+    result["points"] = result["points"][:level["max_points"]]
+    result["numbers"] = result["numbers"][:level["nums"]]
 
     return result
 
@@ -913,8 +942,35 @@ def reword_flagged(summary, shingles, label, status):
     return flagged_items(summary, shingles)
 
 
+def join_memos(memos, cap):
+    """메모를 합치되, 뒤쪽 구간이 통째로 잘리지 않도록 구간별로 같은 분량씩 남깁니다."""
+
+    if sum(len(memo) for memo in memos) + len(memos) <= cap:
+        return "\n".join(memos)
+
+    each = cap // max(1, len(memos))
+    kept = []
+
+    for memo in memos:
+        lines, size = [], 0
+
+        for line in memo.splitlines():
+            if size + len(line) + 1 > each:
+                break
+
+            lines.append(line)
+            size += len(line) + 1
+
+        kept.append("\n".join(lines))
+
+    return "\n".join(kept)
+
+
 def summarize_report(entry, char_limit, status):
     label = entry["broker"]
+    detail_name = st.session_state.get("rd_detail")
+    detail_name = detail_name if detail_name in DETAIL_LEVELS else DEFAULT_DETAIL
+    level = DETAIL_LEVELS[detail_name]
     chunks, used = build_chunks(entry["pages"], char_limit)
 
     if not chunks:
@@ -951,7 +1007,7 @@ def summarize_report(entry, char_limit, status):
                 groq_chat(prompt, MAP_MAX_TOKENS, 0.2, f"{label} 메모 {number}").strip()
             )
 
-        material, kind = "\n".join(memos)[:8_000], "사실 메모"
+        material, kind = join_memos(memos, level["memo_cap"]), "사실 메모"
 
     status.write(f"  · {label} 압축 정리 중")
 
@@ -959,10 +1015,15 @@ def summarize_report(entry, char_limit, status):
         with_rules(REDUCE_PROMPT)
         .replace("__KIND__", kind)
         .replace("__INFO__", info)
+        .replace("__CORE__", str(level["core"]))
+        .replace("__POINTS__", level["points"])
+        .replace("__NUMS__", str(level["nums"]))
+        .replace("__RISKS__", str(level["risks"]))
+        .replace("__DEPTH__", DEPTH_GUIDE[detail_name])
         .replace("__MATERIAL__", material)
     )
 
-    raw = groq_chat(prompt, REDUCE_MAX_TOKENS, 0.2, f"{label} 압축")
+    raw = groq_chat(prompt, level["tokens"], 0.2, f"{label} 압축")
     summary = parse_summary(raw)
 
     if not (summary["core"] or summary["points"]):
@@ -1369,6 +1430,183 @@ def copy_buttons(markdown):
 
 
 # ===============================================================
+# 10-2. PDF 만들기
+# ===============================================================
+
+FONT_CANDIDATES = (
+    ("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf", 0),
+    ("fonts/NanumGothic.ttf", "fonts/NanumGothicBold.ttf", 0),
+    ("/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf", "/usr/share/fonts/truetype/nanum/NanumBarunGothicBold.ttf", 0),
+    ("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", None, 0),
+)
+
+
+def register_korean_font():
+    """한글 글꼴을 등록하고 (보통체, 굵은체 이름)을 돌려줍니다. 없으면 PDF 내장 한글 글꼴로 대체합니다."""
+
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    for regular, bold, index in FONT_CANDIDATES:
+        if not os.path.exists(regular):
+            continue
+
+        try:
+            pdfmetrics.registerFont(TTFont("KR", regular, subfontIndex=index))
+
+            if bold and os.path.exists(bold):
+                pdfmetrics.registerFont(TTFont("KR-Bold", bold, subfontIndex=index))
+                bold_name = "KR-Bold"
+            else:
+                bold_name = "KR"
+
+            pdfmetrics.registerFontFamily("KR", normal="KR", bold=bold_name, italic="KR", boldItalic=bold_name)
+
+            return "KR", bold_name, True
+
+        except Exception:
+            continue
+
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+
+    pdfmetrics.registerFont(UnicodeCIDFont("HYGothic-Medium"))
+
+    return "HYGothic-Medium", "HYGothic-Medium", False
+
+
+EMOJI_PATTERN = re.compile("[\U00010000-\U0010ffff☀-➿️‍]")
+
+
+def pdf_inline(text):
+    text = EMOJI_PATTERN.sub("", str(text or ""))
+    text = html.escape(text, quote=False)
+
+    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text).strip()
+
+
+def build_pdf(report):
+    """마크다운 형태의 리포트를 PDF 바이트로 바꿉니다."""
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    font, bold, _ = register_korean_font()
+    width = A4[0] - 36 * mm
+
+    base = dict(fontName=font, fontSize=9.5, leading=14.5, textColor=colors.HexColor("#222222"))
+
+    styles = {
+        "title": ParagraphStyle("t", **{**base, "fontName": bold, "fontSize": 16, "leading": 22, "spaceAfter": 6}),
+        "h3": ParagraphStyle("h", **{**base, "fontName": bold, "fontSize": 12, "leading": 17, "spaceBefore": 12, "spaceAfter": 4}),
+        "body": ParagraphStyle("b", **{**base, "spaceAfter": 3}),
+        "broker": ParagraphStyle("br", **{**base, "fontName": bold, "fontSize": 10.5, "leading": 15, "spaceBefore": 10, "spaceAfter": 3}),
+        "note": ParagraphStyle("n", **{**base, "fontSize": 8, "leading": 12, "textColor": colors.HexColor("#666666"), "spaceAfter": 2}),
+        "cell": ParagraphStyle("c", **{**base, "fontSize": 8, "leading": 11, "wordWrap": "CJK"}),
+        "head": ParagraphStyle("hc", **{**base, "fontName": bold, "fontSize": 8, "leading": 11, "wordWrap": "CJK"}),
+    }
+
+    story, table_rows = [], []
+
+    def flush_table():
+        if not table_rows:
+            return
+
+        rows = [row for row in table_rows if not re.match(r"^\|?\s*:?-{2,}", row)]
+        data = [[cell.strip() for cell in row.strip().strip("|").split("|")] for row in rows]
+        columns = max(len(row) for row in data)
+        data = [row + [""] * (columns - len(row)) for row in data]
+
+        weights = [
+            min(34, max(10, max(len(row[i]) for row in data))) for i in range(columns)
+        ]
+        scale = width / sum(weights)
+
+        cells = [
+            [Paragraph(pdf_inline(cell), styles["head" if r == 0 else "cell"]) for cell in row]
+            for r, row in enumerate(data)
+        ]
+
+        table = Table(cells, colWidths=[w * scale for w in weights], repeatRows=1)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEEEEE")),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#BBBBBB")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+
+        story.append(table)
+        story.append(Spacer(1, 6))
+        table_rows.clear()
+
+    for raw in report.splitlines():
+        line = raw.rstrip()
+
+        if line.lstrip().startswith("|"):
+            table_rows.append(line)
+            continue
+
+        flush_table()
+
+        if not line.strip():
+            continue
+
+        if line.startswith("# "):
+            story.append(Paragraph(pdf_inline(line[2:]), styles["title"]))
+            story.append(HRFlowable(width="100%", thickness=0.8, color=colors.HexColor("#999999"), spaceAfter=6))
+
+        elif line.startswith("### "):
+            story.append(Paragraph(pdf_inline(line[4:]), styles["h3"]))
+
+        elif re.match(r"^\*\*\d+\.", line):
+            story.append(Paragraph(pdf_inline(line), styles["broker"]))
+
+        elif re.match(r"^\s{2,}-\s", line):
+            story.append(Paragraph(
+                pdf_inline(line.strip()[2:]),
+                ParagraphStyle("b2", parent=styles["body"], leftIndent=26, bulletIndent=15),
+                bulletText="–",
+            ))
+
+        elif re.match(r"^-\s", line):
+            story.append(Paragraph(
+                pdf_inline(line[2:]),
+                ParagraphStyle("b1", parent=styles["body"], leftIndent=14, bulletIndent=3),
+                bulletText="•",
+            ))
+
+        elif line.startswith("※"):
+            story.append(Paragraph(pdf_inline(line), styles["note"]))
+
+        else:
+            story.append(Paragraph(pdf_inline(line), styles["body"]))
+
+    flush_table()
+
+    buffer = io.BytesIO()
+
+    document = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        leftMargin=18 * mm, rightMargin=18 * mm, topMargin=16 * mm, bottomMargin=16 * mm,
+        title="증권사 리포트 압축 정리",
+    )
+
+    def footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFont(font, 8)
+        canvas.setFillColor(colors.HexColor("#888888"))
+        canvas.drawCentredString(A4[0] / 2, 9 * mm, str(doc.page))
+        canvas.restoreState()
+
+    document.build(story, onFirstPage=footer, onLaterPages=footer)
+
+    return buffer.getvalue()
+
+
+# ===============================================================
 # 11. 화면
 # ===============================================================
 
@@ -1524,6 +1762,15 @@ def main():
             key="rd_limit",
         )
 
+        st.radio(
+            "정리 상세도",
+            list(DETAIL_LEVELS),
+            index=list(DETAIL_LEVELS).index(DEFAULT_DETAIL),
+            horizontal=True,
+            key="rd_detail",
+            help="상세할수록 포인트가 많고 근거·수치가 더 담기지만 토큰을 더 씁니다.",
+        )
+
         missing = [entry["file"] for entry in entries if not entry["broker"]]
         missing_company = [entry["file"] for entry in entries if not entry["company"]]
 
@@ -1600,6 +1847,26 @@ def main():
             key="rd_download",
             help="수정한 내용 그대로 내 컴퓨터에 저장합니다. 새로고침하면 화면의 결과는 사라지니 필요하면 먼저 저장하세요.",
         )
+
+        try:
+            pdf_bytes = build_pdf(report)
+
+            st.download_button(
+                "📄 이 리포트 PDF로 저장",
+                data=pdf_bytes,
+                file_name=f"report_digest_{stamp}.pdf",
+                mime="application/pdf",
+                key="rd_download_pdf",
+            )
+
+            if not register_korean_font()[2]:
+                st.caption("한글 글꼴(나눔고딕)을 찾지 못해 기본 글꼴로 만들었습니다. packages.txt에 fonts-nanum을 추가하세요.")
+
+        except ImportError:
+            st.caption("PDF를 만들려면 requirements.txt에 reportlab을 추가하세요.")
+
+        except Exception as error:
+            st.caption(f"PDF 생성 실패: {str(error)[:150]}")
 
         confirmed = st.checkbox(
             "게시 전 확인: 각 증권사 리포트의 이용약관·재배포 허용 범위와 "
