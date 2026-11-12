@@ -1886,13 +1886,6 @@ def register_korean_font():
 EMOJI_PATTERN = re.compile("[\U00010000-\U0010ffff☀-➿️‍]")
 
 
-def pdf_inline(text):
-    text = EMOJI_PATTERN.sub("", str(text or ""))
-    text = html.escape(text, quote=False)
-
-    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text).strip()
-
-
 def publish_text(report):
     """복사·PDF용 글: 쪽 표기 (p.N)를 지우고, 출처 표의 '참고 쪽' 열을 뺍니다."""
 
@@ -1920,8 +1913,39 @@ def publish_text(report):
     return "\n".join(lines)
 
 
-def build_pdf(report):
-    """마크다운 형태의 리포트를 PDF 바이트로 바꿉니다."""
+def pdf_inline(text, names=()):
+    text = EMOJI_PATTERN.sub("", str(text or ""))
+    text = html.escape(text, quote=False)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+
+    if names:
+        pattern = "|".join(re.escape(html.escape(name, quote=False)) for name in sorted(names, key=len, reverse=True))
+        parts = re.split(r"(<b>.*?</b>)", text)
+
+        for index in range(0, len(parts), 2):
+            parts[index] = re.sub(f"({pattern})", r"<b>\1</b>", parts[index])
+
+        text = "".join(parts)
+
+    return text.strip()
+
+
+def bold_label(text):
+    """'핵심: …'처럼 줄 앞의 제목 부분을 굵게 바꿉니다."""
+
+    if text.startswith("**"):
+        return text
+
+    found = re.match(r"^([^:：\*]{1,24})([:：])\s*(.*)$", text)
+
+    if found:
+        return f"**{found.group(1)}**{found.group(2)} {found.group(3)}"
+
+    return f"**{text}**" if len(text) <= 14 else text
+
+
+def build_pdf(report, scale=1.0):
+    """마크다운 형태의 리포트를 PDF로 만듭니다. (PDF 바이트, 쪽 수)를 돌려줍니다."""
 
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
@@ -1930,21 +1954,31 @@ def build_pdf(report):
     from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     font, bold, _ = register_korean_font()
-    width = A4[0] - 36 * mm
 
-    base = dict(fontName=font, fontSize=9.5, leading=14.5, textColor=colors.HexColor("#222222"))
+    side, vertical = max(10, 16 * scale) * mm, max(9, 14 * scale) * mm
+    width = A4[0] - 2 * side
+
+    names = sorted(set(re.findall(r"^\*\*\d+\.\s*([^|*]+?)\s*\|", report, flags=re.M)))
+
+    def size(value):
+        return value * scale
+
+    base = dict(fontName=font, fontSize=size(9.5), leading=size(14), textColor=colors.HexColor("#222222"))
 
     styles = {
-        "title": ParagraphStyle("t", **{**base, "fontName": bold, "fontSize": 16, "leading": 22, "spaceAfter": 6}),
-        "h3": ParagraphStyle("h", **{**base, "fontName": bold, "fontSize": 12, "leading": 17, "spaceBefore": 12, "spaceAfter": 4}),
-        "body": ParagraphStyle("b", **{**base, "spaceAfter": 3}),
-        "broker": ParagraphStyle("br", **{**base, "fontName": bold, "fontSize": 10.5, "leading": 15, "spaceBefore": 10, "spaceAfter": 3}),
-        "note": ParagraphStyle("n", **{**base, "fontSize": 8, "leading": 12, "textColor": colors.HexColor("#666666"), "spaceAfter": 2}),
-        "cell": ParagraphStyle("c", **{**base, "fontSize": 8, "leading": 11, "wordWrap": "CJK"}),
-        "head": ParagraphStyle("hc", **{**base, "fontName": bold, "fontSize": 8, "leading": 11, "wordWrap": "CJK"}),
+        "title": ParagraphStyle("t", **{**base, "fontName": bold, "fontSize": size(15), "leading": size(20), "spaceAfter": size(4)}),
+        "h3": ParagraphStyle("h", **{**base, "fontName": bold, "fontSize": size(11.5), "leading": size(16), "spaceBefore": size(8), "spaceAfter": size(3)}),
+        "body": ParagraphStyle("b", **{**base, "spaceAfter": size(2)}),
+        "broker": ParagraphStyle("br", **{**base, "fontSize": size(10.5), "leading": size(15), "spaceBefore": size(2), "spaceAfter": size(2)}),
+        "note": ParagraphStyle("n", **{**base, "fontSize": size(8), "leading": size(11), "textColor": colors.HexColor("#666666"), "spaceAfter": size(1.5)}),
+        "cell": ParagraphStyle("c", **{**base, "fontSize": size(8), "leading": size(10.5), "wordWrap": "CJK"}),
+        "head": ParagraphStyle("hc", **{**base, "fontName": bold, "fontSize": size(8), "leading": size(10.5), "wordWrap": "CJK"}),
     }
 
     story, table_rows = [], []
+
+    def inline(text):
+        return pdf_inline(text, names)
 
     def flush_table():
         if not table_rows:
@@ -1955,28 +1989,28 @@ def build_pdf(report):
         columns = max(len(row) for row in data)
         data = [row + [""] * (columns - len(row)) for row in data]
 
-        weights = [
-            min(34, max(10, max(len(row[i]) for row in data))) for i in range(columns)
-        ]
-        scale = width / sum(weights)
+        weights = [min(34, max(10, max(len(row[i]) for row in data))) for i in range(columns)]
+        factor = width / sum(weights)
 
         cells = [
-            [Paragraph(pdf_inline(cell), styles["head" if r == 0 else "cell"]) for cell in row]
+            [Paragraph(inline(cell), styles["head" if r == 0 else "cell"]) for cell in row]
             for r, row in enumerate(data)
         ]
 
-        table = Table(cells, colWidths=[w * scale for w in weights], repeatRows=1)
+        table = Table(cells, colWidths=[w * factor for w in weights], repeatRows=1)
         table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEEEEE")),
             ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#BBBBBB")),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), size(2.5)),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), size(2.5)),
         ]))
 
         story.append(table)
-        story.append(Spacer(1, 6))
+        story.append(Spacer(1, size(4)))
         table_rows.clear()
+
+    first_broker = True
 
     for raw in report.splitlines():
         line = raw.rstrip()
@@ -1991,34 +2025,45 @@ def build_pdf(report):
             continue
 
         if line.startswith("# "):
-            story.append(Paragraph(pdf_inline(line[2:]), styles["title"]))
-            story.append(HRFlowable(width="100%", thickness=0.8, color=colors.HexColor("#999999"), spaceAfter=6))
+            story.append(Paragraph(inline(line[2:]), styles["title"]))
+            story.append(HRFlowable(width="100%", thickness=0.8, color=colors.HexColor("#999999"), spaceAfter=size(4)))
 
         elif line.startswith("### "):
-            story.append(Paragraph(pdf_inline(line[4:]), styles["h3"]))
+            story.append(Paragraph(inline(line[4:]), styles["h3"]))
 
         elif re.match(r"^\*\*\d+\.", line):
-            story.append(Paragraph(pdf_inline(line), styles["broker"]))
+            found = re.match(r"^\*\*(\d+)\.\s*([^|*]+?)\s*\|\s*(.+?)\*\*(.*)$", line)
+
+            if found:
+                text = f"**{found.group(1)}. {found.group(2)}** | {found.group(3)}{found.group(4)}"
+            else:
+                text = line
+
+            if not first_broker:
+                story.append(HRFlowable(width="100%", thickness=0.4, color=colors.HexColor("#CCCCCC"), spaceBefore=size(3), spaceAfter=size(1)))
+
+            first_broker = False
+            story.append(Paragraph(inline(text), styles["broker"]))
 
         elif re.match(r"^\s{2,}-\s", line):
             story.append(Paragraph(
-                pdf_inline(line.strip()[2:]),
-                ParagraphStyle("b2", parent=styles["body"], leftIndent=26, bulletIndent=15),
+                inline(line.strip()[2:]),
+                ParagraphStyle("b2", parent=styles["body"], leftIndent=size(26), bulletIndent=size(15)),
                 bulletText="–",
             ))
 
         elif re.match(r"^-\s", line):
             story.append(Paragraph(
-                pdf_inline(line[2:]),
-                ParagraphStyle("b1", parent=styles["body"], leftIndent=14, bulletIndent=3),
+                inline(bold_label(line[2:].strip())),
+                ParagraphStyle("b1", parent=styles["body"], leftIndent=size(14), bulletIndent=size(3)),
                 bulletText="•",
             ))
 
         elif line.startswith("※"):
-            story.append(Paragraph(pdf_inline(line), styles["note"]))
+            story.append(Paragraph(inline(line), styles["note"]))
 
         else:
-            story.append(Paragraph(pdf_inline(line), styles["body"]))
+            story.append(Paragraph(inline(line), styles["body"]))
 
     flush_table()
 
@@ -2026,7 +2071,7 @@ def build_pdf(report):
 
     document = SimpleDocTemplate(
         buffer, pagesize=A4,
-        leftMargin=18 * mm, rightMargin=18 * mm, topMargin=16 * mm, bottomMargin=16 * mm,
+        leftMargin=side, rightMargin=side, topMargin=vertical, bottomMargin=vertical,
         title="증권사 리포트 압축 정리",
     )
 
@@ -2034,12 +2079,29 @@ def build_pdf(report):
         canvas.saveState()
         canvas.setFont(font, 8)
         canvas.setFillColor(colors.HexColor("#888888"))
-        canvas.drawCentredString(A4[0] / 2, 9 * mm, str(doc.page))
+        canvas.drawCentredString(A4[0] / 2, 6 * mm, str(doc.page))
         canvas.restoreState()
 
-    document.build(story, onFirstPage=footer, onLaterPages=footer)
+    document.build(story, onLaterPages=footer)
 
-    return buffer.getvalue()
+    return buffer.getvalue(), document.page
+
+
+PDF_SCALES = (1.0, 0.92, 0.85, 0.79, 0.73, 0.68)
+
+
+def fit_pdf(report):
+    """한 장에 들어갈 때까지 글자 크기를 줄여 가며 만듭니다. 가장 작은 크기로도 넘치면 여러 쪽이 됩니다."""
+
+    data, pages = b"", 0
+
+    for scale in PDF_SCALES:
+        data, pages = build_pdf(report, scale)
+
+        if pages <= 1:
+            break
+
+    return data, pages
 
 
 # ===============================================================
@@ -2327,7 +2389,7 @@ def main():
         )
 
         try:
-            pdf_bytes = build_pdf(publish_text(report))
+            pdf_bytes, pdf_pages = fit_pdf(publish_text(report))
 
             st.download_button(
                 "📄 이 리포트 PDF로 저장",
@@ -2336,6 +2398,12 @@ def main():
                 mime="application/pdf",
                 key="rd_download_pdf",
             )
+
+            if pdf_pages > 1:
+                st.caption(
+                    f"내용이 많아 한 장에 담지 못해 {pdf_pages}쪽으로 만들어졌습니다. "
+                    "증권사 수를 줄이거나 정리 상세도를 '간결'·'보통'으로 낮추면 한 장에 가깝게 담깁니다."
+                )
 
             if not register_korean_font()[2]:
                 st.caption("한글 글꼴(나눔고딕)을 찾지 못해 기본 글꼴로 만들었습니다. packages.txt에 fonts-nanum을 추가하세요.")
