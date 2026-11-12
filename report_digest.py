@@ -563,6 +563,23 @@ def guess_date(first_text):
     return f"{year:04d}-{month:02d}-{day:02d}"
 
 
+def guess_company(first_text):
+    """첫 쪽에서 '종목명(6자리 코드)' 꼴을 찾아 종목을 추정합니다. 못 찾으면 빈 값입니다."""
+
+    head = first_text[:2500]
+
+    found = re.search(r"([가-힣A-Za-z&][가-힣A-Za-z0-9&\.\- ]{1,20}?)\s*[\(（]\s*(\d{6})\s*(?:[,.]?\s*(?:KS|KQ|KOSPI|KOSDAQ))?\s*[\)）]", head)
+
+    if found:
+        name = found.group(1).strip()
+        name = re.sub(r"^(?:\d+\s*)?(?:기업분석|Company|Analysis|BUY|Buy|HOLD|Hold)\s*", "", name).strip()
+
+        if name:
+            return f"{name}({found.group(2)})"
+
+    return ""
+
+
 def guess_title(filename):
     stem = re.sub(r"\.pdf$", "", filename, flags=re.I)
 
@@ -683,7 +700,7 @@ COMPARE_PROMPT = """# 역할
 같은 시점에 나온 여러 증권사 리포트의 요약을 비교하는 에디터다.
 
 __RULES__
-7. 어느 증권사의 견해인지 증권사 이름을 반드시 붙인다.
+7. 어느 증권사의 견해인지 증권사 이름을 반드시 붙인다. 종목이 서로 다르면 종목명을 함께 적고, 다른 종목끼리의 의견을 같은 종목의 의견처럼 섞지 않는다.
 8. 자료에 없는 내용은 쓰지 않는다. 비교할 근거가 없으면 해당 줄은 -로 쓴다.
 
 # 출력 형식 (아래 형식의 줄만 출력)
@@ -800,6 +817,11 @@ def verify_summary(entry, summary, source):
     label = entry["broker"]
     notes = []
 
+    name = re.sub(r"[\(（].*?[\)）]|\s", "", entry.get("company", ""))
+
+    if name and name not in re.sub(r"\s", "", source):
+        notes.append(f"{label}: 입력한 종목 '{entry['company']}'이 읽은 본문에 나오지 않습니다. 종목이 맞는지 확인해 주세요.")
+
     if summary["target"] and unknown_numbers(summary["target"], plain):
         notes.append(f"{label}: 목표주가 '{summary['target']}'를 원문에서 확인하지 못해 뺐습니다.")
         summary["target"] = ""
@@ -902,7 +924,11 @@ def summarize_report(entry, char_limit, status):
     entry["range"] = f"p.{first_page}" if first_page == last_page else f"p.{first_page}~{last_page}"
     entry["used_chars"] = used
 
-    info = f"증권사: {label} / 제목: {entry['title'] or '-'}"
+    info = (
+        f"증권사: {label} / 대상 종목: {entry['company']} / 제목: {entry['title'] or '-'}\n"
+        "이 리포트의 대상은 위 '대상 종목'이다. 다른 종목·업종 비교 내용은 대상 종목과 구분해 쓰고, "
+        "핵심·포인트는 모두 대상 종목 기준으로 쓴다."
+    )
 
     if len(chunks) == 1:
         material, kind = chunk_text(chunks[0]), "원문"
@@ -960,7 +986,7 @@ def compare_summaries(entries, summaries, status):
     blocks = []
 
     for entry, summary in zip(entries, summaries):
-        parts = [f"[{entry['broker']}]"]
+        parts = [f"[{entry['broker']}] 대상 종목: {entry['company']}"]
 
         if INCLUDE_RATING and (summary["opinion"] or summary["target"]):
             parts.append(
@@ -1015,7 +1041,7 @@ def broker_block(number, entry, summary):
     title = entry["title"] or "제목 미입력"
     date = f" ({entry['date']})" if entry["date"] else ""
 
-    lines = [f"**{number}. {entry['broker']} | {title}**{date}"]
+    lines = [f"**{number}. {entry['broker']} | {entry['company']} | {title}**{date}"]
 
     if summary["core"]:
         lines.append(f"- 핵심: {summary['core']}")
@@ -1088,13 +1114,14 @@ def build_report(entries, summaries, headline, common, diff, failures):
     lines += [
         "### 📚 출처",
         "",
-        "| 증권사 | 리포트 제목 | 작성자 | 발간일 | 참고 쪽 | 원문 링크 |",
-        "|---|---|---|---|---|---|",
+        "| 증권사 | 종목 | 리포트 제목 | 작성자 | 발간일 | 참고 쪽 | 원문 링크 |",
+        "|---|---|---|---|---|---|---|",
     ]
 
     for entry in entries:
         lines.append(
-            f"| {clean_cell(entry['broker'])} | {clean_cell(entry['title'])} "
+            f"| {clean_cell(entry['broker'])} | {clean_cell(entry['company'])} "
+            f"| {clean_cell(entry['title'])} "
             f"| {clean_cell(entry['author'])} | {clean_cell(entry['date'])} "
             f"| {clean_cell(entry.get('range'))} | {clean_cell(entry['link'])} |"
         )
@@ -1368,6 +1395,7 @@ def collect_entries(files):
 
         defaults = {
             f"rd_broker_{uid}": guess_broker(first, uploaded.name),
+            f"rd_company_{uid}": guess_company(first),
             f"rd_title_{uid}": guess_title(uploaded.name),
             f"rd_date_{uid}": guess_date(first),
             f"rd_author_{uid}": "",
@@ -1391,16 +1419,23 @@ def collect_entries(files):
             col2.text_input("발간일", key=f"rd_date_{uid}", placeholder="2026-11-10")
             col3.text_input("애널리스트 (선택)", key=f"rd_author_{uid}")
 
-            col4, col5 = st.columns([1.4, 2])
+            col4, col5, col6 = st.columns([1.2, 1.6, 1.4])
 
-            col4.text_input("리포트 제목", key=f"rd_title_{uid}")
-            col5.text_input("원문 링크 (선택)", key=f"rd_link_{uid}")
+            col4.text_input(
+                "종목 (필수)",
+                key=f"rd_company_{uid}",
+                placeholder="삼성전자(005930)",
+                help="이 리포트가 다루는 종목입니다. 산업·시황 리포트는 '반도체 산업'처럼 적어 주세요.",
+            )
+            col5.text_input("리포트 제목", key=f"rd_title_{uid}")
+            col6.text_input("원문 링크 (선택)", key=f"rd_link_{uid}")
 
         entries.append({
             "file": uploaded.name,
             "pages": cleaned,
             "total_pages": len(pages),
             "broker": state[f"rd_broker_{uid}"].strip(),
+            "company": state[f"rd_company_{uid}"].strip(),
             "title": state[f"rd_title_{uid}"].strip(),
             "date": state[f"rd_date_{uid}"].strip(),
             "author": state[f"rd_author_{uid}"].strip(),
@@ -1490,6 +1525,7 @@ def main():
         )
 
         missing = [entry["file"] for entry in entries if not entry["broker"]]
+        missing_company = [entry["file"] for entry in entries if not entry["company"]]
 
         if entries:
             estimate = estimate_run_tokens(entries, char_limit)
@@ -1512,11 +1548,14 @@ def main():
         if missing:
             st.error("증권사 이름이 비어 있는 리포트가 있습니다: " + ", ".join(missing))
 
+        if missing_company:
+            st.error("종목이 비어 있는 리포트가 있습니다: " + ", ".join(missing_company))
+
         clicked = st.button(
             "✨ 압축 리포트 생성",
             type="primary",
             use_container_width=True,
-            disabled=(not entries or bool(missing)),
+            disabled=(not entries or bool(missing) or bool(missing_company)),
         )
 
         if clicked:
