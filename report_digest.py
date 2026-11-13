@@ -478,6 +478,63 @@ SHORT_BROKER_NAMES = {
 }
 
 
+NUMBER_TOKEN = r"[-\(]?\d[\d,\.]*\)?%?"
+DUAL_ROW = re.compile(rf"(?:{NUMBER_TOKEN}\s+){{3,}}[^\d\s][^\d]{{0,28}}?\s+(?:{NUMBER_TOKEN}\s*){{3,}}")
+UNIT_PATTERN = re.compile(r"단위\s*[:：]?\s*\(?\s*(십억원|백만원|억원|조원|천원|만원)|\(\s*(십억원|백만원|억원|조원)\s*\)")
+
+
+def split_dual_tables(data, pages):
+    """재무제표처럼 표 두 개가 한 줄에 나란히 놓인 쪽은, 왼쪽·오른쪽을 따로 읽어 줄이 섞이지 않게 합니다."""
+
+    targets = []
+
+    for number, text in pages:
+        lines = [line for line in text.splitlines() if line.strip()]
+        dual = sum(1 for line in lines if DUAL_ROW.search(line))
+
+        if dual >= 8 and dual >= 0.5 * len(lines):
+            targets.append(number)
+
+    if not targets:
+        return pages
+
+    try:
+        import pdfplumber
+
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            replaced = dict(pages)
+
+            for number in targets:
+                page = pdf.pages[number - 1]
+                half = page.width / 2
+                left = page.crop((0, 0, half, page.height)).extract_text() or ""
+                right = page.crop((half, 0, page.width, page.height)).extract_text() or ""
+
+                if len(left) + len(right) >= 0.6 * len(replaced[number]):
+                    replaced[number] = f"[좌측 표]\n{left}\n[우측 표]\n{right}"
+
+            return [(number, replaced[number]) for number, _ in pages]
+
+    except Exception:
+        return pages
+
+
+def mark_units(pages):
+    """쪽에 표 단위가 하나만 적혀 있으면 맨 위에 '[이 쪽 표의 숫자 단위: 십억원]'을 붙입니다."""
+
+    marked = []
+
+    for number, text in pages:
+        units = {a or b for a, b in UNIT_PATTERN.findall(text)}
+
+        if len(units) == 1:
+            text = f"[이 쪽 표의 숫자 단위: {next(iter(units))}]\n{text}"
+
+        marked.append((number, text))
+
+    return marked
+
+
 @st.cache_data(show_spinner=False)
 def read_pdf_pages(data):
     """PDF에서 [(쪽번호, 텍스트)]를 읽습니다."""
@@ -515,7 +572,7 @@ def read_pdf_pages(data):
         except Exception:
             pass
 
-    return pages
+    return mark_units(split_dual_tables(data, pages))
 
 
 def clean_pages(pages):
@@ -533,6 +590,7 @@ def clean_pages(pages):
         repeated = {
             line for line, count in counts.items()
             if count >= max(3, int(len(pages) * 0.5)) and len(line) <= 80
+            and not line.startswith("[")
         }
 
     cleaned = []
@@ -757,7 +815,7 @@ COMMON_RULES = """# 반드시 지킬 규칙
 4. 투자 권유로 읽히는 표현(사라, 팔아라, 지금이 기회 등)과 명령형·단정형 표현을 쓰지 않는다.
 5. 의견·전망은 반드시 '증권사가 ~라고 봤다/제시했다'처럼 증권사의 견해로 표현한다.
 6. 증권사 고지·면책·공시 문구는 무시한다.
-7. 금액은 원문 표기 단위 그대로 쓴다. 억원↔조원 등으로 환산·반올림하지 않는다. 표의 단위(십억원, 백만원 등)를 확인해 그대로 옮긴다.
+7. 금액은 원문 표기 단위 그대로 쓴다. 억원↔조원 등으로 환산·반올림하지 않는다. '[이 쪽 표의 숫자 단위: 십억원]' 표시가 있으면 그 쪽 표의 숫자 뒤에는 '십억원'을 그대로 붙인다(억원으로 바꾸지 않는다).
 8. 확정 실적과 추정·전망 수치를 구분한다. 추정치는 '전망·추정·예상'을 밝히고, 연도 옆에 E·F 표기가 있으면 추정으로 본다.
 9. 투자의견·목표주가는 이 종목에 대한 것만 쓴다. 업종 투자의견과 섞지 않는다. 목표주가는 하나만 쓰고, 이전 목표주가를 언급할 때는 '이전'이라고 밝힌다.
 10. 원문에 가정·조건이 붙은 전망은 조건을 함께 쓴다. 원문이 밝힌 주요 위험은 빠뜨리지 않는다.
@@ -1087,6 +1145,52 @@ def find_evidence(entry, claim, limit=3):
             break
 
     return [windows[i] for i in sorted(picked)]
+
+
+def fix_units(entry, summary):
+    """표 숫자의 단위가 '억원' 등으로 잘못 적혔으면, 그 숫자가 있는 쪽의 표 단위로 바로잡습니다."""
+
+    label = entry["broker"]
+    page_units = []
+
+    for _, text in entry["pages"]:
+        found = re.match(r"\[이 쪽 표의 숫자 단위: (\S+)\]", text)
+
+        if found:
+            page_units.append((re.sub(r"\s", "", strip_commas(text)), found.group(1)))
+
+    if not page_units:
+        return []
+
+    everything = "".join(text for text, _ in page_units)
+    notes = []
+
+    def repair(text):
+        def swap(match):
+            number, unit = match.group(1), match.group(2) + "원"
+            plain = number.replace(",", "")
+
+            if len(plain) < 3 or f"{plain}{match.group(2)}" in everything:
+                return match.group(0)
+
+            units = {u for body, u in page_units if plain in body}
+
+            if len(units) == 1 and next(iter(units)) != unit:
+                fixed = f"{number}{next(iter(units))}"
+                notes.append(f"[자동 수정] {label}: 단위 보정 {match.group(0).strip()} → {fixed} (원문 표 단위 기준)")
+
+                return fixed
+
+            return match.group(0)
+
+        return re.sub(r"(\d[\d,]*(?:\.\d+)?)\s*(조|억|만)\s*원?", swap, text or "")
+
+    summary["core"] = repair(summary["core"])
+    summary["risk"] = repair(summary["risk"])
+    summary["points"] = [repair(item) for item in summary["points"]]
+    summary["numbers"] = [repair(item) for item in summary["numbers"]]
+
+    return notes
 
 
 def code_checks(entry, summary, source):
@@ -1433,6 +1537,7 @@ def summarize_report(entry, char_limit, status):
 
     entry["verbatim_left"] = reword_flagged(summary, shingles, label, status)
     entry["notes"] = verify_summary(entry, summary, source)
+    entry["notes"] += fix_units(entry, summary)
     entry["notes"] += code_checks(entry, summary, source)
 
     if st.session_state.get("rd_check", True):
