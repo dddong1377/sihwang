@@ -5,3 +5,4 @@ websocket-client
 google-genai
 pypdf
 reportlab
+pdfplumber
