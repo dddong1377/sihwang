@@ -2033,7 +2033,7 @@ def publish_text(report):
 
 
 def pdf_inline(text, names=()):
-    text = EMOJI_PATTERN.sub("", str(text or ""))
+    text = EMOJI_PATTERN.sub("", str(text or "")).replace("\u2011", "-").replace("\u2010", "-")
     text = html.escape(text, quote=False)
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
 
@@ -2063,8 +2063,9 @@ def bold_label(text):
     return f"**{text}**" if len(text) <= 14 else text
 
 
-def build_pdf(report, scale=1.0):
-    """마크다운 형태의 리포트를 PDF로 만듭니다. (PDF 바이트, 쪽 수)를 돌려줍니다."""
+def build_pdf(report, scale=1.0, tall=False):
+    """마크다운 형태의 리포트를 PDF로 만듭니다. (PDF 바이트, 쪽 수)를 돌려줍니다.
+    tall=True이면 내용 길이에 맞춘 긴 한 쪽으로 만듭니다(이미지 저장용)."""
 
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
@@ -2075,6 +2076,9 @@ def build_pdf(report, scale=1.0):
     font, bold, _ = register_korean_font()
 
     side, vertical = max(10, 16 * scale) * mm, max(9, 14 * scale) * mm
+
+    if tall:
+        side, vertical = 12 * mm, 12 * mm
     width = A4[0] - 2 * side
 
     names = sorted(set(re.findall(r"^\*\*\d+\.\s*([^|*]+?)\s*\|", report, flags=re.M)))
@@ -2086,9 +2090,10 @@ def build_pdf(report, scale=1.0):
 
     styles = {
         "title": ParagraphStyle("t", **{**base, "fontName": bold, "fontSize": size(15), "leading": size(20), "spaceAfter": size(4)}),
-        "h3": ParagraphStyle("h", **{**base, "fontName": bold, "fontSize": size(11.5), "leading": size(16), "spaceBefore": size(8), "spaceAfter": size(3)}),
+        "h3": ParagraphStyle("h", **{**base, "fontName": bold, "fontSize": size(12.5), "leading": size(17), "spaceBefore": size(8), "spaceAfter": size(3)}),
         "body": ParagraphStyle("b", **{**base, "spaceAfter": size(2)}),
-        "broker": ParagraphStyle("br", **{**base, "fontSize": size(10.5), "leading": size(15), "spaceBefore": size(2), "spaceAfter": size(2)}),
+        "broker": ParagraphStyle("br", **{**base, "fontSize": size(13), "leading": size(18), "spaceBefore": size(2), "spaceAfter": size(3)}),
+        "key": ParagraphStyle("key", **{**base, "fontSize": size(11.5), "leading": size(17), "spaceAfter": size(3)}),
         "note": ParagraphStyle("n", **{**base, "fontSize": size(8), "leading": size(11), "textColor": colors.HexColor("#666666"), "spaceAfter": size(1.5)}),
         "cell": ParagraphStyle("c", **{**base, "fontSize": size(8), "leading": size(10.5), "wordWrap": "CJK"}),
         "head": ParagraphStyle("hc", **{**base, "fontName": bold, "fontSize": size(8), "leading": size(10.5), "wordWrap": "CJK"}),
@@ -2172,9 +2177,11 @@ def build_pdf(report, scale=1.0):
             ))
 
         elif re.match(r"^-\s", line):
+            key_line = re.match(r"^-\s*(?:핵심|투자의견·목표주가)\s*:", line) is not None
+
             story.append(Paragraph(
                 inline(bold_label(line[2:].strip())),
-                ParagraphStyle("b1", parent=styles["body"], leftIndent=size(14), bulletIndent=size(3)),
+                ParagraphStyle("b1", parent=styles["key" if key_line else "body"], leftIndent=size(14), bulletIndent=size(3)),
                 bulletText="•",
             ))
 
@@ -2188,8 +2195,18 @@ def build_pdf(report, scale=1.0):
 
     buffer = io.BytesIO()
 
+    page_size = A4
+
+    if tall:
+        content = 0
+
+        for flowable in story:
+            content += flowable.wrap(width, 100_000)[1] + flowable.getSpaceBefore() + flowable.getSpaceAfter()
+
+        page_size = (A4[0], content + 2 * vertical + 40)
+
     document = SimpleDocTemplate(
-        buffer, pagesize=A4,
+        buffer, pagesize=page_size,
         leftMargin=side, rightMargin=side, topMargin=vertical, bottomMargin=vertical,
         title="증권사 리포트 압축 정리",
     )
@@ -2207,6 +2224,32 @@ def build_pdf(report, scale=1.0):
 
 
 PDF_SCALES = (1.0, 0.92, 0.85, 0.79, 0.73, 0.68)
+
+IMAGE_SIZES = {"보통": 1.0, "크게": 1.3, "아주 크게": 1.6}
+
+
+def build_image(report, size_name):
+    """리포트를 긴 한 장의 PNG 이미지로 만듭니다(캡처용). 글자 크기는 IMAGE_SIZES로 고릅니다."""
+
+    import pypdfium2 as pdfium
+    from PIL import Image, ImageChops
+
+    data, _ = build_pdf(report, IMAGE_SIZES.get(size_name, 1.3), tall=True)
+
+    page = pdfium.PdfDocument(data)[0]
+    picture = page.render(scale=2.2).to_pil().convert("RGB")
+
+    # 아래쪽 빈 공간을 잘라 냅니다.
+    background = Image.new("RGB", picture.size, (255, 255, 255))
+    box = ImageChops.difference(picture, background).getbbox()
+
+    if box:
+        picture = picture.crop((0, 0, picture.width, min(picture.height, box[3] + 40)))
+
+    buffer = io.BytesIO()
+    picture.save(buffer, format="PNG", optimize=True)
+
+    return buffer.getvalue()
 
 
 def fit_pdf(report):
@@ -2533,6 +2576,30 @@ def main():
 
         except Exception as error:
             st.caption(f"PDF 생성 실패: {str(error)[:150]}")
+
+        st.radio(
+            "캡처용 이미지 글자 크기",
+            list(IMAGE_SIZES),
+            index=1,
+            horizontal=True,
+            key="rd_image_size",
+            help="이미지는 내용 길이에 맞춘 긴 한 장으로 만들어집니다. 어르신께 보여드릴 때는 '크게' 이상을 권합니다.",
+        )
+
+        try:
+            st.download_button(
+                "🖼️ 캡처용 이미지(PNG)로 저장",
+                data=build_image(publish_text(report), state.get("rd_image_size", "크게")),
+                file_name=f"{base_name}.png",
+                mime="image/png",
+                key="rd_download_png",
+            )
+
+        except ImportError:
+            st.caption("이미지를 만들려면 requirements.txt에 pypdfium2와 pillow를 추가하세요.")
+
+        except Exception as error:
+            st.caption(f"이미지 생성 실패: {str(error)[:150]}")
 
         confirmed = st.checkbox(
             "게시 전 확인: 각 증권사 리포트의 이용약관·재배포 허용 범위와 "
