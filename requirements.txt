@@ -6,3 +6,5 @@ google-genai
 pypdf
 reportlab
 pdfplumber
+pypdfium2
+pillow
