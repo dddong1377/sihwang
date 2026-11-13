@@ -846,7 +846,12 @@ def with_rules(prompt):
 # 6. 요약 / 검사
 # ===============================================================
 
-PAGE_REF_PATTERN = re.compile(r"\s*[\(\[]\s*(?:p|P)\.?\s*\d+(?:\s*[,~\-–]\s*(?:p\.?\s*)?\d+)*\s*[\)\]]")
+PAGE_REF_PATTERN = re.compile(
+    r"\s*[\(\[]\s*(?:pp?|PP?)\.?\s*\d+(?:[\s,~\-–‑‐—·ㆍ/&]+(?:pp?|PP?)?\.?\s*\d+)*\s*[\)\]]"
+)
+
+# 요약에 섞이면 안 되는 검증 메모 표현
+META_PATTERN = re.compile(r"발췌|원문에 (?:제시|명시|언급|없)|제시되지 않|명시되지 않|언급은 없|구체적 근거는|확인되지 않")
 CHAR_COUNT_PATTERN = re.compile(r"\s*[\(\[]\s*(?:약\s*)?\d+\s*자\s*(?:이내|내외)?\s*[\)\]]")
 
 
@@ -1022,7 +1027,7 @@ CHECK_PROMPT = """# 역할
 
 # 판정
 - 정상: 발췌와 맞다
-- 수정: 발췌와 명백히 다르다 (수정문을 반드시 쓴다. 수정문의 숫자는 발췌에 있는 것만 쓴다)
+- 수정: 발췌와 명백히 다르다 (수정문을 반드시 쓴다. 수정문의 숫자는 발췌에 있는 것만 쓴다. 수정문은 게시용 요약 문장 그대로 쓰고, '발췌에 따르면', '원문에 없음' 같은 검증 메모나 소제목 반복을 넣지 않는다)
 - 확인: 발췌만으로 판단할 수 없거나 자료가 충돌한다 (발췌에 근거가 없다는 이유만으로 '수정'을 쓰지 않는다)
 - 가독: 내용은 맞지만 오해 소지가 있거나 더 쉽게 쓸 수 있다
 
@@ -1104,6 +1109,10 @@ def code_checks(entry, summary, source):
                         f"[확인 필요] {label}: 목표주가가 {found.group(1)}원으로도 적혀 있어 "
                         f"목표주가 칸({summary['target']})과 다릅니다 → {text[:60]}…"
                     )
+
+    for text in [summary["core"]] + summary["points"] + [summary["risk"]]:
+        if META_PATTERN.search(text or ""):
+            notes.append(f"[수정 필수] {label}: 요약 문장에 검증 메모 같은 표현이 섞였습니다 → {text[:60]}…")
 
     declared = set(re.findall(r"단위\s*[:：]?\s*\(?\s*(십억원|백만원|억원|조원|천원|만원)", source))
     nospace = re.sub(r"\s", "", plain)
@@ -1231,16 +1240,21 @@ def cross_check(entry, summary, source, status):
                 notes.append(f"[확인 필요] {label}: {reason}{where} → '{short}'")
 
             else:
+                if kind == "points" and text.startswith("**"):
+                    head = re.match(r"^\*\*(.+?)\*\*", text).group(1)
+                    fix = re.sub(r"^\*{0,2}" + re.escape(head) + r"\*{0,2}\s*[:：]\s*", "", fix).strip()
+
                 safe = (
                     kind in ("core", "points")
                     and not unknown_numbers(fix, plain)
                     and not has_verbatim(fix, shingles)
+                    and not META_PATTERN.search(fix)
+                    and len(fix) <= len(text) * 1.5 + 40
                 )
 
                 if safe:
-                    if kind == "points" and text.startswith("**") and not fix.startswith("**"):
-                        head = re.match(r"^\*\*.+?\*\*", text).group(0)
-                        fix = f"{head}: {fix}"
+                    if kind == "points" and text.startswith("**"):
+                        fix = f"**{head}**: {fix}"
 
                     apply_item(summary, kind, index, fix)
                     notes.append(f"[자동 수정] {label}: {reason}{where} — 수정 전: {text[:70]} → 수정 후: {fix[:70]}")
@@ -2377,12 +2391,13 @@ def main():
     report = state.get("rd_report", "").strip()
 
     if report:
-        stamp = datetime.datetime.now(KST).strftime("%Y%m%d_%H%M")
+        stamp = datetime.datetime.now(KST).strftime("%Y%m%d")
+        base_name = f"MTNW투자자문 증권사 요약 리포트_{stamp}"
 
         st.download_button(
             "💾 이 리포트 파일로 저장 (.md)",
             data=report.encode("utf-8"),
-            file_name=f"report_digest_{stamp}.md",
+            file_name=f"{base_name}.md",
             mime="text/markdown",
             key="rd_download",
             help="수정한 내용 그대로 내 컴퓨터에 저장합니다. 새로고침하면 화면의 결과는 사라지니 필요하면 먼저 저장하세요.",
@@ -2394,7 +2409,7 @@ def main():
             st.download_button(
                 "📄 이 리포트 PDF로 저장",
                 data=pdf_bytes,
-                file_name=f"report_digest_{stamp}.pdf",
+                file_name=f"{base_name}.pdf",
                 mime="application/pdf",
                 key="rd_download_pdf",
             )
