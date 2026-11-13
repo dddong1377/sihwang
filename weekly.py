@@ -14,6 +14,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from archive import load_post
+from weekly_market import fetch_weekly_movers
 from usage_store import load_usage, add_usage
 
 
@@ -656,6 +657,7 @@ def collect_week(days):
     surge = {}
     plunge = {}
     watch = {}
+    post_info = {}
 
     for day in days:
         i = day["i"]
@@ -674,6 +676,7 @@ def collect_week(days):
                 })
 
                 item["days"].add(i)
+                post_info[key] = (row["theme"], row["reason"])
 
                 if item["best"] is None or row["pct"] > item["best"][0]:
                     item["best"] = (row["pct"], i)
@@ -691,6 +694,7 @@ def collect_week(days):
                 })
 
                 item["days"].add(i)
+                post_info[key] = (row["theme"], row["reason"])
 
                 if item["best"] is None or row["pct"] < item["best"][0]:
                     item["best"] = (row["pct"], i)
@@ -745,6 +749,8 @@ def collect_week(days):
         "plunge": plunge_top,
         "watch": watch_top,
         "index": {"코스피": {}, "코스닥": {}},
+        "post_info": post_info,
+        "mover_basis": "post",
     }
 
 
@@ -956,6 +962,16 @@ def pct_text(value):
     return "-" if value is None else f"{value:+.2f}%"
 
 
+def mover_fact(label, item, pct, index, week):
+    if week.get("mover_basis") == "toss":
+        return (
+            f"{label} 종목(시총 상위 100위, 토스증권): "
+            f"{item['name']} 주간 {pct:+.2f}%"
+        )
+
+    return f"{label} 종목(시황글 기준 하루 최대): {item['name']} {pct:+.2f}% ({DAY_LABELS[index]}요일)"
+
+
 def build_facts(days, week, issues, flow):
     """제목을 쓸 때 AI에 보여 줄 '이번 주 팩트'(코드가 만든 수치 + 정리된 이슈)."""
 
@@ -979,16 +995,12 @@ def build_facts(days, week, issues, flow):
     if week["surge"]:
         top = week["surge"][0]
         pct, index = top["best"]
-        lines.append(
-            f"주간 최대 일간 상승 종목: {top['name']} {pct:+.2f}% ({DAY_LABELS[index]}요일)"
-        )
+        lines.append(mover_fact("주간 최대 상승", top, pct, index, week))
 
     if week["plunge"]:
         top = week["plunge"][0]
         pct, index = top["best"]
-        lines.append(
-            f"주간 최대 일간 하락 종목: {top['name']} {pct:+.2f}% ({DAY_LABELS[index]}요일)"
-        )
+        lines.append(mover_fact("주간 최대 하락", top, pct, index, week))
 
     for number, issue in enumerate(issues, start=1):
         lines.append(
@@ -1452,12 +1464,19 @@ def index_table_md(week, days):
     return "\n".join(lines)
 
 
+def mover_label(week):
+    if week.get("mover_basis") == "toss":
+        return "시총 상위 100위 · 토스증권 주간 등락률 기준"
+
+    return "시황글 기준 · 하루 최대 등락률 (토스 조회 실패)"
+
+
 def movers_table_md(rows, show_note=True):
     if not rows:
         return "- 붙여넣은 오후 시황글에서 읽을 수 있는 종목이 없습니다."
 
     lines = [
-        "| 순위 | 종목 | 최대 등락률 | 관련 테마" + (" | 비고 |" if show_note else " |"),
+        "| 순위 | 종목 | 주간 등락률 | 관련 테마" + (" | 비고 |" if show_note else " |"),
         "|---:|---|---:|---" + ("|---|" if show_note else "|"),
     ]
 
@@ -1545,11 +1564,11 @@ def build_report(monday, headline, days, week, issues, flow, checks, schedule, a
         lines += [f"- 이슈 정리를 만들지 못했습니다. {ai_error}".strip(), ""]
 
     lines += [
-        "### 🔺 주간 급등 TOP 3 (일간 상승률 기준)",
+        f"### 🔺 주간 급등 TOP 3 ({mover_label(week)})",
         "",
         movers_table_md(week["surge"], show_note),
         "",
-        "### 🔻 주간 급락 TOP 3 (일간 하락률 기준)",
+        f"### 🔻 주간 급락 TOP 3 ({mover_label(week)})",
         "",
         movers_table_md(week["plunge"], show_note),
         "",
@@ -1640,6 +1659,40 @@ def run_weekly(monday, status):
         index_error = str(error)[:200]
         status.write(f"⚠️ 지수 조회 실패: {index_error}")
 
+    # 0-2) 주간 급등·급락: 토스증권 시총 상위 100위의 주간 등락률
+    mover_error = ""
+
+    status.write("📈 토스증권에서 시총 상위 100위의 주간 등락률을 계산하는 중... (1~2분)")
+
+    try:
+        moved = fetch_weekly_movers(
+            monday.isoformat(),
+            "closed" if datetime.datetime.now(KST).time() >= MARKET_CLOSE_CONFIRM else "open",
+        )
+
+        info = week["post_info"]
+
+        def as_item(row):
+            theme, reason = info.get(name_key(row["name"]), ("", ""))
+
+            return {
+                "name": row["name"],
+                "best": (row["pct"], row["last_day"].weekday()),
+                "days": set(),
+                "theme": theme,
+                "reason": reason,
+            }
+
+        week["surge"] = [as_item(row) for row in moved["surge"]]
+        week["plunge"] = [as_item(row) for row in moved["plunge"]]
+        week["mover_basis"] = "toss"
+
+        status.write(f"✅ 주간 등락률 계산 완료 · {moved['count']}종목")
+
+    except Exception as error:
+        mover_error = str(error)[:200]
+        status.write(f"⚠️ 토스 주간 등락률 실패: {mover_error} · 시황글 기준으로 대신 표시합니다.")
+
     # 1) 핵심 이슈 정리
     issues, flow, checks, ai_error = [], "", [], ""
 
@@ -1718,7 +1771,9 @@ def run_weekly(monday, status):
         },
     }
 
-    problems = " / ".join(item for item in (ai_error, index_error) if item)
+    problems = " / ".join(
+        item for item in (ai_error, index_error, mover_error) if item
+    )
 
     state["wk_note"] = (
         f"생성 완료 · {datetime.datetime.now(KST).strftime('%H:%M:%S')}"
