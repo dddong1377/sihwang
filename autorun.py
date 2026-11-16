@@ -115,6 +115,28 @@ def _status_line(kind, config):
     return f"{LABELS[kind]} {scheduled} · ⏳ 실행 중 {at}"
 
 
+def _save_sidebar_times():
+    state = st.session_state
+
+    try:
+        config = load_config()
+
+        for kind in LABELS:
+            value = state.get(f"sb_time_{kind}")
+
+            if isinstance(value, datetime.time):
+                text = value.strftime("%H:%M")
+
+                if valid_hhmm(text):
+                    config["times"][kind] = text
+
+        save_config(config)
+        state["auto_msg"] = "시각을 저장했습니다."
+
+    except Exception as error:
+        state["auto_msg"] = f"시각 저장 실패: {str(error)[:150]}"
+
+
 def render_auto_sidebar():
     """app.py 에서 st.navigation 을 실행하기 전에 한 번 호출합니다. 로그인 후에만 보입니다."""
 
@@ -152,6 +174,26 @@ def render_auto_sidebar():
                 st.caption(_status_line(kind, config))
         else:
             st.caption("꺼져 있음 · 자동으로 만들지 않습니다")
+
+        with st.expander("실행 시각 바꾸기", expanded=False):
+            for kind in ("pre", "aft", "week"):
+                key = f"sb_time_{kind}"
+
+                if key not in st.session_state:
+                    st.session_state[key] = _parse_time(config["times"][kind])
+
+                st.time_input(LABELS[kind], key=key, step=300)
+
+            st.button(
+                "저장",
+                key="sb_time_save",
+                on_click=_save_sidebar_times,
+                use_container_width=True,
+            )
+
+            st.caption(
+                "시각 이후 10~20분 안에 시작합니다. 주간 정리는 금요일만 실행됩니다."
+            )
 
 
 # ---------------------------------------------------------------
