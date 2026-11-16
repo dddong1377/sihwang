@@ -46,10 +46,17 @@ jobs:
       - name: 실행할 시황글 만들기
         run: |
           for kind in ${{ needs.check.outputs.due }}; do
-            python scripts/auto_trigger.py run "$kind" || true
+            python -u scripts/auto_trigger.py run "$kind" || true
           done
         env:
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
           GIST_ID: ${{ secrets.GIST_ID }}
           APP_URL: ${{ secrets.APP_URL }}
-          APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+          APP_PASSWORD: ${{ secrets.APP_PASSWORD || secrets.app_password }}
+      - name: 실패 시 화면 캡처 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug
+          path: debug_login.png
+          if-no-files-found: ignore
