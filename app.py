@@ -5,17 +5,17 @@ from autorun import render_auto_sidebar
 # 사이드바 메뉴: 이름·글자 크기를 여기서 정합니다.
 pages = [
     st.Page(
-        "afternoon.py",
-        title="오후 시황",
-        icon="📈",
-        url_path="afternoon",
-        default=True,
-    ),
-    st.Page(
         "premarket.py",
         title="장전 시황",
         icon="🌅",
         url_path="premarket",
+        default=True,
+    ),
+    st.Page(
+        "afternoon.py",
+        title="오후 시황",
+        icon="📈",
+        url_path="afternoon",
     ),
     st.Page(
         "weekly.py",
