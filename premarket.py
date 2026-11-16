@@ -16,6 +16,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from archive import save_post, list_posts
+from autorun import (
+    auto_requested,
+    finish_auto,
+    mark_started,
+    render_time_setting,
+)
 from usage_store import load_usage, add_usage
 
 
@@ -3024,6 +3030,24 @@ def request_run(mode):
     st.session_state["pm_run_mode"] = mode
 
 
+def finish_auto_run():
+    """자동 실행 모드: 결과를 저장하고 실행 기록을 남깁니다."""
+
+    state = st.session_state
+    short = str(state.get("pm_short", "")).strip()
+
+    if state.get("pm_note_level") == "ok" and short:
+        try:
+            save_post("pre", short)
+            finish_auto("pre", True, "장전 시황글 생성·저장 완료")
+            refresh_archive_list()
+        except Exception as error:
+            finish_auto("pre", False, f"생성은 됐지만 저장 실패: {str(error)[:200]}")
+
+    else:
+        finish_auto("pre", False, str(state.get("pm_note") or "생성 실패")[:280])
+
+
 # ===============================================================
 # 15. 마크다운 → HTML / 복사 버튼
 # ===============================================================
@@ -3585,6 +3609,13 @@ def main():
     TOKEN_BOX["box"] = st.empty()
     render_token_status()
 
+    # 자동 실행 모드: 주소에 ?auto=pre 가 있고 조건이 맞을 때만, 버튼을 누른 것처럼 실행
+    if auto_requested("pre") and not state.get("pm_auto_started"):
+        state["pm_auto_started"] = True
+        state["pm_auto_save"] = True
+        mark_started("pre")
+        request_run("full")
+
     st.caption(
         "Toss 지수와 최근 24시간 뉴스 RSS를 수집한 뒤, Groq API로 "
         "상세 리포트를 8개 파트로 나누어 생성하고, 마지막에 통합 압축본을 만듭니다. "
@@ -3689,6 +3720,13 @@ def main():
         if mode:
             run_with_status(mode)
 
+            if state.pop("pm_auto_save", False):
+                # 중간에 실패해도 완료된 파트는 보존되므로 한 번 자동으로 이어서 시도
+                if state.get("pm_note_level") == "error" and state.get("pm_ctx"):
+                    run_with_status("resume")
+
+                finish_auto_run()
+
         done = len(state.get("pm_detail_parts") or {})
 
         if state.get("pm_ctx"):
@@ -3702,6 +3740,8 @@ def main():
                 st.error(state["pm_note"])
             else:
                 st.success(state["pm_note"])
+
+        render_time_setting("pre")
 
     # -----------------------------------------------------------
     # ③ 결과
