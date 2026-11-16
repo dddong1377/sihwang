@@ -101,18 +101,20 @@ def _status_line(kind, config):
     run = load_run(kind)
     scheduled = config["times"][kind]
 
+    head = f"{LABELS[kind]} · 예정 {scheduled}"
+
     if run is None:
-        return f"{LABELS[kind]} {scheduled} · 대기"
+        return f"{head} · 오늘 대기 중"
 
     at = str(run.get("at", ""))[11:16]
 
     if run.get("ok") is True:
-        return f"{LABELS[kind]} {scheduled} · ✅ 완료 {at}"
+        return f"{head} · ✅ {at}에 생성·저장 완료"
 
     if run.get("ok") is False:
-        return f"{LABELS[kind]} {scheduled} · ❌ 실패 {at}"
+        return f"{head} · ❌ {at}에 실패"
 
-    return f"{LABELS[kind]} {scheduled} · ⏳ 실행 중 {at}"
+    return f"{head} · ⏳ {at}부터 실행 중"
 
 
 def _save_sidebar_times():
