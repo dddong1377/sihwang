@@ -29,12 +29,6 @@ pages = [
         icon="📑",
         url_path="report_digest",
     ),
-    st.Page(
-        "copy_test.py",
-        title="복사 시험",
-        icon="🧪",
-        url_path="copy_test",
-    ),
 ]
 
 st.markdown(
