@@ -15,7 +15,7 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
-from archive import save_post, list_posts
+from archive import save_post, list_posts, load_post
 from autorun import (
     auto_requested,
     finish_auto,
@@ -3609,6 +3609,23 @@ def main():
     TOKEN_BOX["box"] = st.empty()
     render_token_status()
 
+    # 오늘 저장된 장전 시황글(자동 실행이 만든 글 포함)이 있으면, 칸이 비어 있을 때 한 번만 채움
+    if not state.get("pm_autoloaded"):
+        state["pm_autoloaded"] = True
+
+        if not str(state.get("pm_short", "")).strip():
+            try:
+                saved = load_post("pre", datetime.datetime.now(KST).date())
+            except Exception:
+                saved = ""
+
+            if saved:
+                state["pm_short"] = saved
+                state["pm_autoload_note"] = (
+                    "오늘 저장된 장전 시황글을 불러왔습니다. 수정한 뒤 "
+                    "'오늘 장전 시황글 저장'을 누르면 수정본으로 저장됩니다."
+                )
+
     # 자동 실행 모드: 주소에 ?auto=pre 가 있고 조건이 맞을 때만, 버튼을 누른 것처럼 실행
     if auto_requested("pre") and not state.get("pm_auto_started"):
         state["pm_auto_started"] = True
@@ -3758,6 +3775,9 @@ def main():
     )
 
     with tab_short:
+        if state.get("pm_autoload_note") and str(state.get("pm_short", "")).strip():
+            st.info(state["pm_autoload_note"])
+
         st.text_area(
             "압축 시황글 (수정 가능 · 복사 버튼은 수정한 내용으로 복사됩니다)",
             key="pm_short",
