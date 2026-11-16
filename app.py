@@ -1,5 +1,7 @@
 import streamlit as st
 
+from autorun import render_auto_sidebar
+
 # 사이드바 메뉴: 이름·글자 크기를 여기서 정합니다.
 pages = [
     st.Page(
@@ -48,6 +50,9 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# 왼쪽 메뉴의 '자동 실행' 스위치 (로그인 후에만 표시)
+render_auto_sidebar()
 
 navigation = st.navigation(pages)
 navigation.run()
