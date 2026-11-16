@@ -58,6 +58,50 @@ def read_gist():
     return data if isinstance(data, dict) else {}
 
 
+def write_gist(data):
+    token = os.environ["GIST_TOKEN"]
+    gist_id = os.environ["GIST_ID"]
+
+    response = requests.patch(
+        f"https://api.github.com/gists/{gist_id}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        },
+        json={"files": {GIST_FILE: {"content": json.dumps(data, ensure_ascii=False)}}},
+        timeout=20,
+    )
+    response.raise_for_status()
+
+
+def record_failure(kind, message):
+    """앱에 접속조차 못 한 경우에도 실패를 기록해 같은 날 무한 재시도를 막습니다."""
+
+    try:
+        data = read_gist()
+        today = datetime.datetime.now(KST).date().isoformat()
+
+        runs = data.setdefault("_runs", {}).setdefault(today, {})
+        previous = runs.get(kind)
+        attempts = int(previous.get("attempts", 0)) if isinstance(previous, dict) else 0
+
+        # 앱이 시작 기록을 남겼다면 이미 시도 횟수에 포함돼 있음
+        if not (isinstance(previous, dict) and previous.get("ok") is None):
+            attempts += 1
+
+        runs[kind] = {
+            "ok": False,
+            "message": str(message)[:300],
+            "at": datetime.datetime.now(KST).isoformat(timespec="seconds"),
+            "attempts": attempts,
+        }
+
+        write_gist(data)
+
+    except Exception as error:
+        print(f"실패 기록을 저장하지 못했습니다: {error}", flush=True)
+
+
 def is_trading_day(day):
     """평일이고 한국 공휴일·근로자의 날·연말 휴장일이 아니면 True."""
 
@@ -153,6 +197,42 @@ def cmd_check():
             f.write(f"due={' '.join(due)}\n")
 
 
+def find_in_frames(page, getter, seconds):
+    """Streamlit Cloud 는 앱을 iframe 안에 넣으므로 모든 프레임에서 찾습니다."""
+
+    end = time.time() + seconds
+
+    while time.time() < end:
+        for frame in page.frames:
+            try:
+                locator = getter(frame)
+
+                if locator.count() > 0 and locator.first.is_visible():
+                    return locator.first
+            except Exception:
+                pass
+
+        time.sleep(2)
+
+    return None
+
+
+def debug_dump(page):
+    try:
+        page.screenshot(path="debug_login.png", full_page=True)
+    except Exception:
+        pass
+
+    for frame in page.frames:
+        try:
+            text = frame.locator("body").inner_text(timeout=3000)
+        except Exception:
+            text = "(읽지 못함)"
+
+        print(f"[프레임] {frame.url[:120]}", flush=True)
+        print("   " + " ".join(text.split())[:400], flush=True)
+
+
 def run_status(kind):
     today = datetime.datetime.now(KST).date().isoformat()
     runs = (read_gist().get("_runs") or {}).get(today, {})
@@ -174,7 +254,7 @@ def cmd_run(kind):
     deadline = time.time() + WAIT_MINUTES[kind] * 60
     launched = datetime.datetime.now(KST)
 
-    print(f"열기: {base}/{path}?auto={kind}")
+    print(f"열기: {base}/{path}?auto={kind}", flush=True)
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -182,21 +262,30 @@ def cmd_run(kind):
         page.goto(url, wait_until="domcontentloaded", timeout=120_000)
 
         # 잠든 앱 깨우기
-        try:
-            page.get_by_role("button", name="Yes, get this app back up!").click(
-                timeout=15_000
-            )
-            print("잠든 앱을 깨우는 중...")
-        except Exception:
-            pass
+        wake = find_in_frames(
+            page,
+            lambda f: f.get_by_role("button", name="Yes, get this app back up!"),
+            20,
+        )
 
-        # 로그인
-        box = page.get_by_label("비밀번호")
-        box.wait_for(timeout=180_000)
+        if wake is not None:
+            print("잠든 앱을 깨우는 중...", flush=True)
+            wake.click()
+
+        # 로그인 칸 찾기 (앱이 깨어나는 시간까지 포함해 최대 4분)
+        box = find_in_frames(page, lambda f: f.get_by_label("비밀번호"), 240)
+
+        if box is None:
+            print("로그인 칸을 찾지 못했습니다. 화면 상태:", flush=True)
+            debug_dump(page)
+            browser.close()
+            record_failure(kind, "자동 실행: 앱 로그인 화면을 찾지 못했습니다.")
+            sys.exit(1)
+
         box.fill(password)
         box.press("Enter")
 
-        print("로그인 완료. 실행 결과를 기다립니다.")
+        print("로그인 입력 완료. 실행 결과를 기다립니다.", flush=True)
 
         result = None
 
@@ -218,7 +307,8 @@ def cmd_run(kind):
         browser.close()
 
     if result is None:
-        print("제한 시간 안에 결과가 기록되지 않았습니다.")
+        print("제한 시간 안에 결과가 기록되지 않았습니다.", flush=True)
+        record_failure(kind, "자동 실행: 제한 시간 안에 결과가 기록되지 않았습니다.")
         sys.exit(1)
 
     print(("성공: " if result.get("ok") else "실패: ") + str(result.get("message", "")))
