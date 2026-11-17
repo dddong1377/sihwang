@@ -46,6 +46,40 @@ st.markdown(
         font-weight: 800 !important;
         line-height: 1.35 !important;
     }
+    /* 옅은 글씨를 진하게 (설명 글·입력 칸 제목·탭·왼쪽 메뉴 설명) */
+    [data-testid="stCaptionContainer"],
+    [data-testid="stCaptionContainer"] *,
+    [data-testid="stWidgetLabel"] p,
+    [data-testid="stWidgetLabel"] label,
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] *,
+    button[data-baseweb="tab"] p,
+    [data-testid="stExpander"] summary p,
+    [data-testid="stMetricLabel"] p {
+        color: #1f2430 !important;
+        opacity: 1 !important;
+    }
+    [data-testid="stCaptionContainer"] {
+        font-size: 0.9rem !important;
+    }
+    textarea::placeholder, input::placeholder {
+        color: #5b6270 !important;
+        opacity: 1 !important;
+    }
+    @media (prefers-color-scheme: dark) {
+        [data-testid="stCaptionContainer"],
+        [data-testid="stCaptionContainer"] *,
+        [data-testid="stWidgetLabel"] p,
+        [data-testid="stWidgetLabel"] label,
+        [data-testid="stSidebar"] [data-testid="stCaptionContainer"] *,
+        button[data-baseweb="tab"] p,
+        [data-testid="stExpander"] summary p,
+        [data-testid="stMetricLabel"] p {
+            color: #f1f3f7 !important;
+        }
+        textarea::placeholder, input::placeholder {
+            color: #b8bdc9 !important;
+        }
+    }
     </style>
     """,
     unsafe_allow_html=True,
