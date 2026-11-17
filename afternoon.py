@@ -5117,11 +5117,21 @@ def main():
                 st.session_state["api_error"] = str(error)
                 st.error(f"시세 조회 실패: {error}")
 
+                if "IP address not allowed" in str(error) or "HTTP 403" in str(error):
+                    st.warning(
+                        "허용 IP 문제로 보입니다. 관리자에게 문의 부탁드립니다. "
+                        "관리자 부재 시 관리자 PC에서 토스증권을 검색해 "
+                        "허용 IP를 입력하면 정상 작동합니다."
+                    )
+
         snapshot = st.session_state.get("snapshot")
 
         if not snapshot:
             st.info(
-                "토스증권 API 인증·허용 IP·랭킹 응답을 확인해 주세요."
+                "토스증권 API 인증·허용 IP·랭킹 응답을 확인해 주세요. "
+                "허용 IP 오류라면 관리자에게 문의 부탁드립니다. "
+                "관리자 부재 시 관리자 PC에서 토스증권을 검색해 "
+                "허용 IP를 입력하면 정상 작동합니다."
             )
             return
 
