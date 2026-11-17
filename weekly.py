@@ -46,7 +46,7 @@ HEADLINE_TEMPERATURE = 0.8
 GROQ_DAILY_TOKEN_LIMIT = 200_000
 
 # 다음 주 일정: 하루에 표시할 최대 행 수
-SCHEDULE_PER_DAY = 6
+SCHEDULE_PER_DAY = 20
 
 TOSS_CALENDAR_BASE = "https://wts-cert-api.tossinvest.com"
 
@@ -1378,7 +1378,7 @@ def fetch_schedule_markdown(next_monday):
 
     rows.sort(
         key=lambda row: (
-            row["date"], row["rank"], row["time"] or "99:99", row["title"]
+            row["date"], row["rank"], row["title"]
         )
     )
 
@@ -1388,8 +1388,8 @@ def fetch_schedule_markdown(next_monday):
         by_day.setdefault(row["date"], []).append(row)
 
     lines = [
-        "| 날짜 | 구분 | 일정 | 시각 | 비고 |",
-        "|---|---|---|---|---|",
+        "| 날짜 | 구분 | 일정 |",
+        "|---|---|---|",
     ]
 
     for day in sorted(by_day):
@@ -1398,14 +1398,13 @@ def fetch_schedule_markdown(next_monday):
         for row in items[:SCHEDULE_PER_DAY]:
             lines.append(
                 f"| {day_text(day)} | {table_cell(row['kind'])} "
-                f"| {table_cell(row['title'])} | {row['time'] or '-'} "
-                f"| {table_cell(row['note']) or '-'} |"
+                f"| {table_cell(row['title'])} |"
             )
 
         if len(items) > SCHEDULE_PER_DAY:
             lines.append(
-                f"| {day_text(day)} | 기타 | 외 {len(items) - SCHEDULE_PER_DAY}건 "
-                "| - | 토스 증시 캘린더에서 확인 |"
+                f"| {day_text(day)} | 기타 "
+                f"| 외 {len(items) - SCHEDULE_PER_DAY}건 (토스 증시 캘린더에서 확인) |"
             )
 
     return "\n".join(lines), len(rows)
