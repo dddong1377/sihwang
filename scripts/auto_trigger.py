@@ -272,18 +272,57 @@ def cmd_run(kind):
             print("잠든 앱을 깨우는 중...", flush=True)
             wake.click()
 
-        # 로그인 칸 찾기 (앱이 깨어나는 시간까지 포함해 최대 4분)
-        box = find_in_frames(page, lambda f: f.get_by_label("비밀번호"), 240)
+        # 로그인 칸 찾아 입력 (앱이 깨어나는 중이면 칸이 잠겨 있어 재시도·새로고침)
+        logged_in = False
+        login_deadline = time.time() + 300
+        reloads = 0
 
-        if box is None:
-            print("로그인 칸을 찾지 못했습니다. 화면 상태:", flush=True)
+        while time.time() < login_deadline and not logged_in:
+            # 잠든 앱 깨우기 버튼이 뒤늦게 뜰 수 있어 매 반복마다 확인
+            wake = find_in_frames(
+                page,
+                lambda f: f.get_by_role("button", name="Yes, get this app back up!"),
+                3,
+            )
+
+            if wake is not None:
+                print("잠든 앱을 깨우는 중...", flush=True)
+
+                try:
+                    wake.click(timeout=10_000)
+                except Exception:
+                    pass
+
+                time.sleep(20)
+
+            box = find_in_frames(page, lambda f: f.get_by_label("비밀번호"), 60)
+
+            if box is None:
+                if reloads >= 3:
+                    break
+                reloads += 1
+                page.reload(wait_until="domcontentloaded", timeout=120_000)
+                continue
+
+            try:
+                box.click(timeout=15_000)
+                box.fill(password, timeout=15_000)
+                box.press("Enter", timeout=10_000)
+                logged_in = True
+            except Exception as error:
+                print(f"로그인 칸 입력 실패(재시도): {str(error)[:120]}", flush=True)
+                time.sleep(10)
+
+                if reloads < 3:
+                    reloads += 1
+                    page.reload(wait_until="domcontentloaded", timeout=120_000)
+
+        if not logged_in:
+            print("로그인하지 못했습니다. 화면 상태:", flush=True)
             debug_dump(page)
             browser.close()
-            record_failure(kind, "자동 실행: 앱 로그인 화면을 찾지 못했습니다.")
+            record_failure(kind, "자동 실행: 앱 로그인에 실패했습니다.")
             sys.exit(1)
-
-        box.fill(password)
-        box.press("Enter")
 
         print("로그인 입력 완료. 실행 결과를 기다립니다.", flush=True)
 
@@ -322,7 +361,14 @@ if __name__ == "__main__":
     if action == "check":
         cmd_check()
     elif action == "run" and len(sys.argv) > 2 and sys.argv[2] in DEFAULT_TIMES:
-        cmd_run(sys.argv[2])
+        try:
+            cmd_run(sys.argv[2])
+        except SystemExit:
+            raise
+        except Exception as error:
+            print(f"예상하지 못한 오류: {error}", flush=True)
+            record_failure(sys.argv[2], f"자동 실행 오류: {str(error)[:200]}")
+            sys.exit(1)
     else:
         print(__doc__)
         sys.exit(2)
