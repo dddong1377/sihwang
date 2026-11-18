@@ -4765,7 +4765,7 @@ def copy_buttons(markdown):
     }};
     document.getElementById('kakao').onclick = async () => {{
         try {{
-            await navigator.clipboard.writeText(P.kakao);
+            await navigator.clipboard.writeText(stamp(P.kakao));
             s.textContent = ' 복사 완료 (카카오톡용)';
         }} catch (e) {{
             s.textContent = ' 복사 실패';
