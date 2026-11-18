@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 from kakao_text import to_kakao_text
+from emphasis import emphasize, bold_headings
 
 import requests
 import streamlit as st
@@ -4693,11 +4694,11 @@ def md_to_html(markdown):
 
 def copy_buttons(markdown):
     """서식 포함 복사 및 마크다운 복사 버튼."""
-
+    markdown = emphasize(markdown)
     payload = json.dumps(
         {
             "md": markdown,
-            "html": md_to_html(markdown),
+            "html": bold_headings(md_to_html(markdown)),
             "kakao": to_kakao_text(markdown),
         },
         ensure_ascii=False
