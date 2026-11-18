@@ -10,6 +10,7 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
+from kakao_text import to_kakao_text
 
 import requests
 import streamlit as st
