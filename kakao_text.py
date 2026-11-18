@@ -58,7 +58,7 @@ KEYWORD_COUNT = 5
 def _pick_keywords(line, body):
     """키워드 줄에서 본문에 가장 많이 나온 KEYWORD_COUNT개를 원래 순서대로 고릅니다."""
 
-    words = [w.strip() for w in re.split(r"[,，]", _clean(line).replace("#", " , ")) if w.strip()]
+    words = [w.strip() for w in re.split(r"(?<!\d)[,，]|[,，](?!\d)", _clean(line).replace("#", " , ")) if w.strip()]
 
     if len(words) <= KEYWORD_COUNT:
         return words
