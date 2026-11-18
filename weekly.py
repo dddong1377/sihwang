@@ -8,6 +8,7 @@ import re
 import tempfile
 import time
 from zoneinfo import ZoneInfo
+from kakao_text import to_kakao_text
 
 import requests
 import streamlit as st
