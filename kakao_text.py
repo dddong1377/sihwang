@@ -72,13 +72,42 @@ def _pick_keywords(line, body):
     return [words[i] for i in sorted(ranked)]
 
 
+CONTENT_LIMIT = 100  # 이슈 내용: 이 글자 수 안에서 문장 단위로 자름
+FLOW_LIMIT = 120     # 주간 흐름
+
+
+def _shorten(text, limit):
+    """문장 단위로 limit 글자 안에 들어가게 줄입니다. 첫 문장은 길어도 자르지 않습니다."""
+
+    text = " ".join(str(text or "").split())
+
+    if len(text) <= limit:
+        return text
+
+    sentences = re.split(r"(?<=[.!?。])\s+", text)
+    result = sentences[0]
+
+    for sentence in sentences[1:]:
+        if len(result) + 1 + len(sentence) > limit:
+            break
+
+        result += " " + sentence
+
+    return result
+
+
 def _strip_labels(text):
     """'- 내용: ', '- 📌 관련 종목: ', '- ⏰ 체크: ' 같은 머리말을 줄여 한 줄을 짧게 만듭니다."""
 
     found = re.match(r"^-\s*내용\s*[:：]\s*(.+)$", text)
 
     if found:
-        return found.group(1)
+        return _shorten(found.group(1), CONTENT_LIMIT)
+
+    found = re.match(r"^📝\s*주간 흐름\s*[:：]\s*(.+)$", text)
+
+    if found:
+        return "📝 주간 흐름: " + _shorten(found.group(1), FLOW_LIMIT)
 
     found = re.match(r"^-\s*📌\s*관련 종목\s*[:：]\s*(.+)$", text)
 
@@ -95,12 +124,51 @@ def _strip_labels(text):
     return text
 
 
+def _merge_theme_lines(lines):
+    """'- 로봇 (+10.53%)' 다음 줄 '- 대표 종목: A' 를 '· 로봇 +10.53% · A' 한 줄로 합칩니다."""
+
+    merged = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+
+        theme = re.match(r"^-\s*(.+?)\s*\(([^)]*%[^)]*)\)\s*$", line)
+        stocks = re.match(r"^-\s*대표 종목\s*[:：]\s*(.+)$", nxt)
+
+        if theme and stocks:
+            merged.append(f"· {theme.group(1)} {theme.group(2)} · {stocks.group(1)}")
+            i += 2
+            continue
+
+        merged.append(line)
+        i += 1
+
+    return merged
+
+
+def _check_line(text):
+    """'- [기업 실적·미국] 월마트 실적 발표' → '· 월마트 실적 발표 (미국)'"""
+
+    found = re.match(r"^-\s*\[([^\]]+)\]\s*(.+)$", text)
+
+    if not found:
+        return text
+
+    tag, rest = found.groups()
+    country = tag.split("·")[-1].strip() if "·" in tag else ""
+
+    return f"· {rest}" + (f" ({country})" if country else "")
+
+
 def to_kakao_text(markdown):
     body_text = str(markdown or "")
     lines = body_text.splitlines()
     out = []
     table = []
     keyword_section = False
+    check_section = False
 
     def flush_table():
         if not table:
@@ -152,6 +220,7 @@ def to_kakao_text(markdown):
 
             level = len(stripped) - len(stripped.lstrip("#"))
             keyword_section = "핵심 키워드" in title
+            check_section = "체크" in title or "일정" in title
 
             if keyword_section:
                 title = re.sub(r"핵심 키워드\s*\d+", f"핵심 키워드 {KEYWORD_COUNT}", title)
@@ -173,9 +242,16 @@ def to_kakao_text(markdown):
         if stripped.startswith(">"):
             stripped = stripped.lstrip("> ").strip()
 
-        out.append(_strip_labels(_clean(stripped)) if stripped else "")
+        line = _strip_labels(_clean(stripped)) if stripped else ""
+
+        if check_section and line:
+            line = _check_line(line)
+
+        out.append(line)
 
     flush_table()
+
+    out = _merge_theme_lines(out)
 
     text = "\n".join(out)
     text = re.sub(r"\n{3,}", "\n\n", text)
