@@ -9,6 +9,7 @@ import tempfile
 import time
 from zoneinfo import ZoneInfo
 from kakao_text import to_kakao_text
+from emphasis import emphasize, bold_headings
 
 import requests
 import streamlit as st
@@ -1922,9 +1923,11 @@ def md_to_html(markdown):
 
 
 def copy_buttons(markdown):
+    markdown = emphasize(markdown)
     payload = json.dumps(
-        {"md": markdown, "html": md_to_html(markdown)
-        "kakao": to_kakao_text(markdown),},
+        {"md": markdown,
+         "html": bold_headings(md_to_html(markdown)),
+         "kakao": to_kakao_text(markdown),},
         ensure_ascii=False,
     ).replace("</", "<\\/")
 
