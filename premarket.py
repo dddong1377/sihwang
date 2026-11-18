@@ -10,9 +10,6 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
-from kakao_text import to_kakao_text
-from emphasis import emphasize, bold_headings
-from card_images import render_card_images
 
 import requests
 import streamlit as st
@@ -1561,6 +1558,7 @@ DETAIL_PARTS = [
 |---|---|
 
 뉴스에서 실제로 확인된 종목·테마만 사용한다. 이 파트에는 위 항목만 작성한다.
+'종목' 칸에는 개별 상장 기업(주식)만 쓴다. 지수(코스피·나스닥 등), 환율·달러, 금리, 유가·금 같은 원자재, 암호화폐는 종목이 아니므로 절대 넣지 않는다.
 """,
     },
     {
@@ -1686,6 +1684,7 @@ __INDEX_SECTION__
 
 ### 📈 오늘 주목 종목 TOP5
 | 종목 | 한 줄 이유 | 주의 |
+(종목 칸에는 개별 상장 기업만 쓴다. 지수·환율·달러·금리·원자재·암호화폐는 넣지 않는다)
 
 ### 🏷️ 강세·관심 테마
 최대 5개, 한 줄로 나열
@@ -1803,6 +1802,71 @@ def compact_index_table(rows):
         )
 
     return "\n".join(lines)
+
+
+# 종목 칸에 들어가면 안 되는 것(지수·환율·원자재·금리 등)을 걸러냅니다
+NON_STOCK_PARTS = (
+    "지수", "코스피", "코스닥", "나스닥", "다우", "s&p", "sp500", "러셀", "닛케이", "항셍",
+    "상해종합", "유로스톡스", "달러", "환율", "엔화", "위안", "유로화", "금리", "국채",
+    "채권", "유가", "원유", "천연가스", "브렌트", "wti", "비트코인", "이더리움", "vix",
+    "dxy", "선물", "usd", "krw", "jpy", "cnh",
+)
+NON_STOCK_EXACT = (
+    "금", "은", "구리", "원자재", "달러", "환율", "유로", "엔", "위안", "원", "암호화폐",
+)
+
+
+def is_non_stock(name):
+    text = re.sub(r"[*`\s]", "", str(name or "")).lower()
+    text = re.sub(r"\(.*?\)", "", text)
+
+    if not text or text == "-":
+        return False
+
+    if text in NON_STOCK_EXACT:
+        return True
+
+    return any(part in text for part in NON_STOCK_PARTS)
+
+
+def drop_non_stock_rows(markdown):
+    """'종목' 열이 있는 표에서 지수·환율·원자재 줄을 지웁니다."""
+
+    lines = str(markdown or "").split("\n")
+    out = []
+    col = None
+
+    for line in lines:
+        stripped = line.strip()
+
+        if not stripped.startswith("|"):
+            col = None
+            out.append(line)
+            continue
+
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+
+        if col is None:
+            header = [c.replace("*", "").strip() for c in cells]
+
+            if header[:2] == ["순위", "종목"]:
+                col = 1
+            elif header and header[0] == "종목":
+                col = 0
+            else:
+                col = -1
+
+            out.append(line)
+            continue
+
+        if col >= 0 and not re.fullmatch(r"[\s:|-]+", stripped):
+            if col < len(cells) and is_non_stock(cells[col]):
+                continue
+
+        out.append(line)
+
+    return "\n".join(out)
+
 
 
 def insert_compact_index_table(short, table_md):
@@ -2675,7 +2739,7 @@ def run_one_part(part, number, total, ctx, status):
     )
 
     # 정상 완료된 파트만 즉시 저장
-    state["pm_detail_parts"][part["key"]] = result
+    state["pm_detail_parts"][part["key"]] = drop_non_stock_rows(result)
 
     rebuild_long_report()
 
@@ -2774,11 +2838,11 @@ def run_pipeline(mode, status):
 
         status.write("⏳ 붙여넣은 원문을 압축하는 중...")
 
-        state["pm_short"] = call_groq(
+        state["pm_short"] = drop_non_stock_rows(call_groq(
             prompt,
             max_tokens=GROQ_COMPRESS_MAX_TOKENS,
             stage="원문 압축",
-        )
+        ))
 
         # 붙여넣은 원문의 압축본에도 헤드라인 적용 (상세 리포트는 건드리지 않음)
         run_headline_step(status, full=False)
@@ -2950,9 +3014,11 @@ def run_pipeline(mode, status):
         or []
     )
 
-    state["pm_short"] = insert_compact_index_table(
-        short,
-        compact_index_table(index_rows),
+    state["pm_short"] = drop_non_stock_rows(
+        insert_compact_index_table(
+            short,
+            compact_index_table(index_rows),
+        )
     )
 
     # 한 줄 요약을 스타 기자 헤드라인으로 교체 (실패해도 계속 진행)
@@ -3219,12 +3285,10 @@ def md_to_html(markdown):
 
 
 def copy_buttons(markdown):
-    markdown = emphasize(markdown)
     payload = json.dumps(
         {
             "md": markdown,
-            "html": bold_headings(md_to_html(markdown)),
-            "kakao": to_kakao_text(markdown),
+            "html": md_to_html(markdown),
         },
         ensure_ascii=False,
     ).replace("</", "<\\/")
@@ -3232,7 +3296,6 @@ def copy_buttons(markdown):
     page = f"""
     <button id="rich">복사 (서식 포함)</button>
     <button id="plain">복사 (마크다운)</button>
-    <button id="kakao">복사 (카카오톡용)</button>
     <span id="status"></span>
 
     <script>
@@ -3270,19 +3333,10 @@ def copy_buttons(markdown):
             s.textContent = ' 복사 실패';
         }}
     }};
-    document.getElementById('kakao').onclick = async () => {{
-       try {{
-            await navigator.clipboard.writeText(P.kakao);
-            s.textContent = ' 복사 완료 (카카오톡용)';
-        }} catch (e) {{
-            s.textContent = ' 복사 실패';
-        }}
-    }};
     </script>
     """
 
     components.html(page, height=45)
-    render_card_images(markdown, "장전시황")
 
 
 # ===============================================================
