@@ -33,7 +33,12 @@ def _row_text(header, row):
     pct_index = next((i for i, h in enumerate(header) if "등락" in h), None)
 
     if pct_index is not None and 1 <= pct_index < len(row):
-        main = " ".join(c for c in row[:pct_index] if c and c != "-")
+        head = [c for c in row[:pct_index] if c and c != "-"]
+
+        if head:
+            head[0] = f"[{head[0]}]"
+
+        main = " ".join(head)
         rest = [c for c in row[pct_index + 1:] if c and c != "-"]
         text = f"{main} ({row[pct_index]})"
 
@@ -83,7 +88,13 @@ def to_kakao_text(markdown):
             if out and out[-1] != "":
                 out.append("")
 
-            out.append(title)
+            level = len(stripped) - len(stripped.lstrip("#"))
+            out.append(f"【{title}】" if level >= 3 else title)
+            continue
+
+        # 줄 전체가 굵은 글씨인 이슈 제목은 ▶ 로 눈에 띄게
+        if stripped.startswith("**"):
+            out.append("▶ " + _clean(stripped))
             continue
 
         if stripped.startswith(">"):
