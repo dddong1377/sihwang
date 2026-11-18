@@ -4698,6 +4698,7 @@ def copy_buttons(markdown):
         {
             "md": markdown,
             "html": md_to_html(markdown),
+            "kakao": to_kakao_text(markdown),
         },
         ensure_ascii=False
     ).replace("</", "<\\/")
