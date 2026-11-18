@@ -10,6 +10,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
+from kakao_text import to_kakao_text
 
 import requests
 import streamlit as st
