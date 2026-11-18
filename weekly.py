@@ -1931,6 +1931,7 @@ def copy_buttons(markdown):
     page = f"""
     <button id="rich">복사 (서식 포함)</button>
     <button id="plain">복사 (마크다운)</button>
+    <button id="kakao">복사 (카카오톡용)</button>
     <span id="status"></span>
 
     <script>
