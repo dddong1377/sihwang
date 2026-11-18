@@ -109,7 +109,8 @@ DIRECTIONS = ("🔺", "🔻", "➖")
 GROUPS = [
     ("summary", ("지수 현황", "해외 지수", "지수 한눈에", "성적표")),
     ("watch", ("오늘 주목 종목", "강세·관심 테마")),
-    ("end", ("체크 포인트", "일정", "핵심 키워드")),
+    ("move", ("급등 특징주", "급락 특징주")),
+    ("end", ("뜨는 테마", "일정", "핵심 키워드")),
 ]
 
 
@@ -566,14 +567,16 @@ function paginate() {
     }
     i = n;
   }
-  while (i < secs.length) {
-    const g = secs[i].group;
-    let n = 1;
-    if (g && g !== 'summary') { while (i + n < secs.length && secs[i + n].group === g) n++; }
-    if (n > 1 && emit(secs.slice(i, i + n), false, secs[i].title)) { i += n; continue; }
-    const sec = secs[i];
-    if (!emit([sec], false, sec.title)) splitSection(sec);
-    i++;
+  const used = new Set();
+  for (let k = 0; k < i; k++) used.add(k);
+  for (let k = i; k < secs.length; k++) {
+    if (used.has(k)) continue;
+    const g = secs[k].group;
+    const idx = [k];
+    if (g && g !== 'summary') { for (let j = k + 1; j < secs.length; j++) if (!used.has(j) && secs[j].group === g) idx.push(j); }
+    if (idx.length > 1 && emit(idx.map(j => secs[j]), false, secs[k].title)) { idx.forEach(j => used.add(j)); continue; }
+    used.add(k);
+    if (!emit([secs[k]], false, secs[k].title)) splitSection(secs[k]);
   }
   return pages;
 }
