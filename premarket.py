@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 from kakao_text import to_kakao_text
 from emphasis import emphasize, bold_headings
+from card_images import render_card_images
 
 import requests
 import streamlit as st
@@ -3281,6 +3282,7 @@ def copy_buttons(markdown):
     """
 
     components.html(page, height=45)
+    render_card_images(markdown, "장전시황")
 
 
 # ===============================================================
