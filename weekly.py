@@ -1923,7 +1923,8 @@ def md_to_html(markdown):
 
 def copy_buttons(markdown):
     payload = json.dumps(
-        {"md": markdown, "html": md_to_html(markdown)},
+        {"md": markdown, "html": md_to_html(markdown)
+        "kakao": to_kakao_text(markdown),},
         ensure_ascii=False,
     ).replace("</", "<\\/")
 
