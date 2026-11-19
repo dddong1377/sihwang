@@ -16,6 +16,9 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from archive import save_post, list_posts, load_post
+from card_images import render_card_images
+from emphasis import bold_headings, emphasize
+from kakao_text import to_kakao_text
 from autorun import (
     auto_requested,
     finish_auto,
@@ -3284,11 +3287,16 @@ def md_to_html(markdown):
     return "\n".join(output)
 
 
-def copy_buttons(markdown):
+def copy_buttons(markdown, images=False):
+    """복사 버튼 3종(서식 포함·마크다운·카카오톡용) + (선택) 카드 이미지 만들기."""
+
+    markdown = emphasize(markdown)
+
     payload = json.dumps(
         {
             "md": markdown,
-            "html": md_to_html(markdown),
+            "html": bold_headings(md_to_html(markdown)),
+            "kakao": to_kakao_text(markdown),
         },
         ensure_ascii=False,
     ).replace("</", "<\\/")
@@ -3296,6 +3304,7 @@ def copy_buttons(markdown):
     page = f"""
     <button id="rich">복사 (서식 포함)</button>
     <button id="plain">복사 (마크다운)</button>
+    <button id="kakao">복사 (카카오톡용)</button>
     <span id="status"></span>
 
     <script>
@@ -3333,10 +3342,23 @@ def copy_buttons(markdown):
             s.textContent = ' 복사 실패';
         }}
     }};
+
+    document.getElementById('kakao').onclick = async () => {{
+        try {{
+            await navigator.clipboard.writeText(P.kakao);
+            s.textContent = ' 카카오톡용 복사 완료';
+
+        }} catch (e) {{
+            s.textContent = ' 복사 실패';
+        }}
+    }};
     </script>
     """
 
     components.html(page, height=45)
+
+    if images:
+        render_card_images(markdown, "장전시황")
 
 
 # ===============================================================
@@ -3866,7 +3888,7 @@ def main():
         short = state.get("pm_short", "").strip()
 
         if short:
-            copy_buttons(short)
+            copy_buttons(short, images=True)
 
             # ▼▼▼ 여기에 추가 (들여쓰기 공백 12칸) ▼▼▼
             if st.button("💾 오늘 장전 시황글 저장 (주간 정리용)", key="save_pre_btn"):
