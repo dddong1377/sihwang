@@ -1070,7 +1070,8 @@ def fetch_index_candles(code, count=10, cursor=None):
 
     if not response.ok:
         raise RuntimeError(
-            f"토스 지수 조회 실패({code}, HTTP {response.status_code})"
+            f"토스 지수 조회 실패({code}, HTTP {response.status_code}): "
+            f"{response.text[:200]}"
         )
 
     try:
