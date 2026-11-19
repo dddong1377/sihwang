@@ -518,6 +518,22 @@ def get_feed():
 
 
 def api_get(path, params=None):
+    """토큰이 무효화(401)되면 저장된 토큰을 지우고 새로 받아 한 번 더 시도합니다."""
+
+    try:
+        return _api_get(path, params)
+
+    except TossError as error:
+        text = str(error)
+
+        if "HTTP 401" in text or "token-revoked" in text:
+            get_token.clear()
+            return _api_get(path, params)
+
+        raise
+
+
+def _api_get(path, params=None):
     """토스증권 API GET 요청 (연결 오류·5xx는 최대 3회 재시도)."""
 
     token = get_token(CLIENT_ID, CLIENT_SECRET)
