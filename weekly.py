@@ -1574,10 +1574,6 @@ def build_report(monday, headline, days, week, issues, flow, checks, schedule, a
         "",
         movers_table_md(week["plunge"], show_note),
         "",
-        "### 📌 주간 주목 종목 TOP 3 (언급 일수 기준)",
-        "",
-        watch_table_md(week["watch"], show_note),
-        "",
         "### 📆 다음 주 장 체크 일정",
         "",
     ]
@@ -1637,8 +1633,8 @@ def run_weekly(monday, status):
     week = collect_week(days)
 
     status.write(
-        f"✅ 급등 {len(week['surge'])}·급락 {len(week['plunge'])}·"
-        f"주목 {len(week['watch'])}종목 정리"
+        f"✅ 급등 {len(week['surge'])}·급락 {len(week['plunge'])}"
+        f"종목 정리"
     )
 
     # 0) 지수 장마감 등락률 (토스증권)
@@ -2212,7 +2208,7 @@ def main():
 
     with st.container(border=True):
         st.checkbox(
-            "급등·급락·주목 종목 표에 '비고' 열 포함",
+            "급등·급락 표에 '비고' 열 포함",
             value=True,
             key="wk_show_note",
             help="생성 버튼을 누를 때 적용됩니다.",
@@ -2220,8 +2216,7 @@ def main():
 
         st.caption(
             "비고에는 내가 쓴 시황글에 적힌 종목별 이유(40자 이내)를 그대로 옮깁니다. "
-            "급등·급락은 오후 시황글의 급등·급락 특징주 표 '이유', "
-            "주목 종목은 장전 시황글의 주목 종목 표 '이유'입니다. "
+            "오후 시황글의 급등·급락 특징주 표 '이유'를 옮깁니다. "
             "시황글에 이유를 적지 않은 종목은 '-'로 나오므로, 비고가 대부분 '-'가 될 것 같으면 체크를 해제하세요."
         )
 
