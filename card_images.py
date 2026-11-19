@@ -5,12 +5,40 @@
 - 표는 글자 크기를 자동으로 줄여 항상 한 줄로 맞춥니다.
 """
 
+import base64
 import json
 import re
+from functools import lru_cache
+from pathlib import Path
 
 import streamlit.components.v1 as components
 
 from kakao_text import KEYWORD_COUNT, _pick_keywords
+
+
+# ---------------------------------------------------------------
+# 0. 글꼴 (나눔스퀘어 네오) — fonts 폴더의 파일을 이미지 안에 내장
+# ---------------------------------------------------------------
+
+FONT_DIR = Path(__file__).resolve().parent / "fonts"
+FONT_FILES = {"rg": "NanumSquareNeo-Rg.ttf", "bd": "NanumSquareNeo-Bd.ttf", "xb": "NanumSquareNeo-Xb.ttf"}
+
+
+@lru_cache(maxsize=1)
+def _font_data():
+    """{'rg': data URL, 'bd': data URL}. 파일이 없으면 빈 값(기본 글꼴로 대체)."""
+
+    out = {}
+
+    for key, name in FONT_FILES.items():
+        path = FONT_DIR / name
+
+        if not path.exists():
+            return {}
+
+        out[key] = "data:font/ttf;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+
+    return out
 
 
 # ---------------------------------------------------------------
@@ -97,6 +125,42 @@ def parse_markdown(markdown):
         else:
             current["lines"].append(raw)
 
+    # '📝 주간 흐름' 문단은 한 줄 요약·성적표와 떼어 별도 섹션으로
+    flow_re = re.compile(r"^\s*📝?\s*\**주간 흐름\**\s*[:：]\s*(.+)$")
+    flows = []
+    kept_cover = []
+
+    for raw in cover_lines:
+        m = flow_re.match(raw)
+        if m:
+            flows.append(m.group(1))
+        else:
+            kept_cover.append(raw)
+
+    cover_lines = kept_cover
+    new_sections = []
+
+    for sec in sections:
+        kept = []
+
+        for raw in sec["lines"]:
+            m = flow_re.match(raw)
+            if m:
+                flows.append(m.group(1))
+            else:
+                kept.append(raw)
+
+        sec["lines"] = kept
+        new_sections.append(sec)
+
+        if flows and not any(x["title"].endswith("주간 흐름") for x in new_sections):
+            new_sections.append({"title": "📝 주간 흐름", "lines": ["", flows[-1]]})
+
+    if flows and not any(x["title"].endswith("주간 흐름") for x in new_sections):
+        new_sections.insert(0, {"title": "📝 주간 흐름", "lines": ["", flows[-1]]})
+
+    sections = new_sections
+
     summary = " ".join(
         raw.strip().lstrip(">").strip() for raw in cover_lines if raw.strip()
     )
@@ -107,9 +171,9 @@ def parse_markdown(markdown):
 
 DIRECTIONS = ("🔺", "🔻", "➖")
 GROUPS = [
-    ("summary", ("지수 현황", "해외 지수", "지수 한눈에", "성적표")),
-    ("watch", ("오늘 주목 종목", "강세·관심 테마")),
-    ("move", ("급등 특징주", "급락 특징주")),
+    ("summary", ("지수 현황", "해외 지수", "지수 한눈에", "성적표", "주간 흐름")),
+    ("watch", ("오늘 주목 종목", "강세·관심 테마", "다음 주 장 체크 일정", "다음 주 관전 포인트")),
+    ("move", ("급등 특징주", "급락 특징주", "주간 급등", "주간 급락")),
     ("end", ("뜨는 테마", "일정", "핵심 키워드")),
 ]
 
@@ -265,7 +329,14 @@ const W = 720, H = 960, MX = 22, MY = 30, CPX = 32, CPT = 30, CPB = 30;
 const MAXH = H - 2 * MY;              // 카드가 가질 수 있는 최대 높이
 const CW = W - 2 * MX - 2 * CPX;      // 글이 들어가는 폭
 const SEP = 40;                       // 같은 카드 안 항목 사이 간격
-const FONT = "'Pretendard','Malgun Gothic','Apple SD Gothic Neo','Noto Sans KR','Noto Sans CJK KR','Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji',sans-serif";
+const FONT = "'NanumSquareNeo','Pretendard','Malgun Gothic','Apple SD Gothic Neo','Noto Sans KR','Noto Sans CJK KR','Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji',sans-serif";
+const FACES = [];
+if (D.fonts && D.fonts.rg && D.fonts.bd && D.fonts.xb) {
+  [['400', D.fonts.rg], ['700', D.fonts.bd], ['800', D.fonts.xb]].forEach(([w, u]) => {
+    const f = new FontFace('NanumSquareNeo', 'url(' + u + ')', {weight: w});
+    document.fonts.add(f); FACES.push(f.load());
+  });
+}
 const mcv = document.createElement('canvas');
 const mctx = mcv.getContext('2d');
 
@@ -273,7 +344,7 @@ function nowKST() {
   return new Date().toLocaleTimeString('en-GB', {timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'});
 }
 function stamp(t) { return D.token ? String(t).split(D.token).join(nowKST()) : String(t); }
-function fnt(px, bold) { return (bold ? 'bold ' : '') + px + 'px ' + FONT; }
+function fnt(px, bold) { return (bold === 2 ? '800 ' : bold ? 'bold ' : '') + px + 'px ' + FONT; }
 function tw(t, px, bold) { mctx.font = fnt(px, bold); return mctx.measureText(t).width; }
 
 // ----- 글 배치: 조각(굵기·색이 다른 글)을 폭에 맞춰 줄로 나눔 -----
@@ -330,9 +401,9 @@ function blockHeading(title, underline) {
   const hasEmoji = /^[\p{Extended_Pictographic}]/u.test(title.trim());
   const bar = hasEmoji ? 0 : 20;
   let px = 31;
-  while (px > 24 && tw(stamp(title), px, true) + bar > CW) px -= 1;
+  while (px > 24 && tw(stamp(title), px, 2) + bar > CW) px -= 1;
   const lh = Math.round(px * 1.3);
-  const lines = layoutText([{t: title, bold: true}], CW - bar, px);
+  const lines = layoutText([{t: title, bold: 2}], CW - bar, px);
   const h = lines.length * lh + (underline ? 14 + 2 + 20 : 18);
   return {h, draw(ctx, x, y) {
     if (bar) { ctx.fillStyle = '#2563EB'; rrect(ctx, x, y + 3, 8, lh - 6, 4); ctx.fill(); }
@@ -376,8 +447,8 @@ function blockIssue(b, isLast) {
   const dirW = b.dir ? 34 : 0;
   const avail = CW - BW - GAPB - PADL - PADR - dirW;
   let px = 22, lines;
-  while (px > 19 && tw(stamp(b.title), px, true) > avail) px -= 1;
-  lines = layoutText([{t: b.title, bold: true}], avail, px);
+  while (px > 19 && tw(stamp(b.title), px, 2) > avail) px -= 1;
+  lines = layoutText([{t: b.title, bold: 2}], avail, px);
   const lh = Math.round(px * 1.35);
   const barH = Math.max(52, lines.length * lh + 18);
   const ls = b.items.map(it => itemLayout(it, 20, 1.45, 10));
@@ -509,7 +580,7 @@ function sectionPiece(title, line, laid, cont) {
 function coverPiece(sumPx) {
   const t = blockParagraph([[D.cover.title, false]], 20, '#64748B', 1.35);
   const hd = blockHeading('📌 한 줄 요약', false);
-  const sm = blockParagraph([[D.cover.summary, true]], sumPx, INK, 1.45);
+  const sm = blockParagraph([[D.cover.summary, 2]], sumPx, INK, 1.45);
   return {h: t.h + 12 + hd.h + sm.h, draw(ctx, x, y) {
     t.draw(ctx, x, y); hd.draw(ctx, x, y + t.h + 12); sm.draw(ctx, x, y + t.h + 12 + hd.h);
   }};
@@ -595,7 +666,7 @@ function drawPage(page, scale) {
   });
   return cv;
 }
-window.__MTNW = {paginate, drawPage};
+window.__MTNW = {paginate, drawPage, ready: Promise.all(FACES)};
 
 // ----- ZIP (압축 없이 묶기) -----
 const CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
@@ -632,6 +703,7 @@ async function make() {
   const btn = document.getElementById('mk'), st = document.getElementById('status'), prev = document.getElementById('prev');
   try {
     btn.disabled = true; st.textContent = ' 이미지를 만드는 중...'; prev.innerHTML = '';
+    try { await Promise.all(FACES); } catch (e) {}
     if (document.fonts && document.fonts.ready) await document.fonts.ready;
     const pages = paginate(); const files = [];
     for (let i = 0; i < pages.length; i++) {
@@ -667,6 +739,7 @@ def build_data(markdown, prefix, now_token="", scale=1):
         "token": now_token or "",
         "scale": scale,
         "cover": {"title": title, "summary": summary},
+        "fonts": _font_data(),
         "sections": [],
     }
 
@@ -675,6 +748,9 @@ def build_data(markdown, prefix, now_token="", scale=1):
 
     for section in sections:
         sec_title = section["title"]
+
+        if "주간 주목 종목" in sec_title:
+            continue
         lines = section["lines"]
 
         # 핵심 키워드는 카톡용과 같이 5개만 (본문에 많이 나온 순)
