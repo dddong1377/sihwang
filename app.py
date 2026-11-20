@@ -30,10 +30,10 @@ pages = [
         url_path="report_digest",
     ),
     st.Page(
-        "arena.py",
+        "Arena.py",
         title="주식 대결",
         icon="🥊",
-        url_path="arena",
+        url_path="Arena",
     ),
 ]
 
