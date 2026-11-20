@@ -27,6 +27,12 @@ KST = ZoneInfo("Asia/Seoul")
 ARENA_FILE = "mtnw_arena.json"
 LOCAL_FILE = os.path.join(tempfile.gettempdir(), "mtnw_arena.json")
 
+DEFAULT_PRIZES = (
+    "칸쵸", "씨리얼", "치킨버거", "계란샌드위치", "프로틴바", "칼로리바",
+    "레몬사이다식초", "제로펩시", "제로콜라", "포카리스웨터", "밀크티",
+    "종합 샌드위치", "모둠과일",
+)
+
 NICK_PATTERN = re.compile(r"[0-9A-Za-z가-힣_]{2,12}")
 MAX_FAILS = 5
 LOCK_MINUTES = 5
@@ -68,7 +74,7 @@ def blank():
         "users": {},
         "rounds": {},
         "picks": {},
-        "prizes": {"list": [], "current": None},
+        "prizes": {"list": list(DEFAULT_PRIZES), "current": None},
     }
 
 
