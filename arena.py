@@ -2,16 +2,20 @@ import datetime
 import hmac
 import os
 import random
+import sys
 import time
+import traceback
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import streamlit as st
-st.sidebar.success("✅ MTNW 배포 테스트 V5")
-import sys
-from pathlib import Path
 
-# DEPLOY CHECK: MTNW ARENA 2026-11-20 V4
+# set_page_config 는 이 페이지에서 가장 먼저 실행되는 화면 명령이어야 합니다.
+# (아래의 어떤 st.* 호출보다 먼저 둡니다. 오류 안내도 이 줄 뒤에서만 표시합니다.)
+st.set_page_config(page_title="MTNW 주식 대결 (베타)", layout="wide")
+
 ROOT = Path(__file__).resolve().parent
+
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -20,15 +24,16 @@ try:
     import arena_store as store
     from weekly_market import candle_closes, fetch_cap_top
 except Exception as exc:
-    import traceback
-    st.error(f"[MTNW ARENA V4] 로딩 실패: {type(exc).__name__}: {exc}")
-    st.code(f"실행 파일: {Path(__file__).resolve()}\n"
-            f"arena_logic.py 존재: {(ROOT / 'arena_logic.py').is_file()}\n"
-            f"arena_store.py 존재: {(ROOT / 'arena_store.py').is_file()}")
+    st.error(f"주식 대결 파일을 불러오지 못했습니다: {type(exc).__name__}: {exc}")
+    st.code(
+        f"이 파일 위치: {Path(__file__).resolve()}\n"
+        f"같은 폴더의 .py 파일: {', '.join(sorted(p.name for p in ROOT.glob('*.py')))}\n"
+        f"arena_logic.py 있음: {(ROOT / 'arena_logic.py').is_file()}\n"
+        f"arena_store.py 있음: {(ROOT / 'arena_store.py').is_file()}",
+        language="text",
+    )
     st.code(traceback.format_exc(), language="text")
     st.stop()
-
-st.set_page_config(page_title="MTNW 주식 대결 (베타)", layout="wide")
 
 KST = ZoneInfo("Asia/Seoul")
 WEEKDAYS = "월화수목금토일"
@@ -270,34 +275,100 @@ def latest_standings(data):
     return None, None
 
 
+def completed_weeks(data, now):
+    """주간 우승·꼴찌가 확정된 주의 [(월요일, 순위)] 최근 순."""
+
+    mondays = {
+        logic.week_start(datetime.date.fromisoformat(key)) for key in data["rounds"]
+    }
+
+    found = []
+
+    for monday in sorted(mondays, reverse=True):
+        if logic.week_complete(data, monday, now):
+            standing = logic.week_standings(data, monday)
+
+            if standing:
+                found.append((monday, standing))
+
+    return found
+
+
+def week_label(monday):
+    friday = monday + datetime.timedelta(days=4)
+
+    return f"{monday.month}/{monday.day}~{friday.month}/{friday.day}"
+
+
+def prize_line(current):
+    if current and current.get("name"):
+        how = "🎲 랜덤 추첨" if current.get("how") == "random" else "✋ 관리자 지정"
+        return f"**{current['name']}**", how
+
+    return "준비 중", ""
+
+
 def render_prize(data):
-    current = data["prizes"].get("current")
+    now = now_kst()
+    col_day, col_week = st.columns(2)
 
-    with st.container(border=True):
-        if current and current.get("name"):
-            how = "🎲 랜덤 추첨" if current.get("how") == "random" else "✋ 관리자 지정"
-            st.markdown(f"### 🎁 이번 우승 상품: **{current['name']}**")
-            st.caption(how)
-        else:
-            st.markdown("### 🎁 우승 상품")
-            st.caption("상품은 준비 중입니다.")
+    with col_day:
+        with st.container(border=True):
+            name, how = prize_line(data["prizes"].get("current"))
+            st.markdown(f"### 📅 일간 우승 상품: {name}")
 
-        st.markdown("**🍀 꼴찌가 상품을 쏩니다!**")
+            if how:
+                st.caption(how)
 
-        key, result = latest_standings(data)
+            st.markdown("**🍀 꼴찌가 상품을 쏩니다!**")
 
-        if result:
-            day = datetime.date.fromisoformat(key)
+            key, result = latest_standings(data)
 
-            if result["tied_all"]:
-                st.caption(f"{day_text(day)}: 참가자 전원이 같은 성적이라 꼴찌 없이 마무리됐어요.")
+            if result:
+                day = datetime.date.fromisoformat(key)
+
+                if result["tied_all"]:
+                    st.caption(f"{day_text(day)}: 참가자 전원이 같은 성적이라 꼴찌 없이 마무리됐어요.")
+                else:
+                    st.caption(
+                        f"{day_text(day)} 우승 {', '.join(result['first'])} · "
+                        f"꼴찌 {', '.join(result['last'])} 🥄"
+                    )
             else:
+                st.caption("매일 결과가 확정되면 그날의 우승자와 꼴찌가 표시됩니다.")
+
+    with col_week:
+        with st.container(border=True):
+            name, how = prize_line(data["prizes"].get("weekly_current"))
+            st.markdown(f"### 🏅 주간 우승 상품: {name}")
+
+            if how:
+                st.caption(how)
+
+            st.markdown("**🍀 꼴찌가 상품을 쏩니다!**")
+
+            weeks = completed_weeks(data, now)
+
+            if weeks:
+                monday, standing = weeks[0]
+
+                if standing["tied_all"]:
+                    st.caption(f"{week_label(monday)} 주간: 전원 같은 성적이라 꼴찌 없이 마무리됐어요.")
+                else:
+                    st.caption(
+                        f"{week_label(monday)} 주간 우승 {', '.join(standing['first'])} · "
+                        f"꼴찌 {', '.join(standing['last'])} 🥄"
+                    )
+            else:
+                st.caption("금요일 장마감(15:40) 이후 그 주의 우승자와 꼴찌가 확정됩니다.")
+
+            current = logic.week_standings(data, logic.week_start(now.date()))
+
+            if current and not logic.week_complete(data, logic.week_start(now.date()), now):
                 st.caption(
-                    f"{day_text(day)} 우승 {', '.join(result['first'])} · "
-                    f"꼴찌 {', '.join(result['last'])} 🥄"
+                    f"이번 주 진행 중 · 현재 1위 {', '.join(current['first'])} "
+                    f"({current['rows'][0]['hits']}개 적중)"
                 )
-        else:
-            st.caption("매일 결과가 확정되면 그날의 우승자와 꼴찌가 여기에 표시됩니다.")
 
 
 # ===============================================================
@@ -315,7 +386,8 @@ def render_play(data, nick, day, error):
     st.markdown(f"#### {day_text(day)} 대결")
     st.caption(
         f"투표 시간 {day.month}/{day.day} 08:00 ~ 08:59 (09:00이 되면 바로 마감, 그 전에는 몇 번이든 바꿀 수 있어요) · "
-        "승패 기준: 그날 장마감(15:40 이후 확정) 등락률이 더 높은 종목"
+        "승패 기준: 그날 장마감(15:40 이후 확정) 등락률이 더 높은 종목 · "
+        "매일 일간 우승자·꼴찌, 금요일에는 한 주를 합산한 주간 우승자·꼴찌가 정해져요"
     )
 
     if phase == "before":
@@ -476,6 +548,23 @@ def render_results(data, nick):
         else:
             st.caption("아직 판정이 끝난 예측이 없습니다. 결과는 대결일 장마감(15:40) 이후에 확정됩니다.")
 
+    weeks = completed_weeks(data, now)
+
+    if weeks:
+        st.markdown("#### 🏅 주간 토너먼트 결과")
+
+        for monday, standing in weeks[:4]:
+            if standing["tied_all"]:
+                headline = "전원 같은 성적이라 꼴찌 없이 마무리"
+            else:
+                headline = (
+                    f"🥇 우승 {', '.join(standing['first'])} · "
+                    f"🥄 꼴찌 {', '.join(standing['last'])} (꼴찌가 상품을 쏩니다)"
+                )
+
+            with st.expander(f"{week_label(monday)} 주간 · {headline}", expanded=(monday == weeks[0][0])):
+                st.dataframe(pd.DataFrame(week_table_rows(standing)), hide_index=True, use_container_width=True)
+
     st.markdown("#### 최근 대결 결과")
 
     days = sorted(data["rounds"], reverse=True)[:7]
@@ -546,20 +635,66 @@ def render_results(data, nick):
 # 탭 3: 랭킹
 # ===============================================================
 
+def week_table_rows(standing):
+    rows = []
+
+    for rank, row in enumerate(standing["rows"], start=1):
+        item = {"순위": rank, "닉네임": row["nick"]}
+
+        for offset, name in enumerate("월화수목금"):
+            cell = row["days"].get(offset)
+            item[name] = f"{cell[0]}/{cell[0] + cell[1]}" if cell else "-"
+
+        item["적중 합계"] = row["hits"]
+        item["오답"] = row["misses"]
+        rows.append(item)
+
+    return rows
+
+
+def render_week_tournament(data):
+    import pandas as pd
+
+    now = now_kst()
+    monday = logic.week_start(now.date())
+    standing = logic.week_standings(data, monday)
+    complete = logic.week_complete(data, monday, now)
+
+    st.markdown(f"##### 이번 주 ({week_label(monday)}) {'· 확정' if complete else '· 진행 중'}")
+
+    if not standing:
+        st.caption("아직 이번 주에 판정이 끝난 대결이 없습니다. 하루 결과가 확정되면 합산이 시작됩니다.")
+    else:
+        if complete and not standing["tied_all"]:
+            st.success(
+                f"🥇 주간 우승 {', '.join(standing['first'])} · "
+                f"🥄 꼴찌 {', '.join(standing['last'])} (꼴찌가 상품을 쏩니다)"
+            )
+
+        st.dataframe(pd.DataFrame(week_table_rows(standing)), hide_index=True, use_container_width=True)
+
+    st.caption(
+        "월~금 일간 대결의 맞힌 개수를 합산해 순위를 정합니다(많은 순, 같으면 오답이 적은 순). "
+        "표의 월~금 칸은 '맞힌 개수/판정된 개수'입니다. 금요일 장마감(15:40) 이후 우승자와 꼴찌가 확정됩니다."
+    )
+
+
 def render_ranking(data):
     import pandas as pd
 
     today = now_kst().date()
 
+    tab_week, tab_month, tab_all = st.tabs(["🏅 주간 토너먼트", "월간 (최근 30일)", "누적"])
+
+    with tab_week:
+        render_week_tournament(data)
+
     views = (
-        ("주간 (최근 7일)", "week", (today - datetime.timedelta(days=7)).isoformat()),
-        ("월간 (최근 30일)", "month", (today - datetime.timedelta(days=30)).isoformat()),
-        ("누적", "all", None),
+        (tab_month, "month", (today - datetime.timedelta(days=30)).isoformat()),
+        (tab_all, "all", None),
     )
 
-    tabs = st.tabs([view[0] for view in views])
-
-    for tab, (_, mode, since) in zip(tabs, views):
+    for tab, mode, since in views:
         with tab:
             minimum = logic.MIN_RANKED[mode]
             ranked, waiting = logic.ranking(logic.user_stats(data, since), minimum)
@@ -591,7 +726,7 @@ def render_ranking(data):
                     )
 
     st.caption(
-        "순위는 참여 횟수가 적은 사람이 우연히 100%가 되어도 1위가 되지 않도록 보정한 점수 순입니다. "
+        "월간·누적 순위는 참여 횟수가 적은 사람이 우연히 100%가 되어도 1위가 되지 않도록 보정한 점수 순입니다. "
         "무승부·무효·선택하지 않은 대결은 집계하지 않습니다."
     )
 
@@ -647,6 +782,14 @@ def render_admin(data):
         except Exception as error:
             st.error(f"저장 실패: {str(error)[:150]}")
 
+    target = st.radio(
+        "어느 토너먼트의 상품을 바꿀까요?",
+        ["일간 토너먼트", "주간 토너먼트"],
+        horizontal=True,
+        key="arena_prize_target",
+    )
+    slot = "current" if target == "일간 토너먼트" else "weekly_current"
+
     if not items:
         st.caption("목록을 저장하면 랜덤 뽑기와 직접 선택을 쓸 수 있습니다.")
     else:
@@ -659,7 +802,7 @@ def render_admin(data):
                 chosen = random.SystemRandom().choice(items)
 
                 def mutate_random(d):
-                    d["prizes"]["current"] = {"name": chosen, "how": "random", "at": now_kst().isoformat()}
+                    d["prizes"][slot] = {"name": chosen, "how": "random", "at": now_kst().isoformat()}
 
                 try:
                     store.update(mutate_random)
@@ -675,7 +818,7 @@ def render_admin(data):
 
             if st.button("이 상품으로 지정", key="arena_prize_set", use_container_width=True):
                 def mutate_set(d):
-                    d["prizes"]["current"] = {"name": selected, "how": "manual", "at": now_kst().isoformat()}
+                    d["prizes"][slot] = {"name": selected, "how": "manual", "at": now_kst().isoformat()}
 
                 try:
                     store.update(mutate_set)
@@ -683,9 +826,9 @@ def render_admin(data):
                 except Exception as error:
                     st.error(f"저장 실패: {str(error)[:150]}")
 
-    if prizes.get("current") and st.button("상품 표시 지우기", key="arena_prize_clear"):
+    if prizes.get(slot) and st.button(f"{target} 상품 표시 지우기", key="arena_prize_clear"):
         try:
-            store.update(lambda d: d["prizes"].__setitem__("current", None))
+            store.update(lambda d: d["prizes"].__setitem__(slot, None))
             st.rerun()
         except Exception as error:
             st.error(f"저장 실패: {str(error)[:150]}")
@@ -777,3 +920,4 @@ def main():
 
 
 main()
+
