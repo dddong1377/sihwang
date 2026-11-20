@@ -1044,6 +1044,37 @@ def candle_date(candle):
     return dt.date()
 
 
+def toss_public_headers(code):
+    """토스 공개 API(wts-info-api)가 요구하는 브라우저식 헤더. 장전 시황 페이지와 같은 값을 씁니다."""
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://www.tossinvest.com",
+        "Referer": f"https://www.tossinvest.com/indices/{code}",
+        "app-version": (
+            secret("TOSS_INDICATOR_APP_VERSION").strip()
+            or secret("TOSS_NEWS_APP_VERSION").strip()
+            or secret("TOSS_CALENDAR_APP_VERSION").strip()
+            or "v261106.2137"
+        ),
+    }
+
+    tab_id = (
+        secret("TOSS_INDICATOR_BROWSER_TAB_ID").strip()
+        or secret("TOSS_NEWS_BROWSER_TAB_ID").strip()
+        or secret("TOSS_CALENDAR_BROWSER_TAB_ID").strip()
+    )
+
+    if tab_id:
+        headers["browser-tab-id"] = tab_id
+
+    return headers
+
+
 def fetch_index_candles(code, count=10, cursor=None):
     params = {"count": count, "useAdjustedRate": "true"}
 
@@ -1054,15 +1085,7 @@ def fetch_index_candles(code, count=10, cursor=None):
         response = requests.get(
             f"{TOSS_INFO_BASE}/api/v1/c-chart/kr-s/{code}/day:1",
             params=params,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-                ),
-                "Accept": "application/json, text/plain, */*",
-                "Origin": "https://www.tossinvest.com",
-                "Referer": f"https://www.tossinvest.com/indices/{code}",
-            },
+            headers=toss_public_headers(code),
             timeout=(5, 15),
         )
     except requests.RequestException as error:
