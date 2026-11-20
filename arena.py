@@ -6,25 +6,26 @@ import time
 from zoneinfo import ZoneInfo
 
 import streamlit as st
-
-# MTNW ARENA FIX 2026-11-20 V3 — 이 표시로 배포 버전을 식별할 수 있습니다.
 import sys
 from pathlib import Path
-PROJECT_ROOT = str(Path(__file__).resolve().parent)
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+
+# DEPLOY CHECK: MTNW ARENA 2026-11-20 V4
+ROOT = Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 try:
     import arena_logic as logic
     import arena_store as store
+    from weekly_market import candle_closes, fetch_cap_top
 except Exception as exc:
     import traceback
-    st.error(f"[ARENA FIX V3] 모듈 오류: {type(exc).__name__}: {exc}")
+    st.error(f"[MTNW ARENA V4] 로딩 실패: {type(exc).__name__}: {exc}")
     st.code(f"실행 파일: {Path(__file__).resolve()}\n"
-            f"logic 파일 존재: {(Path(PROJECT_ROOT) / 'arena_logic.py').is_file()}\n"
-            f"store 파일 존재: {(Path(PROJECT_ROOT) / 'arena_store.py').is_file()}")
+            f"arena_logic.py 존재: {(ROOT / 'arena_logic.py').is_file()}\n"
+            f"arena_store.py 존재: {(ROOT / 'arena_store.py').is_file()}")
     st.code(traceback.format_exc(), language="text")
     st.stop()
-from weekly_market import candle_closes, fetch_cap_top
 
 st.set_page_config(page_title="MTNW 주식 대결 (베타)", layout="wide")
 
