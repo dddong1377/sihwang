@@ -29,6 +29,12 @@ pages = [
         icon="📑",
         url_path="report_digest",
     ),
+    st.Page(
+        "arena.py",
+        title="주식 대결",
+        icon="🥊",
+        url_path="arena",
+    ),
 ]
 
 st.markdown(
