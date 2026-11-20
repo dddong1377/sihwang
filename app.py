@@ -33,7 +33,7 @@ pages = [
         "arena.py",
         title="주식 대결",
         icon="🥊",
-        url_path="arena",
+        url_path="Arena",
     ),
 ]
 
