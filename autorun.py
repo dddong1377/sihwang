@@ -4,6 +4,9 @@
 앱 주소 뒤에 ?auto=pre 를 붙여 열어 로그인 → 이 앱이 버튼을 누른 것처럼 생성·저장 →
 결과를 실행 기록에 남깁니다. 생성은 앱 서버에서 하므로 토스 허용 IP는 그대로 씁니다.
 """
+import requests
+
+TOSS_CONSOLE_URL = "https://www.tossinvest.com/"
 
 import datetime
 from zoneinfo import ZoneInfo
@@ -144,7 +147,21 @@ def render_auto_sidebar():
 
     if not st.session_state.get("pw_ok"):
         return
+        
+    with st.sidebar:
+        st.link_button(
+            "🔗 토스증권 바로가기 (허용 IP 등록)",
+            TOSS_CONSOLE_URL,
+            use_container_width=True,
+        )
+        st.caption("로그인 → 설정 → Open API → 허용 IP 관리")
 
+        if st.button("현재 서버 IP 확인", key="sb_show_ip", use_container_width=True):
+            try:
+                st.code(requests.get("https://api.ipify.org", timeout=5).text)
+            except Exception as error:
+                st.caption(f"IP 확인 실패: {str(error)[:80]}")
+    
     try:
         config = load_config()
     except Exception as error:
