@@ -14,8 +14,34 @@ PROJECT_ROOT = str(Path(__file__).resolve().parent)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import arena_logic as logic
-import arena_store as store
+# 배포 서버의 실제 파일 존재 여부를 확인하고, 위치를 고정해 불러옵니다.
+import importlib.util
+
+
+def load_project_module(module_name):
+    path = Path(PROJECT_ROOT) / f"{module_name}.py"
+    if not path.is_file():
+        st.error(f"필수 파일을 찾을 수 없습니다: {path.name}")
+        st.code(f"실행 폴더: {PROJECT_ROOT}\n"
+                f"실제로 존재하는 arena 파일: "
+                f"{', '.join(sorted(p.name for p in Path(PROJECT_ROOT).glob('*arena*')))}")
+        st.info("Streamlit Cloud가 배포 중인 브랜치에 파일이 있는지 확인하세요. GitHub 파일 목록 화면과 실제 배포본이 다를 수 있습니다.")
+        st.stop()
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, str(path))
+        if spec is None or spec.loader is None:
+            raise ImportError(f"모듈 로더를 만들 수 없습니다: {path.name}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
+    except Exception as exc:
+        st.error(f"{path.name} 파일은 있지만 불러오기 실패: {type(exc).__name__}: {exc}")
+        st.stop()
+
+
+logic = load_project_module("arena_logic")
+store = load_project_module("arena_store")
 from weekly_market import candle_closes, fetch_cap_top
 
 st.set_page_config(page_title="MTNW 주식 대결 (베타)", layout="wide")
