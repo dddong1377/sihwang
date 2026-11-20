@@ -6,6 +6,7 @@ import time
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+st.sidebar.success("✅ MTNW 배포 테스트 V5")
 import sys
 from pathlib import Path
 
