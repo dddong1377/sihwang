@@ -5,7 +5,7 @@
 결과를 실행 기록에 남깁니다. 생성은 앱 서버에서 하므로 토스 허용 IP는 그대로 씁니다.
 """
 import requests
-
+from toss_logo import TOSS_LOGO_B64
 TOSS_CONSOLE_URL = "https://www.tossinvest.com/"
 
 import datetime
@@ -150,9 +150,17 @@ def render_auto_sidebar():
         
     with st.sidebar:
         st.link_button(
-            "🔗 토스증권 바로가기 (허용 IP 등록)",
-            TOSS_CONSOLE_URL,
-            use_container_width=True,
+        st.markdown(
+            f'<a href="{TOSS_CONSOLE_URL}" target="_blank" rel="noopener" '
+            'style="display:flex;flex-direction:column;align-items:center;gap:6px;'
+            'padding:10px 0 8px;background:#F7F7F7;border:2px solid #0064FF;'
+            'border-radius:10px;text-decoration:none;">'
+            f'<img src="data:image/png;base64,{TOSS_LOGO_B64}" '
+            'style="width:124px;height:auto;display:block" alt="토스증권">'
+            '<span style="color:#0F1B3D;font-weight:800;font-size:13px;">'
+            '허용 IP 등록 바로가기</span></a>',
+            unsafe_allow_html=True,
+        )
         )
         st.caption("로그인 → 설정 → Open API → 허용 IP 관리")
 
