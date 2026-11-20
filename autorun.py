@@ -149,7 +149,6 @@ def render_auto_sidebar():
         return
         
     with st.sidebar:
-        st.link_button(
         st.markdown(
             f'<a href="{TOSS_CONSOLE_URL}" target="_blank" rel="noopener" '
             'style="display:flex;flex-direction:column;align-items:center;gap:6px;'
@@ -160,7 +159,6 @@ def render_auto_sidebar():
             '<span style="color:#0F1B3D;font-weight:800;font-size:13px;">'
             '허용 IP 등록 바로가기</span></a>',
             unsafe_allow_html=True,
-        )
         )
         st.caption("로그인 → 설정 → Open API → 허용 IP 관리")
 
