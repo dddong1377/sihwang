@@ -3102,6 +3102,25 @@ def request_run(mode):
     st.session_state["pm_run_mode"] = mode
 
 
+def save_alts(kind, alts):
+    """다른 헤드라인 후보를 시황글과 같은 날짜 칸(예: pre_alts)에 함께 저장합니다."""
+
+    try:
+        save_post(kind + "_alts", json.dumps(list(alts), ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def load_alts(kind, day):
+    try:
+        raw = load_post(kind + "_alts", day)
+        alts = json.loads(raw) if raw else []
+    except Exception:
+        return []
+
+    return [str(item) for item in alts if str(item).strip()] if isinstance(alts, list) else []
+
+
 def finish_auto_run():
     """자동 실행 모드: 결과를 저장하고 실행 기록을 남깁니다."""
 
@@ -3111,6 +3130,7 @@ def finish_auto_run():
     if state.get("pm_note_level") == "ok" and short:
         try:
             save_post("pre", short)
+            save_alts("pre", state.get("pm_headline_alts") or [])
             finish_auto("pre", True, "장전 시황글 생성·저장 완료")
             refresh_archive_list()
         except Exception as error:
@@ -3712,6 +3732,12 @@ def main():
 
             if saved:
                 state["pm_short"] = saved
+
+                if not state.get("pm_headline_alts"):
+                    state["pm_headline_alts"] = load_alts(
+                        "pre", datetime.datetime.now(KST).date()
+                    )
+
                 state["pm_autoload_note"] = (
                     "오늘 저장된 장전 시황글을 불러왔습니다. 수정한 뒤 "
                     "'오늘 장전 시황글 저장'을 누르면 수정본으로 저장됩니다."
@@ -3893,6 +3919,7 @@ def main():
             # ▼▼▼ 여기에 추가 (들여쓰기 공백 12칸) ▼▼▼
             if st.button("💾 오늘 장전 시황글 저장 (주간 정리용)", key="save_pre_btn"):
                 save_post("pre", short)
+                save_alts("pre", state.get("pm_headline_alts") or [])
                 refresh_archive_list() 
                 st.success("장전 시황글을 저장했습니다.")
             # ▲▲▲ 여기까지 ▲▲▲
