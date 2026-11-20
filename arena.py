@@ -1,11 +1,18 @@
 import datetime
 import hmac
 import os
+import sys
+from pathlib import Path
 import random
 import time
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+
+# st.navigation()으로 실행된 페이지에서도 프로젝트 루트 모듈을 찾도록 설정
+PROJECT_ROOT = str(Path(__file__).resolve().parent)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 import arena_logic as logic
 import arena_store as store
