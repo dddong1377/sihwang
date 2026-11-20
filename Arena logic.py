@@ -2,7 +2,8 @@
 
 규칙
 - 하루 5대결(종목 2개씩). 시가총액 상위 종목에서 자동으로 짝을 짓습니다.
-- 대결일 오전 9시에 참여가 마감됩니다. 마감 전까지는 바꿀 수 있습니다.
+- 투표는 대결일 08:00~08:59에만 할 수 있습니다. 09:00이 되는 순간 투표할 수 없습니다.
+  (그 시간 안에서는 몇 번이든 바꿀 수 있습니다.)
 - 대결일 장마감(15:40 이후, 종가 확정) 뒤 두 종목의 '당일 등락률'을 비교해 높은 쪽이 승리합니다.
 - 휴장·데이터 없음은 무효 처리하고 적중률에서 뺍니다. 등락률이 같으면 무승부(적중률에서 제외).
 """
@@ -12,6 +13,7 @@ import math
 import random
 
 N_MATCHES = 5
+OPEN_AT = datetime.time(8, 0)
 DEADLINE = datetime.time(9, 0)
 CLOSE_CONFIRM = datetime.time(15, 40)
 GIVE_UP_AFTER = datetime.time(18, 0)   # 이 시각이 지나도 오늘 봉이 없으면 휴장으로 봄
@@ -59,8 +61,24 @@ def deadline_of(day, tz=None):
     return datetime.datetime.combine(day, DEADLINE, tzinfo=tz)
 
 
+def open_of(day, tz=None):
+    return datetime.datetime.combine(day, OPEN_AT, tzinfo=tz)
+
+
 def deadline_passed(day, now):
     return now >= deadline_of(day, now.tzinfo)
+
+
+def phase(day, now):
+    """'before'(투표 열리기 전) | 'open'(08:00~08:59) | 'closed'(09:00 이후)"""
+
+    if now < open_of(day, now.tzinfo):
+        return "before"
+
+    if now >= deadline_of(day, now.tzinfo):
+        return "closed"
+
+    return "open"
 
 
 # ---------------------------------------------------------------
@@ -251,6 +269,60 @@ def ranking(stats, minimum):
     waiting.sort(key=lambda r: (-r["total"], r["nick"]))
 
     return ranked, waiting
+
+
+def day_standings(data, day):
+    """그날 라운드의 1등·꼴찌. 판정이 끝나지 않았거나 참가자가 없으면 None.
+
+    기준: 맞힌 개수가 많은 순, 같으면 틀린 개수가 적은 순. 완전히 같으면 모두 공동입니다.
+    무승부·무효·선택하지 않은 대결은 세지 않으며, 셀 수 있는 선택이 하나도 없는 사람은 제외합니다."""
+
+    rec = data["rounds"].get(day)
+
+    if not rec or rec.get("state") != "judged":
+        return None
+
+    rows = []
+
+    for key, pick in (data["picks"].get(day) or {}).items():
+        user = data["users"].get(key)
+
+        if not user:
+            continue
+
+        hits = misses = 0
+
+        for index, choice in enumerate(pick.get("choices") or []):
+            if choice not in ("a", "b") or index >= len(rec["results"]):
+                continue
+
+            winner = rec["results"][index]["winner"]
+
+            if winner not in ("a", "b"):
+                continue
+
+            if choice == winner:
+                hits += 1
+            else:
+                misses += 1
+
+        if hits + misses:
+            rows.append({"nick": user["nick"], "hits": hits, "misses": misses})
+
+    if not rows:
+        return None
+
+    rows.sort(key=lambda r: (-r["hits"], r["misses"], r["nick"]))
+
+    best = (rows[0]["hits"], rows[0]["misses"])
+    worst = (rows[-1]["hits"], rows[-1]["misses"])
+
+    return {
+        "rows": rows,
+        "first": [r["nick"] for r in rows if (r["hits"], r["misses"]) == best],
+        "last": [r["nick"] for r in rows if (r["hits"], r["misses"]) == worst],
+        "tied_all": best == worst,
+    }
 
 
 def pick_share(data, day, index):
