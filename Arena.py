@@ -241,6 +241,18 @@ def render_account(data):
 # 우승 상품 표시
 # ===============================================================
 
+def latest_standings(data):
+    """판정이 끝난 가장 최근 라운드의 (날짜, 1등·꼴찌). 없으면 (None, None)"""
+
+    for key in sorted(data["rounds"], reverse=True):
+        result = logic.day_standings(data, key)
+
+        if result:
+            return key, result
+
+    return None, None
+
+
 def render_prize(data):
     current = data["prizes"].get("current")
 
@@ -253,6 +265,23 @@ def render_prize(data):
             st.markdown("### 🎁 우승 상품")
             st.caption("상품은 준비 중입니다.")
 
+        st.markdown("**🍀 꼴찌가 상품을 쏩니다!**")
+
+        key, result = latest_standings(data)
+
+        if result:
+            day = datetime.date.fromisoformat(key)
+
+            if result["tied_all"]:
+                st.caption(f"{day_text(day)}: 참가자 전원이 같은 성적이라 꼴찌 없이 마무리됐어요.")
+            else:
+                st.caption(
+                    f"{day_text(day)} 우승 {', '.join(result['first'])} · "
+                    f"꼴찌 {', '.join(result['last'])} 🥄"
+                )
+        else:
+            st.caption("매일 결과가 확정되면 그날의 우승자와 꼴찌가 여기에 표시됩니다.")
+
 
 # ===============================================================
 # 탭 1: 오늘의 대결
@@ -263,13 +292,22 @@ def render_play(data, nick, day, error):
     now = now_kst()
     key = day.isoformat()
     rec = data["rounds"].get(key)
-    closed = logic.deadline_passed(day, now)
+    phase = logic.phase(day, now)
+    closed = phase == "closed"
 
     st.markdown(f"#### {day_text(day)} 대결")
     st.caption(
-        f"참여 마감 {day.month}/{day.day} 09:00 (마감 전까지 바꿀 수 있어요) · "
+        f"투표 시간 {day.month}/{day.day} 08:00 ~ 08:59 (09:00이 되면 바로 마감, 그 전에는 몇 번이든 바꿀 수 있어요) · "
         "승패 기준: 그날 장마감(15:40 이후 확정) 등락률이 더 높은 종목"
     )
+
+    if phase == "before":
+        st.info(
+            f"⏰ {day_text(day)} 대결은 **오전 8시**에 열립니다. "
+            "8시 정각에 오늘의 5대결이 공개되고, 8시 59분까지 투표할 수 있어요."
+        )
+
+        return
 
     if not rec:
         st.warning(error or "대진을 준비 중입니다.")
@@ -293,7 +331,7 @@ def render_play(data, nick, day, error):
     prev_reasons = mine.get("reasons") or []
 
     if closed:
-        st.warning("참여가 마감되었습니다. 결과는 장마감(15:40) 이후 확정됩니다.")
+        st.warning("투표가 마감되었습니다(09:00). 결과는 장마감(15:40) 이후 확정됩니다.")
 
     values = []
     reasons = []
@@ -340,8 +378,13 @@ def render_play(data, nick, day, error):
                 choices.append(None)
 
         def mutate(d):
-            if logic.deadline_passed(day, now_kst()):
-                return "마감되어 저장하지 못했습니다."
+            current_phase = logic.phase(day, now_kst())
+
+            if current_phase == "closed":
+                return "09:00이 지나 투표가 마감되어 저장하지 못했습니다."
+
+            if current_phase == "before":
+                return "아직 투표 시간(08:00~08:59)이 아닙니다."
 
             if nkey not in d["users"]:
                 return "참가자 정보를 찾지 못했습니다. 다시 로그인해 주세요."
@@ -434,6 +477,18 @@ def render_results(data, nick):
             if state_name != "judged":
                 st.caption(rec.get("note") or "장마감(15:40) 이후 결과가 확정됩니다.")
                 continue
+
+            standing = logic.day_standings(data, key)
+
+            if standing and standing["tied_all"]:
+                st.markdown("🤝 참가자 전원이 같은 성적이라 꼴찌 없이 마무리됐어요.")
+            elif standing:
+                st.markdown(
+                    f"🥇 우승 **{', '.join(standing['first'])}** · "
+                    f"🥄 꼴찌 **{', '.join(standing['last'])}** (꼴찌가 상품을 쏩니다)"
+                )
+            else:
+                st.caption("이날은 판정된 선택이 있는 참가자가 없습니다.")
 
             mine = ((data["picks"].get(key) or {}).get(store.nick_key(nick)) or {}) if nick else {}
             choices = mine.get("choices") or []
@@ -551,7 +606,7 @@ def render_admin(data):
         return
 
     prizes = data["prizes"]
-    items = [str(item) for item in prizes.get("list") or []]
+    items = [str(item) for item in prizes.get("list") or []] or list(store.DEFAULT_PRIZES)
 
     st.markdown("#### 🎁 우승 상품 목록")
 
@@ -666,9 +721,15 @@ def main():
     st.title("MTNW 주식 대결 🥊 (베타)")
     st.caption(DISCLAIMER)
 
-    day = logic.active_round_date(now_kst())
+    now = now_kst()
+    day = logic.active_round_date(now)
 
-    data, round_error = ensure_round(day)
+    # 8시 전에는 대진을 만들지도 공개하지도 않습니다.
+    if logic.phase(day, now) == "before":
+        data, round_error = store.load(), ""
+    else:
+        data, round_error = ensure_round(day)
+
     judge_error = judge_pending()
 
     # 판정이 끝났을 수 있으니 다시 읽음
