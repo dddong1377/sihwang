@@ -74,7 +74,7 @@ def blank():
         "users": {},
         "rounds": {},
         "picks": {},
-        "prizes": {"list": list(DEFAULT_PRIZES), "current": None},
+        "prizes": {"list": list(DEFAULT_PRIZES), "current": None, "weekly_current": None},
     }
 
 
@@ -92,6 +92,7 @@ def _normalize(data):
         data["prizes"]["list"] = []
 
     data["prizes"].setdefault("current", None)
+    data["prizes"].setdefault("weekly_current", None)
 
     return data
 
@@ -265,3 +266,4 @@ def verify(data, nick, pin, now=None):
         return False, f"PIN을 {MAX_FAILS}번 틀려 {LOCK_MINUTES}분간 잠금됩니다."
 
     return False, f"PIN이 맞지 않습니다. ({user['fails']}/{MAX_FAILS})"
+
