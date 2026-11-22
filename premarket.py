@@ -4222,7 +4222,10 @@ def _calendar_markdown(rows):
     return "\n".join(lines)
 
 
-def _calendar_short_markdown(rows, limit=8):
+CALENDAR_SHORT_LIMIT = 30
+
+
+def _calendar_short_markdown(rows, limit=CALENDAR_SHORT_LIMIT):
     if not rows:
         return "- 토스 증시 캘린더에 확인된 일정 없음"
 
