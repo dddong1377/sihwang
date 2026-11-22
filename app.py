@@ -35,6 +35,11 @@ pages = [
         icon="📑",
         url_path="report_digest",
     ),
+   st.Page("paper.py",
+        title="오늘의 지면",
+        icon="📰",
+        url_path="paper"
+    ),
     st.Page(
         "arena.py",
         title="주식 대결",
