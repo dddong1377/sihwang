@@ -152,11 +152,10 @@ except Exception as exc:
     st.code(traceback.format_exc(), language="text")
     st.stop()
 
-components.html(document, height=1700, scrolling=True)
-
-st.divider()
-st.subheader("지면 이미지")
-st.caption("1면에는 제호·한 줄 요약·톱 이슈·숫자로 본 지수표가 들어가고, 내용이 많으면 2면·3면이 이어집니다. 이미지는 ZIP으로 내려받습니다.")
-
 suffix = (picked_day or datetime.datetime.now(KST).date().isoformat()).replace("-", "")
-render_paper_images(markdown, f"{IMAGE_PREFIX[kind]}_{suffix}", issue_no=number)
+
+with st.container(border=True):
+    st.markdown("**📥 지면 이미지 다운로드** · 신문 지면 전체를 세로로 긴 이미지 1장(PNG)으로 받습니다. 카카오톡 소식용 카드 이미지는 각 시황 페이지의 카드 이미지 버튼을 쓰세요 (서로 별개입니다).")
+    render_paper_images(markdown, f"{IMAGE_PREFIX[kind]}_{suffix}", issue_no=number)
+
+components.html(document, height=1700, scrolling=True)
