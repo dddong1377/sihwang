@@ -395,13 +395,14 @@ def render_play(data, nick, day, error):
     phase = logic.phase(day, now)
     closed = phase == "closed"
     judged = bool(rec) and rec.get("state") == "judged"
+    admin_test = bool(state.get("arena_admin"))
 
     flash = state.pop("arena_flash", "")
 
     if flash:
         st.success(flash)
 
-    if phase == "before":
+    if phase == "before" and not admin_test:
         md(ui.frag(ui.cta_panel(
             f"{day_text(day)} 대결은 오전 8시에 열려요",
             ["8시 정각에 오늘의 5대결이 공개되고", "8시 59분까지 투표할 수 있어요"],
@@ -426,7 +427,7 @@ def render_play(data, nick, day, error):
     saved = (saved + [None] * count)[:count]
     saved_reasons = mine.get("reasons") or []
     has_pick = bool(mine)
-    can_vote = bool(nick) and phase == "open"
+    can_vote = bool(nick) and (phase == "open" or (admin_test and not judged))
     show_share = has_pick or closed
     results = list(rec.get("results") or []) if judged else []
 
@@ -508,10 +509,17 @@ def render_play(data, nick, day, error):
             lines.append(f"내 적중 {total_hit} / {total_all}")
 
         cta = ui.cta_panel("오늘의 결과 확정", lines, "노란 테두리가 승리한 종목", rec.get("note") or "")
-    elif closed:
+    elif closed and not can_vote:
         cta = ui.cta_panel("투표가 마감됐어요", ["09:00에 마감되어 더 이상 바꿀 수 없어요", "결과는 장마감(15:40) 이후 확정"], "09:00 마감")
     elif not nick:
         cta = ui.cta_panel("오늘의 대결에 참여하세요", ["5개 대결 · 08:00~08:59 투표", "위에서 로그인하면 종목을 고를 수 있어요"], "", "투표 전에는 선택 비율이 보이지 않아요")
+    elif phase != "open":
+        cta = ui.cta_panel(
+            "종목을 눌러 승자를 고르세요",
+            [f"내 선택 {picked} / {count}", "관리자 테스트 모드라 투표 시간과 상관없이 고를 수 있어요"],
+            "🔧 관리자 테스트 모드",
+            "고른 뒤 아래 '예측 저장'을 꼭 눌러 주세요 (결과 확정 전까지)",
+        )
     else:
         remain = logic.deadline_of(day, now.tzinfo) - now
         minutes = max(int(remain.total_seconds() // 60), 0)
@@ -535,6 +543,9 @@ def render_play(data, nick, day, error):
     with col_right:
         for index in range(half, count):
             draw_card(index)
+
+    if admin_test and nick and phase != "open":
+        st.caption("🔧 관리자 테스트 모드: 투표 시간 제한 없이 투표할 수 있어요 (결과 확정 전까지). 일반 참가자는 08:00~08:59만 가능합니다.")
 
     if can_vote:
         reasons = []
@@ -567,10 +578,12 @@ def render_play(data, nick, day, error):
             def mutate(d):
                 current_phase = logic.phase(day, now_kst())
 
-                if current_phase == "closed":
+                if admin_test:
+                    if (d["rounds"].get(key) or {}).get("state", "open") != "open":
+                        return "결과가 이미 확정된 대결이라 저장하지 못했습니다."
+                elif current_phase == "closed":
                     return "09:00이 지나 투표가 마감되어 저장하지 못했습니다."
-
-                if current_phase == "before":
+                elif current_phase == "before":
                     return "아직 투표 시간(08:00~08:59)이 아닙니다."
 
                 if nkey not in d["users"]:
@@ -1003,8 +1016,8 @@ def main():
 
     md(ui.css_only())
 
-    # 8시 전에는 대진을 만들지도 공개하지도 않습니다.
-    if logic.phase(day, now) == "before":
+    # 8시 전에는 대진을 만들지도 공개하지도 않습니다. (관리자 테스트 모드는 예외)
+    if logic.phase(day, now) == "before" and not st.session_state.get("arena_admin"):
         data, round_error = store.load(), ""
     else:
         data, round_error = ensure_round(day)
