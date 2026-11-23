@@ -319,6 +319,53 @@ def md(html_text):
     st.markdown(html_text, unsafe_allow_html=True)
 
 
+def rename_user(d, old_nick, new_nick):
+    """닉네임을 바꾸고 모든 날짜의 투표 기록도 새 이름으로 옮깁니다. 오류 문구(없으면 빈 문자열)."""
+
+    new_nick = str(new_nick or "").strip()
+    problem = store.check_nick(new_nick)
+
+    if problem:
+        return problem
+
+    old_key = store.nick_key(old_nick)
+    new_key = store.nick_key(new_nick)
+
+    if old_key not in d["users"]:
+        return "대상 참가자를 찾지 못했습니다."
+
+    if new_key != old_key and new_key in d["users"]:
+        return "이미 사용 중인 닉네임입니다."
+
+    user = d["users"].pop(old_key)
+    user["nick"] = new_nick
+    d["users"][new_key] = user
+
+    if new_key != old_key:
+        for picks in d["picks"].values():
+            if isinstance(picks, dict) and old_key in picks:
+                picks[new_key] = picks.pop(old_key)
+
+    return ""
+
+
+def delete_user(d, nick):
+    """참가자와 그 사람의 모든 투표 기록을 지웁니다. 오류 문구(없으면 빈 문자열)."""
+
+    key = store.nick_key(nick)
+
+    if key not in d["users"]:
+        return "대상 참가자를 찾지 못했습니다."
+
+    d["users"].pop(key)
+
+    for picks in d["picks"].values():
+        if isinstance(picks, dict):
+            picks.pop(key, None)
+
+    return ""
+
+
 def participation_html(data, key):
     """그날 투표한 참가자와 투표하지 않은 참가자를 함께 보여 줍니다."""
 
@@ -944,6 +991,11 @@ def render_admin(data):
 
         return
 
+    admin_msg = state.pop("arena_admin_msg", "")
+
+    if admin_msg:
+        st.success(admin_msg)
+
     prizes = data["prizes"]
     items = [str(item) for item in prizes.get("list") or []] or list(store.DEFAULT_PRIZES)
 
@@ -1050,6 +1102,56 @@ def render_admin(data):
         st.caption("아직 가입한 참가자가 없습니다.")
 
     st.divider()
+    st.markdown("#### 👤 계정 이름 변경 · 삭제")
+
+    if users:
+        acc_target = st.selectbox("대상 닉네임", users, key="arena_acc_target")
+        acc_new = st.text_input("새 닉네임 (한글·영문·숫자 2~12자)", key="arena_acc_new")
+
+        if st.button("이름 바꾸기", key="arena_acc_rename"):
+            outcome = {"problem": ""}
+
+            def mutate_rename(d):
+                outcome["problem"] = rename_user(d, acc_target, acc_new)
+
+            try:
+                store.update(mutate_rename)
+            except Exception as error:
+                outcome["problem"] = f"저장 실패: {str(error)[:150]}"
+
+            if outcome["problem"]:
+                st.error(outcome["problem"])
+            else:
+                if state.get("arena_nick") == acc_target:
+                    state["arena_nick"] = acc_new.strip()
+
+                state["arena_admin_msg"] = f"'{acc_target}' → '{acc_new.strip()}' 로 바꿨습니다. 투표 기록도 함께 옮겨졌어요."
+                st.rerun()
+
+        st.caption("삭제하면 그 참가자의 모든 투표 기록이 사라지고 지난 순위·적중률에서도 빠집니다. 되돌릴 수 없어요.")
+        confirmed = st.checkbox(f"'{acc_target}' 계정과 투표 기록을 삭제합니다", key="arena_acc_confirm")
+
+        if st.button("계정 삭제", key="arena_acc_delete", disabled=not confirmed):
+            if state.get("arena_nick") == acc_target:
+                st.error("지금 로그인한 계정은 지울 수 없어요. 로그아웃하거나 다른 계정으로 로그인한 뒤 지워 주세요.")
+            else:
+                outcome = {"problem": ""}
+
+                def mutate_delete(d):
+                    outcome["problem"] = delete_user(d, acc_target)
+
+                try:
+                    store.update(mutate_delete)
+                except Exception as error:
+                    outcome["problem"] = f"저장 실패: {str(error)[:150]}"
+
+                if outcome["problem"]:
+                    st.error(outcome["problem"])
+                else:
+                    state["arena_admin_msg"] = f"'{acc_target}' 계정을 삭제했습니다."
+                    st.rerun()
+
+    st.divider()
 
     if st.button("판정 다시 시도", key="arena_judge_force"):
         message = judge_pending(force=True)
@@ -1127,3 +1229,4 @@ def main():
 
 
 main()
+
