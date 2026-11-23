@@ -42,7 +42,7 @@ pages = [
     ),
     st.Page(
         "report_digest.py",
-        title="리포트 압축",
+        title="리포트 압축(사용X)",
         icon="📑",
         url_path="report_digest",
     ),
