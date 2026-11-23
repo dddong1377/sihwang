@@ -105,5 +105,5 @@ st.markdown(
 # 왼쪽 메뉴의 '자동 실행' 스위치 (로그인 후에만 표시)
 render_auto_sidebar()
 
-navigation = st.navigation(pages)
+navigation = st.navigation({"": main_pages, "테스트 진행 중": test_pages})
 navigation.run()
