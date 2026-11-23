@@ -9,7 +9,7 @@ if PROJECT_ROOT not in sys.path:
 from autorun import render_auto_sidebar
 
 # 사이드바 메뉴: 이름·글자 크기를 여기서 정합니다.
-pages = [
+main_pages = [
     st.Page(
         "premarket.py",
         title="장전 시황",
@@ -29,11 +29,15 @@ pages = [
         icon="🗓️",
         url_path="weekly",
     ),
-   st.Page("paper.py",
+    st.Page(
+        "paper.py",
         title="오늘의 지면",
         icon="📰",
-        url_path="paper"
+        url_path="paper",
     ),
+]
+
+test_pages = [
     st.Page(
         "arena.py",
         title="주식 대결(테스트)",
@@ -47,7 +51,6 @@ pages = [
         url_path="report_digest",
     ),
 ]
-
 st.markdown(
     """
     <style>
