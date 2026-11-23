@@ -4985,10 +4985,8 @@ def pick_universe(changed):
 def render_saved_aft_posts():
     """저장해 둔 이전 오후 시황글을 날짜별로 다시 보고 복사합니다."""
  
-    with st.expander("📚 저장된 이전 오후 시황글 보기"):
-        col_btn, col_note = st.columns([1.6, 5], vertical_alignment="center")
- 
-        if col_btn.button("🔄 목록 새로고침", key="aft_arch_refresh"):
+    with st.popover("📚 이전 오후 시황글", use_container_width=True):
+        if st.button("🔄 목록 새로고침", key="aft_arch_refresh"):
             st.session_state.pop("aft_archive", None)
  
         if "aft_archive" not in st.session_state:
@@ -4996,7 +4994,7 @@ def render_saved_aft_posts():
                 st.session_state["aft_archive"] = list_posts("aft")
             except Exception as error:
                 st.session_state["aft_archive"] = []
-                col_note.caption(f"목록 불러오기 실패: {str(error)[:200]}")
+                st.caption(f"목록 불러오기 실패: {str(error)[:200]}")
  
         items = st.session_state.get("aft_archive") or []
  
@@ -5660,9 +5658,15 @@ def main():
         copy_buttons(build_markdown(snapshot, NOW_TOKEN))
 
         # ▼▼▼ 여기에 추가 (들여쓰기 공백 8칸) ▼▼▼
-        if st.button("오늘 오후 시황글 저장 (주간 정리용)", key="save_aft_btn", icon=":material/save:"):
+        save_col, archive_col, _spacer = st.columns([2.6, 1.8, 3.6], vertical_alignment="center")
+
+        if save_col.button("오늘 오후 시황글 저장 (주간 정리용)", key="save_aft_btn", icon=":material/save:"):
             save_post("aft", markdown)
             st.toast("오후 시황글을 저장했습니다.", icon=":material/check:")
+            st.session_state.pop("aft_archive", None)
+
+        with archive_col:
+            render_saved_aft_posts()
         # ▲▲▲ 여기까지 ▲▲▲
 
         with st.container(border=True, key="preview_container"):
@@ -5672,8 +5676,6 @@ def main():
             st.code(markdown, language="markdown")
 
     body()
-
-    render_saved_aft_posts()
 
 # ===============================================================
 # 네이버페이 증권 스타일 패치 (app.py에 붙여넣기) — 2단계로 끝납니다
