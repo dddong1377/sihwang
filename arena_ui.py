@@ -71,6 +71,13 @@ CSS = _compact("""
 .stApp :is([data-testid="stMain"],section.main,.stMain,[data-testid="stMainBlockContainer"],[data-testid="stAppViewBlockContainer"]) [data-testid="stBaseButton-secondaryFormSubmit"] *{color:#f2f2f2!important}
 .stApp :is([data-testid="stMain"],section.main,.stMain,[data-testid="stMainBlockContainer"],[data-testid="stAppViewBlockContainer"]) [data-testid="stBaseButton-secondaryFormSubmit"]:hover{border-color:#4ade80!important}
 .stApp :is([data-testid="stMain"],section.main,.stMain,[data-testid="stMainBlockContainer"],[data-testid="stAppViewBlockContainer"]) [data-testid="InputInstructions"],.stApp :is([data-testid="stMain"],section.main,.stMain,[data-testid="stMainBlockContainer"],[data-testid="stAppViewBlockContainer"]) [data-testid="InputInstructions"] *{color:#7d7d86!important}
+html body .stApp button[data-baseweb="tab"]{background:#17171b!important;border:1px solid #2d2d33!important;border-radius:999px!important;padding:6px 18px!important;height:auto!important}
+html body .stApp button[data-baseweb="tab"],html body .stApp button[data-baseweb="tab"] *{color:#d6d6dc!important;font-weight:800!important}
+html body .stApp button[data-baseweb="tab"][aria-selected="true"]{background:#3a1a08!important;border-color:#ff6a1a!important}
+html body .stApp button[data-baseweb="tab"][aria-selected="true"],html body .stApp button[data-baseweb="tab"][aria-selected="true"] *{color:#ffffff!important}
+html body .stApp [data-baseweb="tab-list"]{gap:8px!important;background:transparent!important}
+html body .stApp [data-baseweb="tab-highlight"],html body .stApp [data-baseweb="tab-border"]{display:none!important}
+html body .stApp [data-testid="stExpander"] summary,html body .stApp [data-testid="stExpander"] summary *{color:#e8e8ea!important}
 .ar{--green:#4ade80;--yellow:#ffd23f;--orange:#ff6a1a;--line:#2c2c32;--panel:#141417;color:#ececee;font-family:inherit}
 .ar *{box-sizing:border-box}
 .ar-hero{text-align:center;padding:6px 0 4px}
