@@ -12,13 +12,12 @@ from kakao_text import to_kakao_text
 from emphasis import emphasize, bold_headings
 from card_images import render_card_images
 from paper_images import render_paper_images
-from archive import load_post, save_post
 
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
-from archive import load_post
+from archive import load_post, save_post
 from weekly_market import fetch_weekly_movers
 from usage_store import load_usage, add_usage
 
@@ -2301,7 +2300,7 @@ def main():
     if report:
         copy_buttons(report)
 
-    if st.button("주간 정리 저장 (지면용)", key="save_week_btn", icon=":material/save:"):
+        if st.button("주간 정리 저장 (지면용)", key="save_week_btn", icon=":material/save:"):
             save_post("week", report)
             st.toast("주간 정리를 저장했습니다.", icon=":material/check:")
 
