@@ -87,6 +87,19 @@ html body .stApp [data-testid="stAlert"]:has([data-testid="stAlertContentError"]
 html body .stApp [data-testid="stCode"],html body .stApp [data-testid="stCode"] pre,html body .stApp [data-testid="stCodeBlock"]{background:#111114!important}
 html body .stApp [data-testid="stCode"] *,html body .stApp [data-testid="stCodeBlock"] *{color:#e6e6ea!important}
 html body .stApp [data-testid="stToast"],html body .stApp [data-testid="stToast"] *{color:#111!important}
+html body .stApp [data-testid="stExpander"],html body .stApp [data-testid="stExpander"] details,html body .stApp [data-testid="stExpander"] summary,html body .stApp [data-testid="stExpanderDetails"],html body .stApp [data-testid="stExpander"] [data-testid="stExpanderToggleIcon"]{background:#111114!important;background-color:#111114!important;color:#ececee!important}
+html body .stApp [data-testid="stExpander"] details{border:1px solid #2a2a2f!important;border-radius:14px!important}
+html body .stApp [data-testid="stExpander"] summary:hover,html body .stApp [data-testid="stExpander"] summary:focus,html body .stApp [data-testid="stExpander"] summary:active{background:#1a1a1f!important;color:#ffffff!important}
+html body .stApp [data-testid="stExpander"] summary *,html body .stApp [data-testid="stExpander"] summary svg{color:#ececee!important;fill:#ececee!important}
+html body .stApp [data-testid="stExpanderDetails"] *{color:#e6e6ea}
+html body .stApp [data-testid="stVerticalBlockBorderWrapper"]{border-color:#2a2a2f!important}
+html body .stApp [data-testid="stSelectbox"] [data-baseweb="select"] *,html body .stApp [data-testid="stMultiSelect"] [data-baseweb="select"] *{background-color:#17171b!important;color:#f2f2f2!important}
+html body .stApp [data-baseweb="select"] svg{fill:#c8c8ce!important}
+html body .stApp [data-testid="stToggle"] label,html body .stApp [data-testid="stToggle"] label *,html body .stApp [data-testid="stCheckbox"] label,html body .stApp [data-testid="stCheckbox"] label *{color:#e8e8ea!important}
+html body .stApp [data-testid="stDateInput"] *,html body .stApp [data-testid="stNumberInput"] *{background-color:#17171b!important;color:#f2f2f2!important}
+html body [data-baseweb="popover"],html body [data-baseweb="popover"] > div,html body [data-baseweb="menu"],html body [data-baseweb="popover"] ul{background:#1b1b1f!important;background-color:#1b1b1f!important;color:#f2f2f2!important}
+html body [data-baseweb="popover"] li,html body [data-baseweb="popover"] li *,html body [data-baseweb="menu"] li,html body [data-baseweb="menu"] li *{background-color:#1b1b1f!important;color:#f2f2f2!important}
+html body [data-baseweb="popover"] li:hover,html body [data-baseweb="popover"] li[aria-selected="true"],html body [data-baseweb="menu"] li:hover{background-color:#2c2c33!important}
 .ar{--green:#4ade80;--yellow:#ffd23f;--orange:#ff6a1a;--line:#2c2c32;--panel:#141417;color:#ececee;font-family:inherit}
 .ar *{box-sizing:border-box}
 .ar-hero{text-align:center;padding:6px 0 4px}
