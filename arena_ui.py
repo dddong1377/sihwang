@@ -78,6 +78,15 @@ html body .stApp button[data-baseweb="tab"][aria-selected="true"],html body .stA
 html body .stApp [data-baseweb="tab-list"]{gap:8px!important;background:transparent!important}
 html body .stApp [data-baseweb="tab-highlight"],html body .stApp [data-baseweb="tab-border"]{display:none!important}
 html body .stApp [data-testid="stExpander"] summary,html body .stApp [data-testid="stExpander"] summary *{color:#e8e8ea!important}
+html body .stApp [data-testid="stAlert"],html body .stApp [data-testid="stAlert"] [data-baseweb="notification"],html body .stApp [data-testid="stAlertContainer"],html body .stApp [data-testid="stNotification"]{background:#17171b!important;background-color:#17171b!important;border:1px solid #34343a!important;border-radius:14px!important}
+html body .stApp [data-testid="stAlert"] *,html body .stApp [data-testid="stNotification"] *{color:#ececee!important}
+html body .stApp [data-testid="stAlert"]:has([data-testid="stAlertContentSuccess"]){border-left:4px solid #4ade80!important}
+html body .stApp [data-testid="stAlert"]:has([data-testid="stAlertContentInfo"]){border-left:4px solid #6ea8ff!important}
+html body .stApp [data-testid="stAlert"]:has([data-testid="stAlertContentWarning"]){border-left:4px solid #ffd23f!important}
+html body .stApp [data-testid="stAlert"]:has([data-testid="stAlertContentError"]){border-left:4px solid #ff6b6b!important}
+html body .stApp [data-testid="stCode"],html body .stApp [data-testid="stCode"] pre,html body .stApp [data-testid="stCodeBlock"]{background:#111114!important}
+html body .stApp [data-testid="stCode"] *,html body .stApp [data-testid="stCodeBlock"] *{color:#e6e6ea!important}
+html body .stApp [data-testid="stToast"],html body .stApp [data-testid="stToast"] *{color:#111!important}
 .ar{--green:#4ade80;--yellow:#ffd23f;--orange:#ff6a1a;--line:#2c2c32;--panel:#141417;color:#ececee;font-family:inherit}
 .ar *{box-sizing:border-box}
 .ar-hero{text-align:center;padding:6px 0 4px}
