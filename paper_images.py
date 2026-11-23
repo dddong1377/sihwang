@@ -249,10 +249,10 @@ function flowPiece(text_, w) {
 }
 
 // ---------- 1면 ----------
-function page1(ctx, total, nextText, tail) {
+function page1(ctx, total, nextText, tail, long) {
   const m = D.model;
   let y = mastheadBig(ctx) + 6;
-  text(ctx, (m.kind === 'week' ? '주간 종합 · 이번 주의 한 줄' : '1면 종합 · 오늘의 한 줄'), M, y + 10, 16, 2, ACC);
+  text(ctx, long ? (m.kind === 'week' ? '이번 주의 한 줄' : '오늘의 한 줄') : (m.kind === 'week' ? '주간 종합 · 이번 주의 한 줄' : '1면 종합 · 오늘의 한 줄'), M, y + 10, 16, 2, ACC);
   y += 30;
   let hp = 52, hl;
   for (; hp >= 32; hp -= 2) { hl = wrap(m.headline || m.title, CW, hp, 2); if (hl.length <= 4) break; }
@@ -284,7 +284,7 @@ function page1(ctx, total, nextText, tail) {
   }
   // 이어지는 이슈 제목
   const rest = m.issues.slice(1);
-  if (rest.length) {
+  if (rest.length && !long) {
     ly += 10; hline(ctx, M, ly, leftW, 1, RULE); ly += 14;
     text(ctx, '이어지는 이슈', M, ly + 9, 15, 2, ACC); ly += 26;
     rest.forEach(it => {
@@ -324,9 +324,9 @@ function page1(ctx, total, nextText, tail) {
   const extras = [];
   m.bands.forEach(b => extras.push(bandPiece(b, CW)));
   if (m.flow && lead) extras.push(flowPiece(m.flow, CW));
-  extras.forEach(p => { if (y + p.h < H - 70) { p.draw(ctx, M, y); y += p.h + 14; } });
+  extras.forEach(p => { if (long || y + p.h < H - 70) { p.draw(ctx, M, y); y += p.h + 14; } });
   (tail || []).forEach(p => { p.draw(ctx, M, y); y += p.h + 14; });
-  footer(ctx, 1, total, nextText);
+  if (!long) footer(ctx, 1, total, nextText);
   return y;
 }
 
@@ -387,6 +387,26 @@ function drawPage(i, pages, scale) {
   return cv;
 }
 
+// ---------- 긴 이미지 1장 ----------
+function drawLong(scale) {
+  const flow = buildFlow().map(f => ({tail: f.tail, p: f.make(CW)}));
+  const ordered = flow.filter(f => !f.tail).concat(flow.filter(f => f.tail));
+  const y1 = page1(dryCtx(), 1, '', [], true) + 6;
+  let total = y1;
+  ordered.forEach(f => { total += f.p.h + 16; });
+  const HH = Math.ceil(total + 64);
+  const cv = document.createElement('canvas'); cv.width = W * scale; cv.height = HH * scale;
+  const ctx = cv.getContext('2d'); ctx.scale(scale, scale);
+  ctx.fillStyle = PAPER; ctx.fillRect(0, 0, W, HH);
+  let y = page1(ctx, 1, '', [], true) + 6;
+  ordered.forEach(f => { f.p.draw(ctx, M, y); y += f.p.h + 16; });
+  const fy = HH - 46;
+  hline(ctx, M, fy, CW, 1, INK);
+  text(ctx, '※ 참고 자료이며 투자 권유가 아닙니다', M, fy + 20, 14, 1, MUTED);
+  text(ctx, 'MTNW 시황 · ' + D.model.edition, W - M, fy + 20, 14, 2, MUTED, 'right');
+  return cv;
+}
+
 // ---------- ZIP ----------
 const CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
 function crc32(b) { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = CRC[(c ^ b[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
@@ -416,7 +436,7 @@ function download(blob, name) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }
-window.__PAPER = {paginate, drawPage, ready: Promise.all(FACES)};
+window.__PAPER = {paginate, drawPage, drawLong, ready: Promise.all(FACES)};
 
 async function make() {
   const btn = document.getElementById('mkp'), st = document.getElementById('statusp'), prev = document.getElementById('prevp');
@@ -424,16 +444,11 @@ async function make() {
     btn.disabled = true; st.textContent = ' 지면을 만드는 중...'; prev.innerHTML = '';
     try { await Promise.all(FACES); } catch (e) {}
     if (document.fonts && document.fonts.ready) await document.fonts.ready;
-    const pages = paginate(), files = [], total = pages.length + 1;
-    for (let i = 0; i < total; i++) {
-      const cv = drawPage(i, pages, D.scale);
-      const blob = await new Promise(r => cv.toBlob(r, 'image/png'));
-      const name = String(i + 1).padStart(2, '0') + '_' + (i + 1) + '면.png';
-      files.push({name, data: new Uint8Array(await blob.arrayBuffer())});
-      const img = document.createElement('img'); img.src = URL.createObjectURL(blob); img.title = name; prev.appendChild(img);
-    }
-    download(makeZip(files), D.prefix + '_지면이미지.zip');
-    st.textContent = ' 완료 · ' + total + '면 (ZIP으로 내려받았습니다)';
+    const cv = drawLong(D.scale);
+    const blob = await new Promise(r => cv.toBlob(r, 'image/png'));
+    const img = document.createElement('img'); img.src = URL.createObjectURL(blob); prev.appendChild(img);
+    download(blob, D.prefix + '_지면.png');
+    st.textContent = ' 완료 · 긴 이미지 1장 (' + cv.width + '×' + cv.height + ') 내려받았습니다';
   } catch (e) { st.textContent = ' 실패: ' + (e && e.message ? e.message : e); }
   finally { btn.disabled = false; }
 }
@@ -445,8 +460,9 @@ CSS = """
 body{background:transparent;font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif}
 .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:14px}
 .bar button{padding:6px 12px;cursor:pointer}
-#prevp{display:flex;gap:10px;overflow-x:auto;margin-top:10px;padding-bottom:6px}
-#prevp img{width:180px;height:240px;border:1px solid #ccc;border-radius:6px;flex:0 0 auto}
+#prevp{margin-top:10px;max-height:520px;overflow-y:auto;border:1px solid #ccc;border-radius:6px;display:none}
+#prevp:not(:empty){display:block}
+#prevp img{width:100%;display:block}
 """
 
 
@@ -489,11 +505,11 @@ def render_paper_images(markdown, prefix, now_token="", scale=1.5, issue_no=None
     page = f"""
     <style>{CSS}</style>
     <div class="bar">
-      <button id="mkp">📰 지면 이미지 만들기 (신문 스타일)</button>
+      <button id="mkp">📰 지면 이미지 만들기 (긴 이미지 1장 · 카카오톡용 아님)</button>
       <span id="statusp"></span>
     </div>
     <div id="prevp"></div>
     <script>{JS.replace('__DATA__', payload)}</script>
     """
 
-    components.html(page, height=330, scrolling=True)
+    components.html(page, height=620, scrolling=True)
