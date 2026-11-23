@@ -29,12 +29,6 @@ pages = [
         icon="🗓️",
         url_path="weekly",
     ),
-    st.Page(
-        "report_digest.py",
-        title="리포트 압축",
-        icon="📑",
-        url_path="report_digest",
-    ),
    st.Page("paper.py",
         title="오늘의 지면",
         icon="📰",
@@ -45,6 +39,12 @@ pages = [
         title="주식 대결",
         icon="🥊",
         url_path="Arena",
+    ),
+    st.Page(
+        "report_digest.py",
+        title="리포트 압축",
+        icon="📑",
+        url_path="report_digest",
     ),
 ]
 
