@@ -10,6 +10,7 @@ TOSS_CLIENT_SECRET)를 사용합니다.
 import datetime
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from zoneinfo import ZoneInfo
@@ -79,12 +80,31 @@ def _token(client_id, client_secret):
     return token
 
 
+_TOKEN_LOCK = threading.Lock()
+
+
+def _fresh_token(old_token, force=False):
+    """다른 곳에서 새 토큰을 받아 이 토큰이 무효가 됐을 때 새로 받습니다.
+
+    force=True 는 '다른 곳이 받아 둔 토큰'도 이미 무효일 수 있을 때, 무조건 새로 발급합니다."""
+
+    with _TOKEN_LOCK:
+        current = _token(_secret("TOSS_CLIENT_ID"), _secret("TOSS_CLIENT_SECRET"))
+
+        if force or current == old_token:
+            _token.clear()
+            current = _token(_secret("TOSS_CLIENT_ID"), _secret("TOSS_CLIENT_SECRET"))
+
+        return current
+
+
 def api_get(path, params=None):
     token = _token(_secret("TOSS_CLIENT_ID"), _secret("TOSS_CLIENT_SECRET"))
 
     response = None
+    refreshed = 0
 
-    for attempt in range(4):
+    for attempt in range(5):
         try:
             response = requests.get(
                 f"{BASE}{path}",
@@ -93,10 +113,17 @@ def api_get(path, params=None):
                 timeout=(6, 15),
             )
         except requests.RequestException as error:
-            if attempt == 3:
+            if attempt == 4:
                 raise TossError(f"{path} 연결 실패: {str(error)[-120:]}") from error
 
             time.sleep(1.5 * (attempt + 1))
+            continue
+
+        # 토큰이 무효화(401)되면 새 토큰으로 한 번 더 시도
+        # (첫 번째는 저장된 새 토큰을 쓰고, 그래도 401이면 무조건 새로 발급)
+        if response.status_code == 401 and refreshed < 2:
+            refreshed += 1
+            token = _fresh_token(token, force=(refreshed == 2))
             continue
 
         # 요청 한도(429)·서버 오류(5xx)는 잠깐 쉬고 다시 시도
