@@ -12,7 +12,7 @@ from kakao_text import to_kakao_text
 from emphasis import emphasize, bold_headings
 from card_images import render_card_images
 from paper_images import render_paper_images
-from archive import load_post  → from archive import load_post, save_post
+from archive import load_post, save_post
 
 import requests
 import streamlit as st
