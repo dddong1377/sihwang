@@ -217,7 +217,7 @@ def render_account(data):
 
     st.markdown("##### 닉네임으로 참여하기")
 
-    tab_in, tab_new = st.tabs(["로그인", "처음이에요"])
+    tab_in, tab_new = st.tabs(tab_names("로그인", "처음이에요"))
 
     with tab_in:
         with st.form("arena_login_form"):
@@ -307,6 +307,12 @@ def prize_info(current):
         return current["name"], ("🎲 랜덤 추첨" if current.get("how") == "random" else "✋ 관리자 지정")
 
     return "준비 중", ""
+
+
+def tab_names(*names):
+    """탭 이름에 색을 직접 지정해, 선택 여부와 상관없이 어두운 배경에서도 항상 보이게 합니다."""
+
+    return [f":orange[**{name}**]" for name in names]
 
 
 def md(html_text):
@@ -809,7 +815,7 @@ def render_week_tournament(data, nick):
 def render_ranking(data, nick=None):
     today = now_kst().date()
 
-    tab_week, tab_month, tab_all = st.tabs(["🏅 주간 토너먼트", "월간 (최근 30일)", "누적"])
+    tab_week, tab_month, tab_all = st.tabs(tab_names("🏅 주간 토너먼트", "월간 (최근 30일)", "누적"))
 
     with tab_week:
         render_week_tournament(data, nick)
@@ -1044,7 +1050,7 @@ def main():
         st.warning(judge_error)
 
     tab_play, tab_result, tab_rank, tab_admin = st.tabs(
-        ["🎯 오늘의 대결", "📋 결과·내 기록", "🏆 랭킹", "🔧 관리자"]
+        tab_names("🎯 오늘의 대결", "📋 결과·내 기록", "🏆 랭킹", "🔧 관리자")
     )
 
     with tab_play:
