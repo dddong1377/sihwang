@@ -20,7 +20,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from realtime_feed import TossFeed
-from archive import save_post
+from archive import save_post, list_posts
 from usage_store import load_usage, add_usage
 
 st.set_page_config(page_title="MTNW 오후 시황", layout="wide")
@@ -4982,7 +4982,55 @@ def pick_universe(changed):
 
     st.session_state[other] = not st.session_state[changed]
 
-
+def render_saved_aft_posts():
+    """저장해 둔 이전 오후 시황글을 날짜별로 다시 보고 복사합니다."""
+ 
+    with st.expander("📚 저장된 이전 오후 시황글 보기"):
+        col_btn, col_note = st.columns([1.6, 5], vertical_alignment="center")
+ 
+        if col_btn.button("🔄 목록 새로고침", key="aft_arch_refresh"):
+            st.session_state.pop("aft_archive", None)
+ 
+        if "aft_archive" not in st.session_state:
+            try:
+                st.session_state["aft_archive"] = list_posts("aft")
+            except Exception as error:
+                st.session_state["aft_archive"] = []
+                col_note.caption(f"목록 불러오기 실패: {str(error)[:200]}")
+ 
+        items = st.session_state.get("aft_archive") or []
+ 
+        if not items:
+            st.caption(
+                "저장된 오후 시황글이 없습니다. '오늘 오후 시황글 저장 (주간 정리용)'을 "
+                "누르면 여기에 쌓입니다."
+            )
+            return
+ 
+        def day_label(day_iso):
+            day = datetime.date.fromisoformat(day_iso)
+            return f"{day.month}월 {day.day}일({WEEKDAYS[day.weekday()]})"
+ 
+        picked = st.selectbox(
+            "날짜",
+            [day for day, _ in items],
+            format_func=day_label,
+            key="aft_arch_day",
+        )
+        text = dict(items).get(picked, "")
+ 
+        st.caption(
+            "저장했던 그 시점의 글입니다. 위쪽 입력 화면은 바뀌지 않고, "
+            "아래에서 복사·카드 이미지만 쓸 수 있습니다."
+        )
+ 
+        copy_buttons(text)
+ 
+        with st.container(border=True):
+            st.markdown(text)
+ 
+        if st.toggle("마크다운 원문 보기", key="aft_arch_raw"):
+            st.code(text, language="markdown")
 def main():
     st.title("MTNW 오후 시황")
     apply_label_style()
