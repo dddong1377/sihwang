@@ -36,7 +36,7 @@ pages = [
     ),
     st.Page(
         "arena.py",
-        title="주식 대결",
+        title="주식 대결(테스트)",
         icon="🥊",
         url_path="Arena",
     ),
