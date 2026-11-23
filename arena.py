@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 
 try:
     import arena_logic as logic
+    import arena_ui as ui
     import arena_store as store
     from weekly_market import candle_closes, fetch_cap_top
 except Exception as exc:
@@ -29,7 +30,8 @@ except Exception as exc:
         f"이 파일 위치: {Path(__file__).resolve()}\n"
         f"같은 폴더의 .py 파일: {', '.join(sorted(p.name for p in ROOT.glob('*.py')))}\n"
         f"arena_logic.py 있음: {(ROOT / 'arena_logic.py').is_file()}\n"
-        f"arena_store.py 있음: {(ROOT / 'arena_store.py').is_file()}",
+        f"arena_store.py 있음: {(ROOT / 'arena_store.py').is_file()}\n"
+        f"arena_ui.py 있음: {(ROOT / 'arena_ui.py').is_file()}",
         language="text",
     )
     st.code(traceback.format_exc(), language="text")
@@ -300,75 +302,85 @@ def week_label(monday):
     return f"{monday.month}/{monday.day}~{friday.month}/{friday.day}"
 
 
-def prize_line(current):
+def prize_info(current):
     if current and current.get("name"):
-        how = "🎲 랜덤 추첨" if current.get("how") == "random" else "✋ 관리자 지정"
-        return f"**{current['name']}**", how
+        return current["name"], ("🎲 랜덤 추첨" if current.get("how") == "random" else "✋ 관리자 지정")
 
     return "준비 중", ""
 
 
+def md(html_text):
+    st.markdown(html_text, unsafe_allow_html=True)
+
+
 def render_prize(data):
     now = now_kst()
-    col_day, col_week = st.columns(2)
 
-    with col_day:
-        with st.container(border=True):
-            name, how = prize_line(data["prizes"].get("current"))
-            st.markdown(f"### 📅 일간 우승 상품: {name}")
+    name_day, how_day = prize_info(data["prizes"].get("current"))
+    key, result = latest_standings(data)
 
-            if how:
-                st.caption(how)
+    if result:
+        day = datetime.date.fromisoformat(key)
 
-            st.markdown("**🍀 꼴찌가 상품을 쏩니다!**")
+        if result["tied_all"]:
+            line_day = f"{day_text(day)}: 전원 같은 성적이라 꼴찌 없이 마무리"
+        else:
+            line_day = f"{day_text(day)} 우승 {', '.join(result['first'])} · 꼴찌 {', '.join(result['last'])} 🥄"
+    else:
+        line_day = "매일 결과가 확정되면 그날의 우승자와 꼴찌가 표시됩니다."
 
-            key, result = latest_standings(data)
+    name_week, how_week = prize_info(data["prizes"].get("weekly_current"))
+    weeks = completed_weeks(data, now)
 
-            if result:
-                day = datetime.date.fromisoformat(key)
+    if weeks:
+        monday, standing = weeks[0]
 
-                if result["tied_all"]:
-                    st.caption(f"{day_text(day)}: 참가자 전원이 같은 성적이라 꼴찌 없이 마무리됐어요.")
-                else:
-                    st.caption(
-                        f"{day_text(day)} 우승 {', '.join(result['first'])} · "
-                        f"꼴찌 {', '.join(result['last'])} 🥄"
-                    )
-            else:
-                st.caption("매일 결과가 확정되면 그날의 우승자와 꼴찌가 표시됩니다.")
+        if standing["tied_all"]:
+            line_week = f"{week_label(monday)} 주간: 전원 같은 성적이라 꼴찌 없이 마무리"
+        else:
+            line_week = f"{week_label(monday)} 주간 우승 {', '.join(standing['first'])} · 꼴찌 {', '.join(standing['last'])} 🥄"
+    else:
+        line_week = "금요일 장마감(15:40) 이후 그 주의 우승자와 꼴찌가 확정됩니다."
 
-    with col_week:
-        with st.container(border=True):
-            name, how = prize_line(data["prizes"].get("weekly_current"))
-            st.markdown(f"### 🏅 주간 우승 상품: {name}")
+    sub_week = ""
+    this_monday = logic.week_start(now.date())
+    current = logic.week_standings(data, this_monday)
 
-            if how:
-                st.caption(how)
+    if current and not logic.week_complete(data, this_monday, now):
+        sub_week = f"이번 주 진행 중 · 현재 1위 {', '.join(current['first'])} ({current['rows'][0]['hits']}개 적중)"
 
-            st.markdown("**🍀 꼴찌가 상품을 쏩니다!**")
+    md(ui.frag(ui.prize_cards([
+        {"title": "📅 일간 토너먼트 우승 상품", "name": name_day, "how": how_day, "line": line_day},
+        {"title": "🏅 주간 토너먼트 우승 상품", "name": name_week, "how": how_week, "line": line_week, "sub": sub_week},
+    ])))
 
-            weeks = completed_weeks(data, now)
 
-            if weeks:
-                monday, standing = weeks[0]
+def render_round_strip(data, now, active_day):
+    monday = logic.week_start(active_day)
+    items = []
 
-                if standing["tied_all"]:
-                    st.caption(f"{week_label(monday)} 주간: 전원 같은 성적이라 꼴찌 없이 마무리됐어요.")
-                else:
-                    st.caption(
-                        f"{week_label(monday)} 주간 우승 {', '.join(standing['first'])} · "
-                        f"꼴찌 {', '.join(standing['last'])} 🥄"
-                    )
-            else:
-                st.caption("금요일 장마감(15:40) 이후 그 주의 우승자와 꼴찌가 확정됩니다.")
+    for offset in range(5):
+        day = monday + datetime.timedelta(days=offset)
+        rec = data["rounds"].get(day.isoformat())
+        record_state = (rec or {}).get("state", "")
 
-            current = logic.week_standings(data, logic.week_start(now.date()))
+        if record_state == "judged":
+            state, label = "done", "확정"
+        elif record_state == "void":
+            state, label = "void", "무효"
+        elif day == active_day:
+            phase = logic.phase(day, now)
+            state = "live"
+            label = {"before": "08:00 오픈", "open": "투표 중", "closed": "결과 대기"}[phase]
+        elif record_state == "open" and day < now.date():
+            state, label = "wait", "판정 대기"
+        else:
+            state, label = "wait", "예정"
 
-            if current and not logic.week_complete(data, logic.week_start(now.date()), now):
-                st.caption(
-                    f"이번 주 진행 중 · 현재 1위 {', '.join(current['first'])} "
-                    f"({current['rows'][0]['hits']}개 적중)"
-                )
+        items.append({"name": "월화수목금"[offset], "date": f"{day.month}/{day.day}", "state": state, "label": label})
+
+    md(ui.frag(ui.round_strip(items)))
+    return monday
 
 
 # ===============================================================
@@ -382,20 +394,20 @@ def render_play(data, nick, day, error):
     rec = data["rounds"].get(key)
     phase = logic.phase(day, now)
     closed = phase == "closed"
+    judged = bool(rec) and rec.get("state") == "judged"
 
-    st.markdown(f"#### {day_text(day)} 대결")
-    st.caption(
-        f"투표 시간 {day.month}/{day.day} 08:00 ~ 08:59 (09:00이 되면 바로 마감, 그 전에는 몇 번이든 바꿀 수 있어요) · "
-        "승패 기준: 그날 장마감(15:40 이후 확정) 등락률이 더 높은 종목 · "
-        "매일 일간 우승자·꼴찌, 금요일에는 한 주를 합산한 주간 우승자·꼴찌가 정해져요"
-    )
+    flash = state.pop("arena_flash", "")
+
+    if flash:
+        st.success(flash)
 
     if phase == "before":
-        st.info(
-            f"⏰ {day_text(day)} 대결은 **오전 8시**에 열립니다. "
-            "8시 정각에 오늘의 5대결이 공개되고, 8시 59분까지 투표할 수 있어요."
-        )
-
+        md(ui.frag(ui.cta_panel(
+            f"{day_text(day)} 대결은 오전 8시에 열려요",
+            ["8시 정각에 오늘의 5대결이 공개되고", "8시 59분까지 투표할 수 있어요"],
+            "08:00 오픈",
+            "승패 기준: 그날 장마감 등락률 · 꼴찌가 상품을 쏩니다",
+        )))
         return
 
     if not rec:
@@ -406,116 +418,187 @@ def render_play(data, nick, day, error):
 
         return
 
-    if not nick:
-        st.info("닉네임으로 로그인하면 예측을 저장할 수 있습니다. 아래는 오늘의 대진입니다.")
+    matches = rec["matches"]
+    count = len(matches)
+    nkey = store.nick_key(nick) if nick else ""
+    mine = ((data["picks"].get(key) or {}).get(nkey) or {}) if nick else {}
+    saved = list(mine.get("choices") or [])
+    saved = (saved + [None] * count)[:count]
+    saved_reasons = mine.get("reasons") or []
+    has_pick = bool(mine)
+    can_vote = bool(nick) and phase == "open"
+    show_share = has_pick or closed
+    results = list(rec.get("results") or []) if judged else []
 
-        for index, match in enumerate(rec["matches"], start=1):
-            st.markdown(f"**대결 {index}** · {match['a']['name']} vs {match['b']['name']}")
+    draft_key = f"arena_draft_{nkey or 'guest'}_{key}"
 
-        return
+    if draft_key not in state:
+        state[draft_key] = list(saved)
 
-    nkey = store.nick_key(nick)
-    mine = (data["picks"].get(key) or {}).get(nkey) or {}
-    prev_choices = mine.get("choices") or []
-    prev_reasons = mine.get("reasons") or []
+    draft = state[draft_key]
 
-    if closed:
-        st.warning("투표가 마감되었습니다(09:00). 결과는 장마감(15:40) 이후 확정됩니다.")
+    def share_text(index, side):
+        if not show_share:
+            return None
 
-    values = []
-    reasons = []
+        share = logic.pick_share(data, key, index)
+        total = share["a"] + share["b"]
 
-    with st.form(f"arena_form_{nkey}_{key}"):
-        for index, match in enumerate(rec["matches"]):
-            names = [match["a"]["name"], match["b"]["name"]]
-            prev = prev_choices[index] if index < len(prev_choices) else None
-            prev_index = {"a": 0, "b": 1}.get(prev)
+        return f"{share[side] / total * 100:.0f}%" if total else "0%"
 
-            col_pick, col_reason = st.columns([3, 2])
+    def draw_card(index):
+        match = matches[index]
+        result = results[index] if index < len(results) else None
+        winner = result["winner"] if result else None
 
-            values.append(col_pick.radio(
-                f"대결 {index + 1}",
-                names,
-                index=prev_index,
-                horizontal=True,
-                disabled=closed,
-                key=f"arena_pick_{nkey}_{key}_{index}",
-            ))
+        with st.container(key=f"arena_card_{index}"):
+            md(ui.frag(ui.tag(f"대결 {index + 1}")))
 
-            prev_reason = prev_reasons[index] if index < len(prev_reasons) else logic.REASONS[0]
-            reason_index = logic.REASONS.index(prev_reason) if prev_reason in logic.REASONS else 0
+            for side in ("a", "b"):
+                name = match[side]["name"]
+                pct = share_text(index, side)
 
-            reasons.append(col_reason.selectbox(
-                "선택 이유 (선택)",
-                logic.REASONS,
-                index=reason_index,
-                disabled=closed,
-                key=f"arena_reason_{nkey}_{key}_{index}",
-            ))
+                if can_vote:
+                    chosen = draft[index] == side
+                    label = ("✓ " if chosen else "") + name + (f"   ·   {pct}" if pct else "")
 
-        submitted = st.form_submit_button("예측 저장", type="primary", disabled=closed, use_container_width=True)
+                    if st.button(
+                        label,
+                        key=f"arena_btn_{key}_{index}_{side}",
+                        type="primary" if chosen else "secondary",
+                        use_container_width=True,
+                    ):
+                        draft[index] = None if chosen else side
+                        state[draft_key] = draft
+                        st.rerun()
+                else:
+                    row_state, mark, extra = "", "", ""
+                    my = saved[index]
 
-    if submitted:
-        choices = []
+                    if winner in ("a", "b"):
+                        row_state = "win" if side == winner else "lose"
+                        value = result.get(f"{side}_pct")
+                        extra = "" if value is None else f"{value:+.2f}%"
 
-        for value, match in zip(values, rec["matches"]):
-            if value == match["a"]["name"]:
-                choices.append("a")
-            elif value == match["b"]["name"]:
-                choices.append("b")
+                        if my == side:
+                            mark = "✅" if winner == side else "❌"
+                    elif my == side:
+                        row_state = "pick"
+                        mark = "👈"
+
+                    md(ui.frag(ui.team_row(name, row_state, pct, mark, extra)))
+
+                if side == "a":
+                    md(ui.frag(ui.vs_chip()))
+
+    # 가운데 안내 패널
+    picked = sum(1 for c in draft if c)
+
+    if judged:
+        total_hit = total_all = 0
+
+        for index, res in enumerate(results):
+            if saved[index] in ("a", "b") and res["winner"] in ("a", "b"):
+                total_all += 1
+                total_hit += int(saved[index] == res["winner"])
+
+        lines = ["장마감 등락률로 확정된 결과예요"]
+
+        if nick and total_all:
+            lines.append(f"내 적중 {total_hit} / {total_all}")
+
+        cta = ui.cta_panel("오늘의 결과 확정", lines, "노란 테두리가 승리한 종목", rec.get("note") or "")
+    elif closed:
+        cta = ui.cta_panel("투표가 마감됐어요", ["09:00에 마감되어 더 이상 바꿀 수 없어요", "결과는 장마감(15:40) 이후 확정"], "09:00 마감")
+    elif not nick:
+        cta = ui.cta_panel("오늘의 대결에 참여하세요", ["5개 대결 · 08:00~08:59 투표", "위에서 로그인하면 종목을 고를 수 있어요"], "", "투표 전에는 선택 비율이 보이지 않아요")
+    else:
+        remain = logic.deadline_of(day, now.tzinfo) - now
+        minutes = max(int(remain.total_seconds() // 60), 0)
+        cta = ui.cta_panel(
+            "종목을 눌러 승자를 고르세요",
+            [f"내 선택 {picked} / {count}", "마음이 바뀌면 09:00 전까지 몇 번이든 바꿀 수 있어요"],
+            f"마감까지 약 {minutes}분",
+            "고른 뒤 아래 '예측 저장'을 꼭 눌러 주세요",
+        )
+
+    half = (count + 1) // 2
+    col_left, col_mid, col_right = st.columns([5, 4, 5], gap="medium", vertical_alignment="center")
+
+    with col_left:
+        for index in range(half):
+            draw_card(index)
+
+    with col_mid:
+        md(ui.frag(cta))
+
+    with col_right:
+        for index in range(half, count):
+            draw_card(index)
+
+    if can_vote:
+        reasons = []
+
+        with st.expander("선택 이유 (선택 사항 · 나중에 이유별 적중률이 쌓여요)"):
+            for index, match in enumerate(matches):
+                prev_reason = saved_reasons[index] if index < len(saved_reasons) else logic.REASONS[0]
+                reason_index = logic.REASONS.index(prev_reason) if prev_reason in logic.REASONS else 0
+
+                reasons.append(st.selectbox(
+                    f"대결 {index + 1} · {match['a']['name']} vs {match['b']['name']}",
+                    logic.REASONS,
+                    index=reason_index,
+                    key=f"arena_reason_{nkey}_{key}_{index}",
+                ))
+
+        changed = list(draft[:count]) != saved
+
+        if changed:
+            st.caption("저장하지 않은 변경이 있어요. 아래 버튼을 눌러 저장하세요.")
+        elif has_pick:
+            st.caption("저장되어 있어요 ✓")
+
+        with st.container(key="arena_save"):
+            submitted = st.button("예측 저장", type="primary", use_container_width=True, key="arena_save_btn")
+
+        if submitted:
+            choices = [c if c in ("a", "b") else None for c in draft[:count]]
+
+            def mutate(d):
+                current_phase = logic.phase(day, now_kst())
+
+                if current_phase == "closed":
+                    return "09:00이 지나 투표가 마감되어 저장하지 못했습니다."
+
+                if current_phase == "before":
+                    return "아직 투표 시간(08:00~08:59)이 아닙니다."
+
+                if nkey not in d["users"]:
+                    return "참가자 정보를 찾지 못했습니다. 다시 로그인해 주세요."
+
+                d["picks"].setdefault(key, {})[nkey] = {
+                    "choices": choices,
+                    "reasons": reasons,
+                    "at": now_kst().isoformat(),
+                }
+
+                return ""
+
+            try:
+                problem = store.update(mutate)
+            except Exception as error_:
+                problem = f"저장 실패: {str(error_)[:150]}"
+
+            if problem:
+                st.error(problem)
             else:
-                choices.append(None)
+                state["arena_flash"] = f"저장했습니다 · 선택 {sum(1 for c in choices if c)}/{len(choices)}개"
+                st.rerun()
 
-        def mutate(d):
-            current_phase = logic.phase(day, now_kst())
-
-            if current_phase == "closed":
-                return "09:00이 지나 투표가 마감되어 저장하지 못했습니다."
-
-            if current_phase == "before":
-                return "아직 투표 시간(08:00~08:59)이 아닙니다."
-
-            if nkey not in d["users"]:
-                return "참가자 정보를 찾지 못했습니다. 다시 로그인해 주세요."
-
-            d["picks"].setdefault(key, {})[nkey] = {
-                "choices": choices,
-                "reasons": reasons,
-                "at": now_kst().isoformat(),
-            }
-
-            return ""
-
-        try:
-            problem = store.update(mutate)
-        except Exception as error:
-            problem = f"저장 실패: {str(error)[:150]}"
-
-        if problem:
-            st.error(problem)
-        else:
-            st.success(f"저장했습니다 · 선택 {sum(1 for c in choices if c)}/{len(choices)}개")
-            data = store.load()
-
-    # 선택 현황은 본인이 선택을 저장했거나 마감된 뒤에만 보여 줍니다(쏠림 방지).
-    has_pick = bool((data["picks"].get(key) or {}).get(nkey))
-
-    if has_pick or closed:
-        st.markdown("##### 참가자 선택 현황")
-
-        for index, match in enumerate(rec["matches"]):
-            share = logic.pick_share(data, key, index)
-            total = share["a"] + share["b"]
-
-            if total:
-                st.markdown(
-                    f"- 대결 {index + 1}: {match['a']['name']} **{share['a'] / total * 100:.0f}%** "
-                    f"({share['a']}명) · {match['b']['name']} **{share['b'] / total * 100:.0f}%** ({share['b']}명)"
-                )
-            else:
-                st.markdown(f"- 대결 {index + 1}: 아직 선택한 사람이 없습니다.")
-
-        st.caption("선택 비율은 참가자들의 의견일 뿐 매수·매도 신호나 투자 지표가 아닙니다.")
+    st.caption(
+        f"투표 {day.month}/{day.day} 08:00~08:59 · 승패: 그날 장마감(15:40 이후 확정) 등락률이 더 높은 종목 · "
+        "선택 비율은 내가 저장했거나 마감된 뒤에만 보여요. 참가자들의 의견일 뿐 매수·매도 신호가 아닙니다."
+    )
 
 
 # ===============================================================
@@ -523,35 +606,34 @@ def render_play(data, nick, day, error):
 # ===============================================================
 
 def render_results(data, nick):
-    import pandas as pd
-
     now = now_kst()
 
     if nick:
         stats = logic.user_stats(data).get(store.nick_key(nick))
 
-        st.markdown("#### 내 기록")
+        md(ui.frag(ui.section("내 기록", "👤")))
 
         if stats and stats["total"]:
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("적중률", f"{stats['hits'] / stats['total'] * 100:.0f}%")
-            col2.metric("맞힌 대결", f"{stats['hits']} / {stats['total']}")
-            col3.metric("참여 라운드", f"{stats['rounds']}회")
-            col4.metric("보정 점수", f"{logic.wilson_lower(stats['hits'], stats['total']) * 100:.0f}")
+            md(ui.frag(ui.stat_cards([
+                {"k": "적중률", "v": f"{stats['hits'] / stats['total'] * 100:.0f}", "unit": "%", "s": "판정된 선택 기준"},
+                {"k": "맞힌 대결", "v": str(stats["hits"]), "unit": f" / {stats['total']}"},
+                {"k": "참여 라운드", "v": str(stats["rounds"]), "unit": "회"},
+                {"k": "보정 점수", "v": f"{logic.wilson_lower(stats['hits'], stats['total']) * 100:.0f}", "s": "참여가 적어도 공정하게"},
+            ])))
 
             if stats["by_reason"]:
                 rows = [
-                    {"선택 이유": reason, "적중": f"{h} / {t}", "적중률": f"{h / t * 100:.0f}%"}
+                    [reason, f"{h} / {t}", f"{h / t * 100:.0f}%"]
                     for reason, (h, t) in sorted(stats["by_reason"].items(), key=lambda kv: -kv[1][1])
                 ]
-                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                md(ui.frag(ui.data_table(["선택 이유", "적중", "적중률"], rows, "minmax(0,2fr) minmax(0,1fr) minmax(0,1fr)")))
         else:
             st.caption("아직 판정이 끝난 예측이 없습니다. 결과는 대결일 장마감(15:40) 이후에 확정됩니다.")
 
     weeks = completed_weeks(data, now)
 
     if weeks:
-        st.markdown("#### 🏅 주간 토너먼트 결과")
+        md(ui.frag(ui.section("주간 토너먼트 결과", "🏅")))
 
         for monday, standing in weeks[:4]:
             if standing["tied_all"]:
@@ -563,9 +645,9 @@ def render_results(data, nick):
                 )
 
             with st.expander(f"{week_label(monday)} 주간 · {headline}", expanded=(monday == weeks[0][0])):
-                st.dataframe(pd.DataFrame(week_table_rows(standing)), hide_index=True, use_container_width=True)
+                md(ui.frag(week_table_html(standing, mine=nick)))
 
-    st.markdown("#### 최근 대결 결과")
+    md(ui.frag(ui.section("최근 대결 결과", "📋")))
 
     days = sorted(data["rounds"], reverse=True)[:7]
 
@@ -620,58 +702,90 @@ def render_results(data, nick):
                 elif pick in ("a", "b"):
                     mark = "제외"
 
-                rows.append({
-                    "대결": index + 1,
-                    "A": f"{match['a']['name']} {pct(result['a_pct'])}",
-                    "B": f"{match['b']['name']} {pct(result['b_pct'])}",
-                    "승자": win_name,
-                    "내 선택": mark,
-                })
+                rows.append([
+                    f"대결 {index + 1}",
+                    f"{match['a']['name']} {pct(result['a_pct'])}",
+                    f"{match['b']['name']} {pct(result['b_pct'])}",
+                    win_name,
+                    mark,
+                ])
 
-            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            md(ui.frag(ui.data_table(
+                ["대결", "A", "B", "승자", "내 선택"],
+                rows,
+                "minmax(54px,.6fr) minmax(0,1.3fr) minmax(0,1.3fr) minmax(0,1fr) minmax(0,1fr)",
+            )))
 
 
 # ===============================================================
 # 탭 3: 랭킹
 # ===============================================================
 
-def week_table_rows(standing):
+def week_table_html(standing, mine=None, title="Top Users", sub="월~금 합산 · 많이 맞힌 순"):
     rows = []
 
-    for rank, row in enumerate(standing["rows"], start=1):
-        item = {"순위": rank, "닉네임": row["nick"]}
+    for row in standing["rows"]:
+        cells = []
 
-        for offset, name in enumerate("월화수목금"):
+        for offset in range(5):
             cell = row["days"].get(offset)
-            item[name] = f"{cell[0]}/{cell[0] + cell[1]}" if cell else "-"
+            cells.append(f"{cell[0]}/{cell[0] + cell[1]}" if cell else "-")
 
-        item["적중 합계"] = row["hits"]
-        item["오답"] = row["misses"]
-        rows.append(item)
+        cells.append(str(row["hits"]))
+        rows.append({"nick": row["nick"], "cells": cells})
 
-    return rows
+    return ui.top_table(title, sub, ["순위", "닉네임", "월", "화", "수", "목", "금", "합계"], rows, mine=mine)
 
 
-def render_week_tournament(data):
-    import pandas as pd
+def render_board(key, entries, rows, headers, title, sub, nick, note=""):
+    md(ui.frag(ui.podium(entries)))
 
+    if nick:
+        names = [row["nick"] for row in rows]
+
+        if nick in names:
+            md(ui.frag(ui.me_pill(f"내 순위 <b>{names.index(nick) + 1}위</b> · 전체 {len(rows)}명")))
+        else:
+            md(ui.frag(ui.me_pill(note or "아직 순위에 들지 않았어요")))
+
+    show_all = len(rows) > 10 and st.toggle("전체 보기", key=f"arena_all_{key}")
+
+    md(ui.frag(ui.top_table(title, sub, headers, rows if show_all else rows[:10], mine=nick)))
+
+
+def render_week_tournament(data, nick):
     now = now_kst()
     monday = logic.week_start(now.date())
     standing = logic.week_standings(data, monday)
     complete = logic.week_complete(data, monday, now)
 
-    st.markdown(f"##### 이번 주 ({week_label(monday)}) {'· 확정' if complete else '· 진행 중'}")
+    st.caption(f"이번 주 ({week_label(monday)}) {'· 확정' if complete else '· 진행 중'}")
 
     if not standing:
+        md(ui.frag(ui.podium([])))
         st.caption("아직 이번 주에 판정이 끝난 대결이 없습니다. 하루 결과가 확정되면 합산이 시작됩니다.")
     else:
         if complete and not standing["tied_all"]:
-            st.success(
-                f"🥇 주간 우승 {', '.join(standing['first'])} · "
-                f"🥄 꼴찌 {', '.join(standing['last'])} (꼴찌가 상품을 쏩니다)"
-            )
+            md(ui.frag(ui.me_pill(
+                f"🥇 주간 우승 <b>{ui.esc(', '.join(standing['first']))}</b> · "
+                f"🥄 꼴찌 <b>{ui.esc(', '.join(standing['last']))}</b> (꼴찌가 상품을 쏩니다)"
+            )))
 
-        st.dataframe(pd.DataFrame(week_table_rows(standing)), hide_index=True, use_container_width=True)
+        entries = [
+            {"nick": r["nick"], "big": str(r["hits"]), "unit": "개", "label": "적중", "small": f"오답 {r['misses']}"}
+            for r in standing["rows"][:3]
+        ]
+        md(ui.frag(ui.podium(entries)))
+
+        names = [r["nick"] for r in standing["rows"]]
+
+        if nick and nick in names:
+            md(ui.frag(ui.me_pill(f"내 순위 <b>{names.index(nick) + 1}위</b> · 전체 {len(names)}명")))
+
+        show_all = len(names) > 10 and st.toggle("전체 보기", key="arena_all_week")
+        view = dict(standing)
+        view["rows"] = standing["rows"] if show_all else standing["rows"][:10]
+        md(ui.frag(week_table_html(view, mine=nick)))
 
     st.caption(
         "월~금 일간 대결의 맞힌 개수를 합산해 순위를 정합니다(많은 순, 같으면 오답이 적은 순). "
@@ -679,51 +793,57 @@ def render_week_tournament(data):
     )
 
 
-def render_ranking(data):
-    import pandas as pd
-
+def render_ranking(data, nick=None):
     today = now_kst().date()
 
     tab_week, tab_month, tab_all = st.tabs(["🏅 주간 토너먼트", "월간 (최근 30일)", "누적"])
 
     with tab_week:
-        render_week_tournament(data)
+        render_week_tournament(data, nick)
 
     views = (
-        (tab_month, "month", (today - datetime.timedelta(days=30)).isoformat()),
-        (tab_all, "all", None),
+        (tab_month, "month", (today - datetime.timedelta(days=30)).isoformat(), "최근 30일 · 보정 점수 순"),
+        (tab_all, "all", None, "전체 기간 · 보정 점수 순"),
     )
 
-    for tab, mode, since in views:
+    for tab, mode, since, sub in views:
         with tab:
             minimum = logic.MIN_RANKED[mode]
             ranked, waiting = logic.ranking(logic.user_stats(data, since), minimum)
 
+            entries = [
+                {
+                    "nick": r["nick"],
+                    "big": f"{r['rate'] * 100:.0f}",
+                    "unit": "%",
+                    "label": "적중률",
+                    "small": f"{r['hits']} / {r['total']} 적중",
+                }
+                for r in ranked[:3]
+            ]
+            rows = [
+                {
+                    "nick": r["nick"],
+                    "cells": [f"{r['hits']} / {r['total']}", f"{r['score'] * 100:.0f}", f"{r['rate'] * 100:.0f}%"],
+                }
+                for r in ranked
+            ]
+
             if ranked:
-                rows = [
-                    {
-                        "순위": rank,
-                        "닉네임": row["nick"],
-                        "적중률": f"{row['rate'] * 100:.0f}%",
-                        "적중": f"{row['hits']} / {row['total']}",
-                        "보정 점수": f"{row['score'] * 100:.0f}",
-                    }
-                    for rank, row in enumerate(ranked, start=1)
-                ]
-                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                render_board(
+                    mode, entries, rows, ["순위", "닉네임", "적중", "보정 점수", "적중률"],
+                    "Top Users", sub, nick, f"판정된 대결 {minimum}개 이상부터 순위에 들어가요",
+                )
             else:
+                md(ui.frag(ui.podium([])))
                 st.caption(f"판정된 대결이 {minimum}개 이상인 참가자부터 순위에 들어갑니다.")
 
             if waiting:
                 with st.expander(f"집계 중 ({minimum}개 미만 · {len(waiting)}명)"):
-                    st.dataframe(
-                        pd.DataFrame([
-                            {"닉네임": r["nick"], "적중": f"{r['hits']} / {r['total']}"}
-                            for r in waiting
-                        ]),
-                        hide_index=True,
-                        use_container_width=True,
-                    )
+                    md(ui.frag(ui.data_table(
+                        ["닉네임", "적중"],
+                        [[r["nick"], f"{r['hits']} / {r['total']}"] for r in waiting],
+                    )))
 
     st.caption(
         "월간·누적 순위는 참여 횟수가 적은 사람이 우연히 100%가 되어도 1위가 되지 않도록 보정한 점수 순입니다. "
@@ -878,11 +998,10 @@ def render_admin(data):
 # ===============================================================
 
 def main():
-    st.title("MTNW 주식 대결 🥊 (베타)")
-    st.caption(DISCLAIMER)
-
     now = now_kst()
     day = logic.active_round_date(now)
+
+    md(ui.css_only())
 
     # 8시 전에는 대진을 만들지도 공개하지도 않습니다.
     if logic.phase(day, now) == "before":
@@ -895,6 +1014,15 @@ def main():
     # 판정이 끝났을 수 있으니 다시 읽음
     data = store.load()
 
+    monday = logic.week_start(day)
+    friday = monday + datetime.timedelta(days=4)
+
+    md(ui.frag(ui.hero(
+        f"{day_text(monday)} – {day_text(friday)}",
+        ["투표 08:00~08:59", "15:40 이후 확정", "꼴찌가 쏩니다"],
+    )))
+
+    render_round_strip(data, now, day)
     render_prize(data)
 
     nick = render_account(data)
@@ -913,11 +1041,12 @@ def main():
         render_results(data, nick)
 
     with tab_rank:
-        render_ranking(data)
+        render_ranking(data, nick)
 
     with tab_admin:
         render_admin(data)
 
+    st.caption(DISCLAIMER)
+
 
 main()
-
