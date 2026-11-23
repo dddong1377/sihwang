@@ -319,6 +319,37 @@ def md(html_text):
     st.markdown(html_text, unsafe_allow_html=True)
 
 
+def participation_html(data, key):
+    """그날 투표한 참가자와 투표하지 않은 참가자를 함께 보여 줍니다."""
+
+    users = data["users"]
+    picks = data["picks"].get(key) or {}
+    voted = sorted(u["nick"] for k, u in users.items() if k in picks)
+    absent = sorted(u["nick"] for k, u in users.items() if k not in picks)
+
+    def chips(names, fg, bg, border):
+        if not names:
+            return '<span style="color:#8d8d95;font-size:13px">없음</span>'
+
+        return "".join(
+            f'<span style="display:inline-block;margin:3px 6px 3px 0;padding:4px 12px;border-radius:999px;'
+            f'font-size:13px;font-weight:600;color:{fg};background:{bg};border:1px solid {border}">{ui.esc(n)}</span>'
+            for n in names
+        )
+
+    label = 'style="font-size:12px;color:#9a9aa2;margin:8px 0 2px"'
+
+    return ui.frag(
+        ui.section(f"{day_text(datetime.date.fromisoformat(key))} 참여 현황", "👥")
+        + '<div style="background:#111114;border:1px solid #2a2a2f;border-radius:14px;padding:10px 16px 12px">'
+        + f'<div {label}>✅ 투표함 · {len(voted)}명</div>'
+        + chips(voted, "#7ee0a3", "#12301f", "#1f6b3f")
+        + f'<div {label}>⬜ 투표 안 함 · {len(absent)}명</div>'
+        + chips(absent, "#b4b4bc", "#1a1a1f", "#2e2e35")
+        + "</div>"
+    )
+
+
 def render_prize(data):
     now = now_kst()
 
@@ -425,6 +456,15 @@ def render_play(data, nick, day, error):
 
         return
 
+    waiting_close = day == now.date() and now.time() < logic.CLOSE_CONFIRM
+
+    if closed and not judged and waiting_close:
+        md(ui.frag(ui.cta_panel(
+            "오늘 투표는 마감되었습니다!",
+            ["투표는 08:00~08:59에만 할 수 있어요", "결과는 장마감(15:40) 이후 확정돼요"],
+            "09:00 마감",
+        )))
+
     matches = rec["matches"]
     count = len(matches)
     nkey = store.nick_key(nick) if nick else ""
@@ -516,7 +556,10 @@ def render_play(data, nick, day, error):
 
         cta = ui.cta_panel("오늘의 결과 확정", lines, "노란 테두리가 승리한 종목", rec.get("note") or "")
     elif closed and not can_vote:
-        cta = ui.cta_panel("투표가 마감됐어요", ["09:00에 마감되어 더 이상 바꿀 수 없어요", "결과는 장마감(15:40) 이후 확정"], "09:00 마감")
+        if waiting_close or day != now.date():
+            cta = ui.cta_panel("투표가 마감됐어요", ["09:00에 마감되어 더 이상 바꿀 수 없어요", "결과는 장마감(15:40) 이후 확정"], "09:00 마감")
+        else:
+            cta = ui.cta_panel("장마감 결과를 집계하고 있어요", ["투표는 마감됐고 결과를 확정하는 중이에요", "잠시 뒤 새로고침하면 결과가 보여요"], "결과 집계 중")
     elif not nick:
         cta = ui.cta_panel("오늘의 대결에 참여하세요", ["5개 대결 · 08:00~08:59 투표", "위에서 로그인하면 종목을 고를 수 있어요"], "", "투표 전에는 선택 비율이 보이지 않아요")
     elif phase != "open":
@@ -614,6 +657,9 @@ def render_play(data, nick, day, error):
                 state["arena_flash"] = f"저장했습니다 · 선택 {sum(1 for c in choices if c)}/{len(choices)}개"
                 st.rerun()
 
+    if closed or judged:
+        md(participation_html(data, key))
+
     st.caption(
         f"투표 {day.month}/{day.day} 08:00~08:59 · 승패: 그날 장마감(15:40 이후 확정) 등락률이 더 높은 종목 · "
         "선택 비율은 내가 저장했거나 마감된 뒤에만 보여요. 참가자들의 의견일 뿐 매수·매도 신호가 아닙니다."
@@ -681,6 +727,8 @@ def render_results(data, nick):
         label = {"judged": "결과 확정", "void": "무효", "open": "판정 대기"}.get(state_name, state_name)
 
         with st.expander(f"{day_text(day)} · {label}", expanded=(key == days[0])):
+            md(participation_html(data, key))
+
             if state_name != "judged":
                 st.caption(rec.get("note") or "장마감(15:40) 이후 결과가 확정됩니다.")
                 continue
@@ -1033,7 +1081,13 @@ def main():
     # 판정이 끝났을 수 있으니 다시 읽음
     data = store.load()
 
-    monday = logic.week_start(day)
+    # 투표가 열리기 전(예: 장마감 후 저녁)에는 '내일 열려요' 안내 아래에 가장 최근 대결 결과를 계속 보여 줍니다.
+    before_open = logic.phase(day, now) == "before" and not st.session_state.get("arena_admin")
+    past_keys = [k for k in data["rounds"] if k < day.isoformat()] if before_open else []
+    prev_day = datetime.date.fromisoformat(max(past_keys)) if past_keys else None
+    view_day = prev_day or day
+
+    monday = logic.week_start(view_day)
     friday = monday + datetime.timedelta(days=4)
 
     md(ui.frag(ui.hero(
@@ -1041,7 +1095,7 @@ def main():
         ["투표 08:00~08:59", "15:40 이후 확정", "꼴찌가 쏩니다"],
     )))
 
-    render_round_strip(data, now, day)
+    render_round_strip(data, now, view_day)
     render_prize(data)
 
     nick = render_account(data)
@@ -1055,6 +1109,10 @@ def main():
 
     with tab_play:
         render_play(data, nick, day, round_error)
+
+        if prev_day:
+            md(ui.frag(ui.section(f"{day_text(prev_day)} 대결 결과", "📋")))
+            render_play(data, nick, prev_day, "")
 
     with tab_result:
         render_results(data, nick)
