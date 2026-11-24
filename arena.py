@@ -1221,6 +1221,14 @@ def main():
     if judge_error:
         st.warning(judge_error)
 
+        if "HTTP 403" in judge_error or "IP address not allowed" in judge_error:
+            try:
+                from ip_notice import render_ip_help
+
+                render_ip_help("ip_help_arena")
+            except Exception:
+                pass
+
     tab_play, tab_result, tab_rank, tab_admin = st.tabs(
         tab_names("🎯 오늘의 대결", "📋 결과·내 기록", "🏆 랭킹", "🔧 관리자")
     )
@@ -1245,3 +1253,4 @@ def main():
 
 
 main()
+
