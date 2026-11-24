@@ -319,6 +319,19 @@ def md(html_text):
     st.markdown(html_text, unsafe_allow_html=True)
 
 
+# 대진판은 '조각(fragment)'으로 그려서, 카드를 눌러도 페이지 전체(데이터 읽기·판정 확인)를 다시 실행하지 않습니다.
+_fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None) or (lambda func: func)
+
+
+def rerun_board():
+    """카드를 눌렀을 때 대진판만 다시 그립니다. (옛 Streamlit이면 전체를 다시 실행)"""
+
+    try:
+        st.rerun(scope="fragment")
+    except Exception:
+        st.rerun()
+
+
 def rename_user(d, old_nick, new_nick):
     """닉네임을 바꾸고 모든 날짜의 투표 기록도 새 이름으로 옮깁니다. 오류 문구(없으면 빈 문자열)."""
 
@@ -471,6 +484,7 @@ def render_round_strip(data, now, active_day):
 # 탭 1: 오늘의 대결
 # ===============================================================
 
+@_fragment
 def render_play(data, nick, day, error):
     state = st.session_state
     now = now_kst()
@@ -564,7 +578,7 @@ def render_play(data, nick, day, error):
                     ):
                         draft[index] = None if chosen else side
                         state[draft_key] = draft
-                        st.rerun()
+                        rerun_board()
                 else:
                     row_state, mark, extra = "", "", ""
                     my = saved[index]
@@ -1178,10 +1192,12 @@ def main():
     else:
         data, round_error = ensure_round(day)
 
+    judged_at = st.session_state.get("arena_judge_at")
     judge_error = judge_pending()
 
-    # 판정이 끝났을 수 있으니 다시 읽음
-    data = store.load()
+    # 판정을 실제로 실행했을 때만(2분 간격) 결과가 바뀌었을 수 있으니 다시 읽음
+    if st.session_state.get("arena_judge_at") != judged_at:
+        data = store.load()
 
     # 투표가 열리기 전(예: 장마감 후 저녁)에는 '내일 열려요' 안내 아래에 가장 최근 대결 결과를 계속 보여 줍니다.
     before_open = logic.phase(day, now) == "before" and not st.session_state.get("arena_admin")
@@ -1229,4 +1245,3 @@ def main():
 
 
 main()
-
