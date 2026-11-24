@@ -17,10 +17,15 @@ MAX_CODES = 100  # 연결당 구독 한도 (채널 x 종목 합산)
 
 
 class TossFeed:
-    def __init__(self, token_getter):
-        """token_getter: 호출하면 access token 문자열을 돌려주는 함수."""
+    def __init__(self, token_getter, token_refresher=None):
+        """token_getter: 호출하면 access token 문자열을 돌려주는 함수.
+        token_refresher: (선택) 저장해 둔 토큰을 버려서, 다음 token_getter 호출이 새 토큰을 받게 하는 함수.
+        접속 단계에서 401/403이 반복되면(다른 곳에서 새 토큰을 받아 이 토큰이 무효가 된 경우) 한 번 호출합니다."""
 
         self._token_getter = token_getter
+        self._token_refresher = token_refresher
+        self._handshake_fails = 0   # 연속 접속 거절(401/403) 횟수
+        self._last_refresh = 0.0
         self._lock = threading.Lock()
 
         self._symbols = ()       # 구독하려는 종목
@@ -115,6 +120,7 @@ class TossFeed:
                 )
 
                 self._ws = ws
+                self._rejected_status = 0
                 ws.run_forever(ping_interval=30, ping_timeout=10)
 
             except Exception as error:
@@ -126,10 +132,36 @@ class TossFeed:
             if time.time() - started > 60:
                 backoff = 1.0  # 오래 유지되다 끊긴 경우는 바로 재시도
 
+            self._maybe_refresh_token()
+
             time.sleep(backoff + random.random())
             backoff = min(backoff * 2, 60.0)
 
+    def _maybe_refresh_token(self):
+        """접속이 401/403으로 연속 거절되면 토큰이 무효일 수 있으니, 2번째부터 (최대 2분에 한 번) 새 토큰을 받게 합니다."""
+
+        if getattr(self, "_rejected_status", 0) in (401, 403):
+            self._handshake_fails += 1
+        else:
+            self._handshake_fails = 0
+            return
+
+        if (
+            self._token_refresher
+            and self._handshake_fails >= 2
+            and time.time() - self._last_refresh > 120
+        ):
+            self._last_refresh = time.time()
+
+            try:
+                self._token_refresher()
+                self._set_error(f"{self._last_error} (토큰을 새로 받아 재시도)")
+            except Exception as error:
+                self._set_error(f"토큰 갱신 실패: {error}")
+
     def _on_open(self, ws):
+        self._handshake_fails = 0
+
         with self._lock:
             self._connected = True
             self._last_error = ""
@@ -191,6 +223,7 @@ class TossFeed:
                 ws.close()  # 루프가 백오프 후 재연결하고 구독을 다시 선언합니다
 
     def _on_error(self, ws, error):
+        self._rejected_status = int(getattr(error, "status_code", 0) or 0)
         self._set_error(f"{type(error).__name__}: {error}")
 
     def _on_close(self, ws, code, reason):
