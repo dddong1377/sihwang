@@ -515,7 +515,7 @@ def get_token(client_id, client_secret):
 def get_feed():
     """웹소켓 연결은 서버(프로세스)당 1개만 만듭니다. (계정당 동시 연결 2개 한도)"""
 
-    return TossFeed(lambda: get_token(CLIENT_ID, CLIENT_SECRET))
+    return TossFeed(lambda: get_token(CLIENT_ID, CLIENT_SECRET), get_token.clear)
 
 
 def api_get(path, params=None):
