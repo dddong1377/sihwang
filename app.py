@@ -45,6 +45,7 @@ test_pages = [
         url_path="Arena",
     ),
     st.Page(
+
         "report_digest.py",
         title="리포트 압축(사용X)",
         icon="📑",
@@ -121,5 +122,13 @@ navigation = st.navigation({
     "": main_pages,
     "테스트 진행 중": test_pages,
     "시스템 관리": monitor_pages,
+    "투자 분석": [
+        st.Page(
+            "quant_lab.py",
+            title="QUANT LAB",
+            icon="📊",
+            url_path="quant_lab",
+        ),
+    ],
 })
 navigation.run()
