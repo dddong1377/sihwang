@@ -347,6 +347,35 @@ function stamp(t) { return D.token ? String(t).split(D.token).join(nowKST()) : S
 function fnt(px, bold) { return (bold === 2 ? '800 ' : bold ? 'bold ' : '') + px + 'px ' + FONT; }
 function tw(t, px, bold) { mctx.font = fnt(px, bold); return mctx.measureText(t).width; }
 
+// 🔻(하락) 이모지는 빨간색이라 상승(🔺)과 헷갈리므로, 같은 크기의 파란 삼각형으로 바꿔 그립니다.
+function fillText2(ctx, t, x, y) {
+  t = String(t);
+  if (t.indexOf('\u{1F53B}') < 0) { ctx.fillText(t, x, y); return; }
+  const align = ctx.textAlign;
+  const parts = t.split(/\u{1F53B}\uFE0F?/u);
+  const gw = ctx.measureText('\u{1F53B}').width;
+  const total = parts.reduce((a, p) => a + ctx.measureText(p).width, 0) + gw * (parts.length - 1);
+  let cx = align === 'right' ? x - total : align === 'center' ? x - total / 2 : x;
+  ctx.textAlign = 'left';
+  parts.forEach((p, i) => {
+    if (p) { ctx.fillText(p, cx, y); cx += ctx.measureText(p).width; }
+    if (i < parts.length - 1) {
+      const sz = gw * 0.78, mx = cx + gw / 2;
+      ctx.save();
+      ctx.fillStyle = '#1D6FE8';
+      ctx.beginPath();
+      ctx.moveTo(mx - sz / 2, y - sz * 0.34);
+      ctx.lineTo(mx + sz / 2, y - sz * 0.34);
+      ctx.lineTo(mx, y + sz * 0.46);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+      cx += gw;
+    }
+  });
+  ctx.textAlign = align;
+}
+
 // ----- 글 배치: 조각(굵기·색이 다른 글)을 폭에 맞춰 줄로 나눔 -----
 function layoutText(segs, width, px, firstIndent) {
   const lines = [[]];
@@ -383,7 +412,7 @@ function drawLines(ctx, lines, x0, y0, px, lineH, defColor) {
       if (tok.t.trim() === '') continue;
       ctx.font = fnt(px, tok.bold);
       ctx.fillStyle = tok.color || defColor || '#111';
-      ctx.fillText(tok.t, x0 + tok.x, cy);
+      fillText2(ctx, tok.t, x0 + tok.x, cy);
     }
   });
 }
@@ -460,10 +489,10 @@ function blockIssue(b, isLast) {
     if (b.num) {
       ctx.fillStyle = '#1F2A44'; rrect(ctx, x, y, BW, barH, 12); ctx.fill();
       ctx.fillStyle = '#fff'; ctx.font = fnt(26, true); ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
-      ctx.fillText(b.num, x + BW / 2, y + barH / 2 + 1); ctx.textAlign = 'left';
+      fillText2(ctx, b.num, x + BW / 2, y + barH / 2 + 1); ctx.textAlign = 'left';
     }
     let tx = px0 + PADL;
-    if (b.dir) { ctx.font = fnt(20, false); ctx.textBaseline = 'middle'; ctx.fillStyle = INK; ctx.fillText(b.dir, tx, y + barH / 2 + 1); tx += dirW; }
+    if (b.dir) { ctx.font = fnt(20, false); ctx.textBaseline = 'middle'; ctx.fillStyle = INK; fillText2(ctx, b.dir, tx, y + barH / 2 + 1); tx += dirW; }
     drawLines(ctx, lines, tx, y + (barH - lines.length * lh) / 2, px, lh, INK);
     let yy = y + barH + 16;
     ls.forEach(l => { l.draw(ctx, x, yy); yy += l.h; });
@@ -541,9 +570,9 @@ function blockTable(b) {
         const t = stamp(texts[ri][i]);
         const a = ri === 0 ? 'center' : al[i];
         const cy = y + ri * rowH + rowH / 2 + fs * 0.04;
-        if (a === 'right') { ctx.textAlign = 'right'; ctx.fillText(t, cx + colW[i] - PX * fs, cy); }
-        else if (a === 'center') { ctx.textAlign = 'center'; ctx.fillText(t, cx + colW[i] / 2, cy); }
-        else { ctx.textAlign = 'left'; ctx.fillText(t, cx + PX * fs, cy); }
+        if (a === 'right') { ctx.textAlign = 'right'; fillText2(ctx, t, cx + colW[i] - PX * fs, cy); }
+        else if (a === 'center') { ctx.textAlign = 'center'; fillText2(ctx, t, cx + colW[i] / 2, cy); }
+        else { ctx.textAlign = 'left'; fillText2(ctx, t, cx + PX * fs, cy); }
         cx += colW[i];
       });
     });
