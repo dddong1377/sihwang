@@ -880,6 +880,52 @@ def yahoo_quote(symbol):
         return None
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def naver_usdkrw():
+    """네이버 금융 시장지표(HTML)의 미국 USD 환율. 실패하면 None."""
+
+    try:
+        response = requests.get(
+            "https://finance.naver.com/marketindex/",
+            headers=NAVER_WEB_HEADERS,
+            timeout=8,
+        )
+
+        if response.status_code != 200:
+            return None
+
+        page = response.content.decode("cp949", errors="ignore")
+        start = page.find("FX_USDKRW")
+
+        if start < 0:
+            return None
+
+        segment = page[start:start + 1500]
+        value = re.search(r'class="value">\s*([\d,.]+)\s*<', segment)
+        change = re.search(r'class="change">\s*([\d,.]+)\s*<', segment)
+
+        price = num(value.group(1)) if value else None
+
+        if not price:
+            return None
+
+        pct = None
+
+        if change:
+            amount = num(change.group(1)) or 0
+            down = ("point_dn" in segment[:600]) or ("하락" in segment[:900])
+            amount = -amount if down else amount
+            previous = price - amount
+
+            if previous:
+                pct = amount / previous * 100
+
+        return {"price": price, "pct": pct, "fetched": time.time()}
+
+    except Exception:
+        return None
+
+
 def get_usdkrw():
     """
     원/달러 환율 조회.
@@ -906,18 +952,30 @@ def get_usdkrw():
     except Exception:
         price = None
 
-    fallback = yahoo_quote("KRW=X")
+    yahoo = yahoo_quote("KRW=X")
+    naver = None if from_toss else naver_usdkrw()
 
-    pct = fallback["pct"] if fallback else None
+    pct = yahoo["pct"] if yahoo else None
+    source = "토스 Open API" if from_toss else ""
 
-    if price is None and fallback:
-        price = fallback["price"]
+    if price is None and naver:
+        price, pct, source = naver["price"], naver["pct"], "네이버(고시 환율)"
+
+    if price is None and yahoo:
+        price, source = yahoo["price"], "야후"
+
+    check = None
+
+    if yahoo and yahoo.get("price") and price and source != "야후":
+        diff = abs(price / yahoo["price"] - 1) * 100
+        check = {"ok": diff <= 0.5, "diff": diff, "with": "야후"}
 
     return {
         "price": price,
         "pct": pct,
-        "source": "토스 Open API" if from_toss else "야후",
+        "source": source,
         "fetched": time.time(),
+        "check": check,
     }
 
 
@@ -6201,7 +6259,13 @@ def render_public_status(snapshot):
 
         if fx.get("price") is not None:
             icon, age = _age_label(fx.get("fetched"), allow_final=False)
-            lines.append(f"- {icon} 원/달러 · {fx.get('source') or '-'} · {age}")
+            fx_check = fx.get("check")
+            fx_text = (
+                "" if not fx_check
+                else (f" · ✓ {fx_check['with']}와 일치" if fx_check["ok"]
+                      else f" · ⚠ {fx_check['with']}와 {fx_check['diff']:.2f}% 차이")
+            )
+            lines.append(f"- {icon} 원/달러 {fmt(fx['price'])} · {fx.get('source') or '-'} · {age}{fx_text}")
 
         shown = snapshot.get("gainers", []) + snapshot.get("losers", [])
 
