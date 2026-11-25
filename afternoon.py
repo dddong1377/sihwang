@@ -1319,6 +1319,15 @@ def enrich_stock(stock, day):
     stock["theme"] = classify_theme(stock["name"], titles)
 
 
+def decode_naver(content):
+    """네이버 응답 본문 디코딩. 새 증권 페이지는 UTF-8, 예전 페이지는 CP949입니다."""
+
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        return content.decode("cp949", errors="ignore")
+
+
 def parse_naver_market_sum(page_html, market):
     """
     네이버 금융 시가총액 페이지(HTML) 한 장을 종목 목록으로 변환.
@@ -1430,9 +1439,88 @@ def parse_naver_market_sum(page_html, market):
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_cap_rows_naver(phase):
     """[1순위] 코스피 상위 150개 + 코스닥 상위 100개를 네이버 금융 시가총액 기준으로 수집 (10분 캐시).
-    시총 '순위'와 현재가·전일비를 얻는 용도입니다.
+    시총 '순위'와 현재가·전일비를 얻는 용도입니다. 시총 표(HTML)를 못 읽으면 네이버 모바일 API로 다시 시도합니다.
     phase('open'/'closed')는 장 시작·마감 시점에 캐시가 바로 새로 만들어지도록 키로만 씁니다."""
 
+    try:
+        return _fetch_cap_rows_naver_html()
+
+    except Exception as html_error:
+        try:
+            return _fetch_cap_rows_naver_mobile()
+
+        except Exception as mobile_error:
+            raise RuntimeError(
+                f"{html_error} / 모바일 API: {mobile_error}"
+            ) from mobile_error
+
+
+def _fetch_cap_rows_naver_mobile():
+    """네이버 모바일 증권 API(JSON, 비공식)로 시총 순 종목 목록을 만듭니다."""
+
+    rows = {}
+
+    for market, pages in (("KOSPI", 3), ("KOSDAQ", 2)):
+        for page in range(1, pages + 1):
+            response = requests.get(
+                f"https://m.stock.naver.com/api/stocks/marketValue/{market}",
+                params={"page": page, "pageSize": 50},
+                headers={
+                    "User-Agent": NAVER_WEB_HEADERS["User-Agent"],
+                    "Referer": "https://m.stock.naver.com/",
+                },
+                timeout=8,
+            )
+
+            if response.status_code != 200:
+                raise RuntimeError(f"HTTP {response.status_code}")
+
+            items = (response.json() or {}).get("stocks") or []
+
+            if len(items) < 10:
+                raise RuntimeError("종목을 충분히 읽지 못했습니다.")
+
+            fetched_at = time.time()
+
+            for item in items:
+                symbol = str(item.get("itemCode") or "")
+                name = str(item.get("stockName") or "").strip()
+                price = num(item.get("closePrice"))
+                pct = num(item.get("fluctuationsRatio"))
+                cap = num(item.get("marketValue"))
+
+                if not (re.fullmatch(r"\d{6}", symbol) and name) or None in (price, pct, cap):
+                    continue
+
+                base = None
+                magnitude = num(item.get("compareToPreviousClosePrice"))
+
+                if magnitude is not None:
+                    magnitude = abs(magnitude)
+
+                    for candidate in (price - magnitude, price + magnitude):
+                        if candidate > 0 and abs((price / candidate - 1) * 100 - pct) <= 0.05:
+                            base = candidate
+                            break
+
+                rows[symbol] = {
+                    "symbol": symbol,
+                    "name": name,
+                    "price": price,
+                    "pct": pct,
+                    "cap": cap,
+                    "base": base,
+                    "market": market,
+                    "_at": fetched_at,
+                }
+
+    if len(rows) < 50:
+        raise RuntimeError("종목 수가 부족합니다.")
+
+    return list(rows.values())
+
+
+def _fetch_cap_rows_naver_html():
     rows = {}
 
     for sosok, market, pages in ((0, "KOSPI", 3), (1, "KOSDAQ", 2)):
@@ -1449,7 +1537,7 @@ def fetch_cap_rows_naver(phase):
                     f"네이버 금융 HTTP {response.status_code}"
                 )
 
-            page_html = response.content.decode("cp949", errors="ignore")
+            page_html = decode_naver(response.content)
 
             parsed = parse_naver_market_sum(page_html, market)
 
@@ -1507,7 +1595,7 @@ def fetch_krx_prev_close(symbol, day_text):
     if response.status_code != 200:
         raise RuntimeError(f"네이버 일별 시세 HTTP {response.status_code}")
 
-    page_html = response.content.decode("cp949", errors="ignore")
+    page_html = decode_naver(response.content)
 
     close = parse_naver_daily_close(page_html, day_text)
 

@@ -50,6 +50,19 @@ NAVER_WEB_HEADERS = {
     "Referer": "https://finance.naver.com/sise/",
 }
 YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0"}
+NAVER_MOBILE_HEADERS = {
+    "User-Agent": NAVER_WEB_HEADERS["User-Agent"],
+    "Referer": "https://m.stock.naver.com/",
+}
+
+
+def _decode(content):
+    """네이버 새 증권 페이지는 UTF-8, 예전 페이지는 CP949입니다."""
+
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        return content.decode("cp949", errors="ignore")
 
 _BLOCK = {"until": 0.0}
 _MARKET = {}  # 종목코드 → KOSPI/KOSDAQ (공개 데이터 모드에서 야후 대조에 사용)
@@ -360,10 +373,8 @@ def _parse_naver_market_sum(page_html, market):
     return rows
 
 
-@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
-def _fetch_cap_top_public(day_text):
-    """시가총액 상위 100개 [(종목코드, 종목명)] (네이버 금융, 코스피 3쪽 + 코스닥 2쪽)."""
 
+def _cap_rows_html():
     rows = {}
 
     for sosok, market, pages in ((0, "KOSPI", 3), (1, "KOSDAQ", 2)):
@@ -379,7 +390,7 @@ def _fetch_cap_top_public(day_text):
                 raise TossError(f"네이버 금융 HTTP {response.status_code}")
 
             parsed = _parse_naver_market_sum(
-                response.content.decode("cp949", errors="ignore"), market
+                _decode(response.content), market
             )
 
             if len(parsed) < 10:
@@ -387,6 +398,54 @@ def _fetch_cap_top_public(day_text):
 
             for row in parsed:
                 rows[row["symbol"]] = row
+
+    return rows
+
+
+def _cap_rows_mobile():
+    """네이버 모바일 증권 API(JSON, 비공식)로 시총 순 목록."""
+
+    rows = {}
+
+    for market, pages in (("KOSPI", 3), ("KOSDAQ", 2)):
+        for page in range(1, pages + 1):
+            response = requests.get(
+                f"https://m.stock.naver.com/api/stocks/marketValue/{market}",
+                params={"page": page, "pageSize": 50},
+                headers=NAVER_MOBILE_HEADERS,
+                timeout=8,
+            )
+
+            if response.status_code != 200:
+                raise TossError(f"HTTP {response.status_code}")
+
+            for item in (response.json() or {}).get("stocks") or []:
+                symbol = str(item.get("itemCode") or "")
+                name = str(item.get("stockName") or "").strip()
+                cap = num(item.get("marketValue"))
+
+                if re.fullmatch(r"\d{6}", symbol) and name and cap is not None:
+                    rows[symbol] = {"symbol": symbol, "name": name, "cap": cap, "market": market}
+
+    if len(rows) < 50:
+        raise TossError("종목 수가 부족합니다.")
+
+    return rows
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def _fetch_cap_top_public(day_text):
+    """시가총액 상위 100개 [(종목코드, 종목명)] (네이버 금융, 코스피 3쪽 + 코스닥 2쪽)."""
+
+    try:
+        rows = _cap_rows_html()
+
+    except Exception as html_error:
+        try:
+            rows = _cap_rows_mobile()
+
+        except Exception as mobile_error:
+            raise TossError(f"{html_error} / 모바일 API: {mobile_error}") from mobile_error
 
     ranked = sorted(
         (row for row in rows.values() if not EXCLUDE.search(row["name"])),
@@ -425,7 +484,51 @@ def _parse_naver_daily(page_html):
     return out
 
 
+def _candle_closes_mobile(symbol):
+    """네이버 모바일 증권 일별 시세 API(JSON, 비공식) [(날짜, 종가)]."""
+
+    response = requests.get(
+        f"https://m.stock.naver.com/api/stock/{symbol}/price",
+        params={"pageSize": 20, "page": 1},
+        headers=NAVER_MOBILE_HEADERS,
+        timeout=8,
+    )
+
+    if response.status_code != 200:
+        raise TossError(f"{symbol} 모바일 시세 HTTP {response.status_code}")
+
+    data = response.json()
+    items = data if isinstance(data, list) else (data.get("priceInfos") or [])
+    out = []
+
+    for item in items:
+        try:
+            day = datetime.date.fromisoformat(str(item.get("localTradedAt", ""))[:10])
+        except ValueError:
+            continue
+
+        close = num(item.get("closePrice"))
+
+        if close:
+            out.append((day, close))
+
+    if not out:
+        raise TossError(f"{symbol} 모바일 시세를 읽지 못했습니다.")
+
+    return sorted(out)
+
+
 def _candle_closes_public(symbol):
+    """네이버 일별 시세(HTML)를 먼저, 안 되면 모바일 API로."""
+
+    try:
+        return _candle_closes_html(symbol)
+
+    except Exception:
+        return _candle_closes_mobile(symbol)
+
+
+def _candle_closes_html(symbol):
     """[(날짜, 종가)] 오름차순 (네이버 일별 시세 1~2쪽 = 최근 10~20거래일)."""
 
     closes = {}
@@ -441,7 +544,7 @@ def _candle_closes_public(symbol):
         if response.status_code != 200:
             raise TossError(f"{symbol} 네이버 일별 시세 HTTP {response.status_code}")
 
-        rows = _parse_naver_daily(response.content.decode("cp949", errors="ignore"))
+        rows = _parse_naver_daily(_decode(response.content))
 
         if not rows:
             raise TossError(f"{symbol} 네이버 일별 시세를 읽지 못했습니다.")
