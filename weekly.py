@@ -1493,6 +1493,17 @@ def mover_label(week):
     return "시황글 기준 · 하루 최대 등락률 (토스 조회 실패)"
 
 
+def top_title(base, count, default):
+    """종목이 기본 개수에 못 미치면 실제 개수에 맞춰 'TOP N'으로 표시합니다. 0개면 숫자를 뺍니다."""
+
+    count = int(count or 0)
+
+    if count <= 0:
+        return base
+
+    return f"{base} TOP {min(count, default)}"
+
+
 def movers_table_md(rows, show_note=True):
     if not rows:
         return "- 붙여넣은 오후 시황글에서 읽을 수 있는 종목이 없습니다."
@@ -1563,7 +1574,7 @@ def build_report(monday, headline, days, week, issues, flow, checks, schedule, a
     if flow:
         lines += [f"📝 **주간 흐름**: {flow}", ""]
 
-    lines += ["### 🔥 이번 주 핵심 이슈 TOP 3", ""]
+    lines += [f"### 🔥 {top_title('이번 주 핵심 이슈', len(issues or []), 3)}", ""]
 
     if issues:
         for number, issue in enumerate(issues, start=1):
@@ -1586,11 +1597,11 @@ def build_report(monday, headline, days, week, issues, flow, checks, schedule, a
         lines += [f"- 이슈 정리를 만들지 못했습니다. {ai_error}".strip(), ""]
 
     lines += [
-        f"### 🔺 주간 급등 TOP 3 ({mover_label(week)})",
+        f"### 🔺 {top_title('주간 급등', len(week['surge']), 3)} ({mover_label(week)})",
         "",
         movers_table_md(week["surge"], show_note),
         "",
-        f"### 🔻 주간 급락 TOP 3 ({mover_label(week)})",
+        f"### 🔻 {top_title('주간 급락', len(week['plunge']), 3)} ({mover_label(week)})",
         "",
         movers_table_md(week["plunge"], show_note),
         "",

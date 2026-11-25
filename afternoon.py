@@ -4228,6 +4228,17 @@ def autofill_checks():
         state["checks_note"] = f"일정 자동 수집 실패: {error} · 직접 확인 후 입력해 주세요."
 
 
+def top_title(base, count, suffix=""):
+    """종목이 5개(또는 3개)에 못 미치면 실제 개수에 맞춰 'TOP N'으로 표시합니다. 0개면 숫자를 뺍니다."""
+
+    count = int(count or 0)
+
+    if count <= 0:
+        return f"{base}{suffix}"
+
+    return f"{base} TOP {count}{suffix}"
+
+
 def fmt(value, digits=2):
     """숫자 표시 형식."""
 
@@ -4402,7 +4413,7 @@ def build_markdown(snapshot, time_text="확인 불가"):
     up_note = POST_NOTE if session.get("show_up_reason_note") else ""
     down_note = POST_NOTE if session.get("show_down_reason_note") else ""
 
-    lines += ["", "", f"### 🔺 급등 특징주 TOP 5{suffix}{up_note}", ""]
+    lines += ["", "", f"### 🔺 {top_title('급등 특징주', len(snapshot['gainers']), suffix)}{up_note}", ""]
 
     lines += stock_table_lines(
         snapshot["gainers"],
@@ -4410,7 +4421,7 @@ def build_markdown(snapshot, time_text="확인 불가"):
         session.get("show_up_reason", True),
     )
 
-    lines += ["", "", f"### 🔻 급락 특징주 TOP 5{suffix}{down_note}", ""]
+    lines += ["", "", f"### 🔻 {top_title('급락 특징주', len(snapshot['losers']), suffix)}{down_note}", ""]
 
     lines += stock_table_lines(
         snapshot["losers"],
@@ -5253,7 +5264,7 @@ def main():
         st.markdown("### 오늘의 급등·급락 종목")
         with st.container(border=True):
             render_stock_section(
-                f"급등 특징주 TOP 5{CAP_SUFFIX if is_cap else ''}",
+                top_title("급등 특징주", len(snapshot["gainers"]), CAP_SUFFIX if is_cap else ""),
                 snapshot["gainers"],
                 "up",
                 "🔺",
@@ -5266,7 +5277,7 @@ def main():
 
         with st.container(border=True):
             render_stock_section(
-                f"급락 특징주 TOP 5{CAP_SUFFIX if is_cap else ''}",
+                top_title("급락 특징주", len(snapshot["losers"]), CAP_SUFFIX if is_cap else ""),
                 snapshot["losers"],
                 "down",
                 "🔻",

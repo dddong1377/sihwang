@@ -4451,6 +4451,60 @@ def compose_report(
     return body
 
 
+def fit_top_titles(markdown):
+    """제목의 'TOPn'보다 실제 항목(표 행·번호 항목)이 적으면 제목 숫자를 실제 개수로 바꿉니다."""
+
+    lines = str(markdown or "").split("\n")
+    out = list(lines)
+    heads = [i for i, line in enumerate(lines) if re.match(r"^#{2,4}\s", line)]
+
+    for pos, i in enumerate(heads):
+        found = re.findall(r"TOP\s?(\d+)", lines[i])
+
+        if len(found) != 1:
+            continue
+
+        want = int(found[0])
+        end = heads[pos + 1] if pos + 1 < len(heads) else len(lines)
+        block = lines[i + 1:end]
+        table_rows = [l for l in block if l.strip().startswith("|")]
+
+        if table_rows:
+            count = 0
+
+            for l in table_rows[2:]:
+                first = l.strip().strip("|").split("|")[0].strip()
+
+                if first and first not in ("-", "확인 불가") and not set(first) <= set("-: "):
+                    count += 1
+        else:
+            count = len([
+                l for l in block
+                if re.match(r"^\s*(\*\*\s*)?([①-⑩]|\d+[.)])", l)
+            ])
+
+        if 0 < count < want:
+            out[i] = re.sub(
+                r"TOP(\s?)\d+", lambda m: f"TOP{m.group(1)}{count}", lines[i]
+            )
+
+    return "\n".join(out)
+
+
+_prev_compose_report = compose_report
+
+
+def compose_report(*args, **kwargs):
+    return fit_top_titles(_prev_compose_report(*args, **kwargs))
+
+
+_prev_insert_compact_index_table = insert_compact_index_table
+
+
+def insert_compact_index_table(short, table_md):
+    return fit_top_titles(_prev_insert_compact_index_table(short, table_md))
+
+
 def build_compress_source(ctx, parts):
     """토큰 예산 안에서 압축 입력을 구성합니다. 반환: (프롬프트, 포함 파트)"""
 
