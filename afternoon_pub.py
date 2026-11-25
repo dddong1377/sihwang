@@ -2226,6 +2226,9 @@ def refresh_with_toss(stocks, source="naver"):
     }
 
     try:
+        if public_mode():
+            raise RuntimeError("공개 데이터 모드")
+
         limit_bases, limits = fetch_toss_limit_bases(symbols, hints, today_text)
     except Exception:
         limit_bases, limits = {}, {}
@@ -2401,7 +2404,14 @@ def render_basis_status(snapshot):
     ]
 
     # 토스 상·하한가 기준가와 네이버 기준가가 다른 종목 (둘 중 하나가 KRX 기준이 아니라는 신호)
-    mismatch = [
+    # 장 시작 전(평일 09:00 이전)에는 네이버 표가 아직 '어제 기준(그제 종가 대비)'이라
+    # 토스 오늘 기준가와 다른 것이 정상이므로 경고하지 않습니다.
+    before_open = (
+        datetime.datetime.now(KST).weekday() < 5
+        and datetime.datetime.now(KST).time() < KRX_OPEN
+    )
+
+    mismatch = [] if before_open else [
         stock["name"]
         for stock in shown
         if stock.get("base_source") == "limit"
