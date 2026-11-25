@@ -39,6 +39,12 @@ main_pages = [
 
 test_pages = [
     st.Page(
+        "afternoon_pub.py",
+        title="오후 시황(공개 데이터 테스트)",
+        icon="🧪",
+        url_path="afternoon_pub",
+    ),
+    st.Page(
         "arena.py",
         title="주식 대결(테스트)",
         icon="🥊",
@@ -110,3 +116,4 @@ render_auto_sidebar()
 
 navigation = st.navigation({"": main_pages, "테스트 진행 중": test_pages})
 navigation.run()
+
