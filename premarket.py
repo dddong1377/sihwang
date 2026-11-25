@@ -17,7 +17,6 @@ import streamlit.components.v1 as components
 
 from archive import save_post, list_posts, load_post
 from card_images import render_card_images
-from paper_images import render_paper_images
 from emphasis import bold_headings, emphasize
 from kakao_text import to_kakao_text
 from autorun import (
@@ -1578,9 +1577,9 @@ DETAIL_PARTS = [
 제공된 지수·뉴스 자료에 없는 수치(금리, 달러인덱스, 유가, VIX 등)는 확인 불가로 표기한다.
 
 ### 6. 📆 오늘 체크 일정
-| 시간 | 일정 | 시장 영향 |
-|---|---|---|
-뉴스 자료로 확인할 수 있는 일정만 작성한다. 시간·일정이 확인되지 않으면 확인 불가로 표시한다.
+| 일정 | 시장 영향 |
+|---|---|
+뉴스 자료로 확인할 수 있는 일정만 작성한다. 시각(시간대)은 쓰지 않는다. 일정이 확인되지 않으면 확인 불가로 표시한다.
 
 이 파트에는 위 두 항목만 작성한다.
 """,
@@ -3380,7 +3379,6 @@ def copy_buttons(markdown, images=False):
 
     if images:
         render_card_images(markdown, "장전시황")
-        render_paper_images(markdown, "장전지면")
 
 
 # ===============================================================
@@ -4164,11 +4162,7 @@ def _calendar_event_row(event):
         row["rank"] = 0
         row["kind"] = f"경제지표·{_cal_country(indicator.get('countryType'))}"
 
-        raw_time = str(indicator.get("time") or "").strip()
-
-        # 00:00은 실제 시각이 아닌 기본값일 수 있어 표시하지 않음
-        if raw_time and raw_time not in ("00:00:00", "00:00"):
-            row["time"] = raw_time[:5]
+        # 발표 시각은 글에 넣지 않습니다. (일정 시간대 표시 제거)
 
         unit = str(indicator.get("unit") or "").strip()
         prefix = str(indicator.get("unitPrefix") or "").strip()
@@ -4191,7 +4185,6 @@ def _calendar_event_row(event):
         row["rank"] = 1
         row["kind"] = f"기업 실적·{_cal_country(earnings.get('countryType'))}"
         row["title"] = f"{company} 실적 발표"
-        row["time"] = _cal_kst_hhmm(earnings.get("announceDateTime"))
         row["note"] = str(earnings.get("announceMarketStatusText") or "").strip()
 
     return row
@@ -4210,14 +4203,14 @@ def _calendar_markdown(rows):
         return "토스 증시 캘린더에 확인된 일정이 없습니다."
 
     lines = [
-        "| 날짜 | 구분 | 일정 | 시각 | 비고 |",
-        "|---|---|---|---|---|",
+        "| 날짜 | 구분 | 일정 | 비고 |",
+        "|---|---|---|---|",
     ]
 
     for row in rows:
         lines.append(
             f"| {_cal_day_text(row['date'])} | {_cal_cell(row['kind'])} "
-            f"| {_cal_cell(row['title'])} | {row['time'] or '-'} "
+            f"| {_cal_cell(row['title'])} "
             f"| {_cal_cell(row['note']) or '-'} |"
         )
 
@@ -4234,11 +4227,9 @@ def _calendar_short_markdown(rows, limit=CALENDAR_SHORT_LIMIT):
     lines = []
 
     for row in rows[:limit]:
-        time_text = f" ({row['time']})" if row["time"] else ""
-
         lines.append(
             f"- {_cal_day_text(row['date'])} [{_cal_cell(row['kind'])}] "
-            f"{_cal_cell(row['title'])}{time_text}"
+            f"{_cal_cell(row['title'])}"
         )
 
     if len(rows) > limit:
