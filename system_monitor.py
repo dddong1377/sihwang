@@ -331,3 +331,72 @@ else:
         st.warning(
             warning_names.get(warning, warning)
         )
+
+
+# ENHANCED MONITOR UI
+st.divider()
+st.subheader("고급 서버 관제")
+
+refresh = st.selectbox("자동 갱신 간격 (고급 관제 영역)", ["수동", "15초", "30초", "60초"], index=0)
+interval = {"수동": None, "15초": "15s", "30초": "30s", "60초": "60s"}[refresh]
+
+
+def render_enhanced():
+    if not st.session_state.get("monitor_authenticated", False):
+        return
+    if st.button("고급 관제 새로고침", key="enhanced_refresh"):
+        pass
+    try:
+        data = monitor_request("/v1/monitor/enhanced")
+    except Exception:
+        st.error("고급 관제 API 조회 실패. Oracle API 설치 및 연결 상태를 확인하세요.")
+        return
+    st.caption("조회 시각: " + datetime.fromtimestamp(data["timestamp"], kst).strftime("%Y-%m-%d %H:%M:%S KST"))
+    tls = data["tls"]
+    st.markdown("**SSL 인증서**")
+    if tls.get("verified"):
+        expiry = datetime.fromtimestamp(tls["expires_at"], kst)
+        a, b = st.columns(2)
+        a.metric("인증서 만료일 (KST)", expiry.strftime("%m/%d %H:%M"))
+        b.metric("남은 기간", f'{tls["days_left"]:.2f}일')
+        if tls["days_left"] <= 2:
+            st.warning("인증서 만료 임박: 자동 갱신 상태 확인 필요")
+        else:
+            st.success("서버 인증서 검증 성공")
+    else:
+        st.warning("서버 인증서 검증 실패")
+    st.markdown("**HTTP 요청 및 응답 성능**")
+    http = data["http"]
+    a, b, c = st.columns(3)
+    a.metric("집계 요청", http["total"])
+    b.metric("HTTP 4xx/5xx", http["errors"])
+    c.metric("측정 표본", http["sample_count"])
+    a, b, c = st.columns(3)
+    for col, label, key in [(a, "평균", "mean_ms"), (b, "최대", "max_ms"), (c, "P95", "p95_ms")]:
+        value = http.get(key)
+        col.metric(label, "—" if value is None else f"{value:.2f} ms")
+    st.caption("백엔드 재시작 이후 지정 API 집계 · 응답시간은 최근 최대 2,048건, 서버 내부 처리시간 기준")
+    counts = http.get("status_counts", {})
+    if counts:
+        st.dataframe(pd.DataFrame([{"HTTP 상태": k, "요청 수": v} for k, v in sorted(counts.items())]), hide_index=True, use_container_width=True)
+    st.markdown("**WebSocket 수신 최신성**")
+    ws = data["websocket"]
+    state = ws.get("freshness_state")
+    if state == "recent_message":
+        st.success("최근 메시지 수신 확인")
+    elif state == "stale_or_no_trade":
+        st.warning("연결 중이나 최근 메시지 없음: 거래 공백 또는 수신 지연 가능")
+    elif state == "disconnected":
+        st.warning("WebSocket 연결 끊김")
+    else:
+        st.info("실시간 수집 대기 또는 구독 없음")
+    age = ws.get("age")
+    st.metric("마지막 메시지 이후", "—" if age is None else f"{age:.1f}초")
+    st.caption("전체 피드 기준이며 개별 종목의 최신 체결을 보장하지 않습니다. 장 운영 여부는 자동 판별하지 않습니다.")
+
+
+if hasattr(st, "fragment"):
+    st.fragment(run_every=interval)(render_enhanced)()
+else:
+    st.caption("현재 Streamlit 버전에서는 자동 갱신을 지원하지 않습니다.")
+    render_enhanced()
