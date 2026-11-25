@@ -966,10 +966,14 @@ def pct_text(value):
     return "-" if value is None else f"{value:+.2f}%"
 
 
+def mover_source_name(week):
+    return "네이버 금융" if "네이버" in str(week.get("mover_source", "")) else "토스증권"
+
+
 def mover_fact(label, item, pct, index, week):
     if week.get("mover_basis") == "toss":
         return (
-            f"{label} 종목(시총 상위 100위, 토스증권): "
+            f"{label} 종목(시총 상위 100위, {mover_source_name(week)}): "
             f"{item['name']} 주간 {pct:+.2f}%"
         )
 
@@ -1488,7 +1492,7 @@ def index_table_md(week, days):
 
 def mover_label(week):
     if week.get("mover_basis") == "toss":
-        return "시총 상위 100위 · 토스증권 주간 등락률 기준"
+        return f"시총 상위 100위 · {mover_source_name(week)} 주간 등락률 기준"
 
     return "시황글 기준 · 하루 최대 등락률 (토스 조회 실패)"
 
@@ -1691,7 +1695,7 @@ def run_weekly(monday, status):
     # 0-2) 주간 급등·급락: 토스증권 시총 상위 100위의 주간 등락률
     mover_error = ""
 
-    status.write("📈 토스증권에서 시총 상위 100위의 주간 등락률을 계산하는 중... (1~2분)")
+    status.write("📈 시총 상위 100위의 주간 등락률을 계산하는 중... (1~2분)")
 
     try:
         moved = fetch_weekly_movers(
@@ -1715,6 +1719,22 @@ def run_weekly(monday, status):
         week["surge"] = [as_item(row) for row in moved["surge"]]
         week["plunge"] = [as_item(row) for row in moved["plunge"]]
         week["mover_basis"] = "toss"
+        week["mover_source"] = moved.get("source", "")
+
+        checked = [r for r in moved["surge"] + moved["plunge"] if r.get("check")]
+        bad = [r for r in checked if not r["check"]["ok"]]
+
+        if bad:
+            status.write(
+                "⚠️ 야후 대조 차이: "
+                + ", ".join(
+                    f"{r['name']}({r['pct']:+.2f}% vs 야후 {r['check']['other']:+.2f}%)"
+                    for r in bad
+                )
+                + " · 증권사 앱으로 한 번 더 확인하세요."
+            )
+        elif checked:
+            status.write(f"✓ 급등·급락 {len(checked)}종목 야후와 일치 ({moved.get('source', '')})")
 
         status.write(f"✅ 주간 등락률 계산 완료 · {moved['count']}종목")
 
