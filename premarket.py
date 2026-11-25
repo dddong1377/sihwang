@@ -19,6 +19,7 @@ from archive import save_post, list_posts, load_post
 from card_images import render_card_images
 from emphasis import bold_headings, emphasize
 from kakao_text import to_kakao_text
+from paper_images import render_paper_images
 from autorun import (
     auto_requested,
     finish_auto,
@@ -3379,6 +3380,7 @@ def copy_buttons(markdown, images=False):
 
     if images:
         render_card_images(markdown, "장전시황")
+        render_paper_images(markdown, "장전지면")
 
 
 # ===============================================================
