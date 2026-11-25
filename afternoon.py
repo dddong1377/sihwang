@@ -19,7 +19,7 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
-from realtime_feed import TossFeed
+from remote_feed import RemoteFeed
 from archive import save_post, list_posts
 
 try:
@@ -458,8 +458,6 @@ if not login():
     st.stop()
 
 
-CLIENT_ID = secret("TOSS_CLIENT_ID")
-CLIENT_SECRET = secret("TOSS_CLIENT_SECRET")
 
 NAVER_ID = secret("NAVER_CLIENT_ID")
 NAVER_SECRET = secret("NAVER_CLIENT_SECRET")
@@ -470,144 +468,28 @@ class TossError(Exception):
     pass
 
 
-@st.cache_data(ttl=20 * 60 * 60, show_spinner=False)
-def get_token(client_id, client_secret):
-    """토스증권 API 액세스 토큰 발급."""
-
-    if not client_id or not client_secret:
-        raise TossError(
-            "TOSS_CLIENT_ID / TOSS_CLIENT_SECRET이 "
-            "Streamlit Secrets에 없습니다."
-        )
-
-    try:
-        response = requests.post(
-            f"{BASE}/oauth2/token",
-            data={
-                "grant_type": "client_credentials",
-                "client_id": client_id,
-                "client_secret": client_secret,
-            },
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded"
-            },
-            timeout=12,
-        )
-
-    except requests.RequestException as error:
-        raise TossError(
-            f"토큰 서버 연결 실패: {error}"
-        ) from error
-
-    if response.status_code != 200:
-        raise TossError(
-            f"토큰 발급 실패 HTTP {response.status_code}: "
-            f"{response.text[:500]}"
-        )
-
-    token_data = response.json()
-    token = token_data.get("access_token")
-
-    if not token:
-        raise TossError(
-            "토큰 응답에 access_token이 없습니다: "
-            f"{response.text[:300]}"
-        )
-
-    return token
 
 
 @st.cache_resource(show_spinner=False)
 def get_feed():
-    """웹소켓 연결은 서버(프로세스)당 1개만 만듭니다. (계정당 동시 연결 2개 한도)"""
+    return RemoteFeed()
 
-    return TossFeed(lambda: get_token(CLIENT_ID, CLIENT_SECRET))
 
 
 def api_get(path, params=None):
-    """토큰이 무효화(401)되면 저장된 토큰을 지우고 새로 받아 한 번 더 시도합니다."""
+    from toss_client import api_get as oracle_get
+    from toss_client import TossClientError
 
     try:
-        return _api_get(path, params)
+        return oracle_get(path, params)
+    except TossClientError as error:
+        raise TossError(str(error)) from error
 
-    except TossError as error:
-        text = str(error)
-
-        if "HTTP 401" in text or "token-revoked" in text:
-            get_token.clear()
-            return _api_get(path, params)
-
-        raise
 
 
 def _api_get(path, params=None):
-    """토스증권 API GET 요청 (연결 오류·5xx는 최대 3회 재시도)."""
+    return api_get(path, params)
 
-    token = get_token(CLIENT_ID, CLIENT_SECRET)
-
-    response = None
-    last_error = None
-
-    for attempt in range(3):
-        try:
-            response = requests.get(
-                f"{BASE}{path}",
-                params=params or {},
-                headers={
-                    "Authorization": f"Bearer {token}"
-                },
-                timeout=(6, 15),
-            )
-
-            if response.status_code < 500:
-                break
-
-        except requests.RequestException as error:
-            last_error = error
-
-        time.sleep(1.5 * (attempt + 1))
-
-    if response is None:
-        raise TossError(
-            f"{path} 연결 실패({type(last_error).__name__}): "
-            f"{str(last_error)[-120:]}"
-        )
-
-    if response.status_code != 200:
-        try:
-            detail = response.json()
-        except ValueError:
-            detail = response.text[:400]
-
-        if response.status_code == 403:
-            raise TossError(
-                "HTTP 403: 토스증권 Open API 허용 IP에 "
-                "배포 서버 IP를 등록했는지 확인하세요. "
-                f"{detail}"
-            )
-
-        if response.status_code == 429:
-            raise TossError(
-                "HTTP 429: 요청 한도 초과. "
-                f"Retry-After={response.headers.get('Retry-After', '미제공')}. "
-                f"{detail}"
-            )
-
-        raise TossError(
-            f"{path} HTTP {response.status_code}: {detail}"
-        )
-
-    data = response.json()
-
-    if data.get("error"):
-        error_data = data["error"]
-
-        raise TossError(
-            f"{error_data.get('code')}: "
-            f"{error_data.get('message')}"
-        )
-
-    return data.get("result", {})
 
 
 def num(value, default=None):

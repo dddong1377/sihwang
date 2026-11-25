@@ -51,105 +51,21 @@ def num(value, default=None):
         return default
 
 
-@st.cache_data(ttl=20 * 60 * 60, show_spinner=False)
-def _token(client_id, client_secret):
-    if not client_id or not client_secret:
-        raise TossError("TOSS_CLIENT_ID / TOSS_CLIENT_SECRET이 Secrets에 없습니다.")
-
-    response = requests.post(
-        f"{BASE}/oauth2/token",
-        data={
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret,
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=12,
-    )
-
-    if response.status_code != 200:
-        raise TossError(
-            f"토큰 발급 실패 HTTP {response.status_code}: {response.text[:300]}"
-        )
-
-    token = response.json().get("access_token")
-
-    if not token:
-        raise TossError("토큰 응답에 access_token이 없습니다.")
-
-    return token
 
 
-_TOKEN_LOCK = threading.Lock()
 
 
-def _fresh_token(old_token, force=False):
-    """다른 곳에서 새 토큰을 받아 이 토큰이 무효가 됐을 때 새로 받습니다.
-
-    force=True 는 '다른 곳이 받아 둔 토큰'도 이미 무효일 수 있을 때, 무조건 새로 발급합니다."""
-
-    with _TOKEN_LOCK:
-        current = _token(_secret("TOSS_CLIENT_ID"), _secret("TOSS_CLIENT_SECRET"))
-
-        if force or current == old_token:
-            _token.clear()
-            current = _token(_secret("TOSS_CLIENT_ID"), _secret("TOSS_CLIENT_SECRET"))
-
-        return current
 
 
 def api_get(path, params=None):
-    token = _token(_secret("TOSS_CLIENT_ID"), _secret("TOSS_CLIENT_SECRET"))
+    from toss_client import api_get as oracle_get
+    from toss_client import TossClientError
 
-    response = None
-    refreshed = 0
+    try:
+        return oracle_get(path, params)
+    except TossClientError as error:
+        raise TossError(str(error)) from error
 
-    for attempt in range(5):
-        try:
-            response = requests.get(
-                f"{BASE}{path}",
-                params=params or {},
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=(6, 15),
-            )
-        except requests.RequestException as error:
-            if attempt == 4:
-                raise TossError(f"{path} 연결 실패: {str(error)[-120:]}") from error
-
-            time.sleep(1.5 * (attempt + 1))
-            continue
-
-        # 토큰이 무효화(401)되면 새 토큰으로 한 번 더 시도
-        # (첫 번째는 저장된 새 토큰을 쓰고, 그래도 401이면 무조건 새로 발급)
-        if response.status_code == 401 and refreshed < 2:
-            refreshed += 1
-            token = _fresh_token(token, force=(refreshed == 2))
-            continue
-
-        # 요청 한도(429)·서버 오류(5xx)는 잠깐 쉬고 다시 시도
-        if response.status_code == 429 or response.status_code >= 500:
-            time.sleep(1.5 * (attempt + 1))
-            continue
-
-        break
-
-    if response is None or response.status_code != 200:
-        code = response.status_code if response is not None else "없음"
-
-        if code == 403:
-            raise TossError(
-                "HTTP 403: 토스증권 Open API 허용 IP에 배포 서버 IP가 등록돼 있는지 확인하세요."
-            )
-
-        raise TossError(f"{path} HTTP {code}")
-
-    data = response.json()
-
-    if data.get("error"):
-        error = data["error"]
-        raise TossError(f"{error.get('code')}: {error.get('message')}")
-
-    return data.get("result", {})
 
 
 @st.cache_data(ttl=12 * 60 * 60, show_spinner=False)
