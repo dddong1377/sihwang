@@ -360,13 +360,13 @@ function fillText2(ctx, t, x, y) {
   parts.forEach((p, i) => {
     if (p) { ctx.fillText(p, cx, y); cx += ctx.measureText(p).width; }
     if (i < parts.length - 1) {
-      const sz = gw * 0.78, mx = cx + gw / 2;
+      const sz = gw * 0.36, th = sz * 0.88, mx = cx + gw / 2;
       ctx.save();
       ctx.fillStyle = '#1D6FE8';
       ctx.beginPath();
-      ctx.moveTo(mx - sz / 2, y - sz * 0.34);
-      ctx.lineTo(mx + sz / 2, y - sz * 0.34);
-      ctx.lineTo(mx, y + sz * 0.46);
+      ctx.moveTo(mx - sz / 2, y - th / 2);
+      ctx.lineTo(mx + sz / 2, y - th / 2);
+      ctx.lineTo(mx, y + th / 2);
       ctx.closePath();
       ctx.fill();
       ctx.restore();
