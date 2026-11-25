@@ -400,3 +400,64 @@ if hasattr(st, "fragment"):
 else:
     st.caption("현재 Streamlit 버전에서는 자동 갱신을 지원하지 않습니다.")
     render_enhanced()
+
+
+# NETWORK MONITOR UI
+st.divider()
+st.subheader("네트워크 트래픽 분석")
+st.caption("서버 전체 인터페이스 누적 카운터의 차분 기준 · OCI 청구 트래픽 또는 토스 API 전용 트래픽과는 다릅니다.")
+
+
+def render_network_monitor():
+    if not st.session_state.get("monitor_authenticated", False):
+        return
+    try:
+        rows = load_history(168)["data"]
+        net = pd.DataFrame(rows)
+        required = ["timestamp", "uptime_seconds", "network_sent_bytes", "network_recv_bytes"]
+        if len(net) < 2 or not all(c in net.columns for c in required):
+            st.info("네트워크 분석에는 최소 두 건의 측정 기록이 필요합니다.")
+            return
+        net = net[required].apply(pd.to_numeric, errors="coerce").dropna()
+        net = net.sort_values("timestamp").drop_duplicates("timestamp")
+        elapsed = net["timestamp"].diff()
+        uptime_delta = net["uptime_seconds"].diff()
+        sent = net["network_sent_bytes"].diff()
+        recv = net["network_recv_bytes"].diff()
+        valid = (elapsed > 0) & (elapsed <= 180) & ((uptime_delta - elapsed).abs() <= 2) & (sent >= 0) & (recv >= 0)
+        skipped = int((~valid).sum()) - 1
+        net["송신 MiB"] = sent.where(valid) / 1048576
+        net["수신 MiB"] = recv.where(valid) / 1048576
+        net["합계 MiB/분"] = ((sent + recv) / 1048576 * 60 / elapsed).where(valid)
+        net["시간"] = pd.to_datetime(net["timestamp"], unit="s", utc=True).dt.tz_convert("Asia/Seoul").dt.tz_localize(None)
+        net = net.set_index("시간")
+        traffic = net[["송신 MiB", "수신 MiB"]].dropna()
+        if traffic.empty:
+            st.info("유효한 연속 측정 구간이 아직 없습니다.")
+            return
+        a, b, c = st.columns(3)
+        a.metric("최근 7일 이내 송신", f'{traffic["송신 MiB"].sum():,.2f} MiB')
+        b.metric("최근 7일 이내 수신", f'{traffic["수신 MiB"].sum():,.2f} MiB')
+        c.metric("합계", f'{traffic.sum().sum():,.2f} MiB')
+        st.caption(f"유효 구간 {len(traffic):,}건 · 제외 구간 {max(0, skipped):,}건. 재부팅, 카운터 감소, 3분 초과 기록 공백은 제외합니다. 구간 사용량은 종료 시각에 귀속됩니다.")
+        period_net = st.radio("트래픽 집계 단위", ["시간별", "일별"], horizontal=True, key="network_period")
+        grouped = traffic.resample("h" if period_net == "시간별" else "D").sum(min_count=1)
+        st.bar_chart(grouped)
+        st.caption("미측정 구간은 사용량 0으로 간주하지 않습니다. 최초 기록 이전의 트래픽은 포함되지 않습니다.")
+        rates = net["합계 MiB/분"].dropna()
+        if len(rates) >= 31:
+            latest = float(rates.iloc[-1])
+            baseline = float(rates.iloc[-31:-1].median())
+            st.metric("최근 유효 구간 트래픽", f"{latest:.2f} MiB/분")
+            if baseline > 0 and latest >= max(5 * baseline, 10):
+                st.warning("트래픽 증가 감지: 직전 30개 유효 구간 중앙값의 5배 이상이며 10 MiB/분 이상입니다.")
+            else:
+                st.info("설정한 트래픽 증가 기준에 해당하지 않습니다.")
+            st.caption("초기 참고 기준이며 보안 이상이나 API 과다 호출을 확정하지 않습니다.")
+        else:
+            st.info("증가 감지 기준을 계산하려면 유효 구간 31건 이상이 필요합니다.")
+    except Exception:
+        st.error("네트워크 기록 조회 또는 분석에 실패했습니다.")
+
+
+render_network_monitor()
