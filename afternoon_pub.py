@@ -1855,6 +1855,9 @@ def fetch_cap_rows():
         return rows, "naver"
 
     except Exception as naver_error:
+        if public_mode():
+            raise RuntimeError(f"네이버 금융 시총 조회 실패: {naver_error}")
+
         try:
             rows = fetch_cap_rows_toss()
             return rows, "toss"
@@ -2469,6 +2472,9 @@ def fetch_snapshot(duration, universe="all"):
                 )
 
         except Exception as error:
+            if public_mode():
+                raise RuntimeError(f"시총 100위 조회 실패 (공개 데이터 모드): {error}")
+
             actual_universe = "all"
             note = (
                 "시총 100위 목록을 가져오지 못해 국내 전체 종목 기준으로 "
