@@ -4164,10 +4164,7 @@ def format_toss_calendar_event(event):
         indicator = view.get("economicIndicatorValue") or {}
         country = _calendar_country(indicator.get("countryType"))
         pieces.append(f"[경제지표·{country}] {title}")
-        raw_time = str(indicator.get("time") or "").strip()
-        # 00:00:00은 실제 발표시각이 아닌 기본값일 수 있어 표시하지 않습니다.
-        if raw_time and raw_time not in ("00:00:00", "00:00"):
-            pieces.append(f"표시 시각 {raw_time[:5]}")
+        # 발표 시각은 글에 넣지 않습니다. (일정 시간대 표시 제거)
         forecast = indicator.get("forecast")
         historical = indicator.get("historical")
         unit = str(indicator.get("unit") or "").strip()
@@ -4184,27 +4181,7 @@ def format_toss_calendar_event(event):
         status = str(earnings.get("announceMarketStatusText") or "").strip()
         if status:
             pieces.append(status)
-        announce_at = str(earnings.get("announceDateTime") or "").strip()
-        if announce_at:
-            try:
-                dt = datetime.datetime.fromisoformat(announce_at.replace("Z", "+00:00"))
-                if dt.tzinfo:
-                    dt = dt.astimezone(KST)
-                pieces.append(f"발표시각 {dt.strftime('%H:%M')}")
-            except ValueError:
-                # 날짜 문자열만 있거나 시간대가 불명확하면 원문을 임의 변환하지 않습니다.
-                if "T" in announce_at:
-                    pieces.append(f"원본 발표시각 {announce_at.split('T', 1)[1][:5]}")
-        live = view.get("upcomingLive") or {}
-        live_at = str(live.get("liveAt") or "").strip()
-        if live_at:
-            try:
-                dt = datetime.datetime.fromisoformat(live_at.replace("Z", "+00:00"))
-                if dt.tzinfo:
-                    dt = dt.astimezone(KST)
-                pieces.append(f"어닝콜 {dt.strftime('%H:%M')}")
-            except ValueError:
-                pass
+        # 발표시각·어닝콜 시각은 글에 넣지 않습니다. (일정 시간대 표시 제거)
     else:
         # 알 수 없는 그룹은 제목만 노출하고 유형을 추정하지 않습니다.
         pieces.append(f"[기타 일정] {title}")
@@ -4218,7 +4195,7 @@ def format_toss_calendar_event(event):
 def build_next_day_line():
     """다음 영업일 안내와 토스 캘린더에서 확인된 해당 날짜 일정을 반환."""
     nxt, open_time, calendar_day_ok = next_business_info()
-    line = f"{kr_date_text(nxt)} 정규장 {open_time} 개장"
+    line = f"{kr_date_text(nxt)} 정규장 개장"
 
     events = fetch_toss_monthly_calendar(nxt)
     formatted = [format_toss_calendar_event(event) for event in events]
@@ -5637,7 +5614,7 @@ def main():
 
             st.text_area(
                 "내일 체크 포인트 (줄바꿈 또는 /로 구분)",
-                height=110,
+                height=300,
                 key="checks",
             )
 
