@@ -781,7 +781,7 @@ __MATERIAL__
 이슈2: 제목 || 내용 || 관련 종목 || 방향
 이슈3: 제목 || 내용 || 관련 종목 || 방향
 흐름: 이번 주 시장 흐름 2문장(120자 이내)
-체크: 입력의 '체크'·리스크에서만 뽑은 다음 주 관전 포인트 || 포인트 || 포인트 (최대 3개, 근거가 없으면 -)
+체크: 입력의 '체크'·리스크에서만 뽑은 다음 주 관전 포인트 || 포인트 || 포인트 (최대 3개, 시각·시간대는 쓰지 않는다, 근거가 없으면 -)
 """
 
 
@@ -1327,11 +1327,7 @@ def calendar_event_row(event):
         row["rank"] = 0
         row["kind"] = f"경제지표·{cal_country(indicator.get('countryType'))}"
 
-        raw_time = str(indicator.get("time") or "").strip()
-
-        # 00:00은 실제 시각이 아닌 기본값일 수 있어 표시하지 않음
-        if raw_time and raw_time not in ("00:00:00", "00:00"):
-            row["time"] = raw_time[:5]
+        # 발표 시각은 글에 넣지 않습니다. (일정 시간대 표시 제거)
 
         unit = str(indicator.get("unit") or "").strip()
         prefix = str(indicator.get("unitPrefix") or "").strip()
@@ -1354,7 +1350,6 @@ def calendar_event_row(event):
         row["rank"] = 1
         row["kind"] = f"기업 실적·{cal_country(earnings.get('countryType'))}"
         row["title"] = f"{company} 실적 발표"
-        row["time"] = cal_kst_hhmm(earnings.get("announceDateTime"))
         row["note"] = str(earnings.get("announceMarketStatusText") or "").strip()
 
     return row
