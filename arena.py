@@ -23,6 +23,7 @@ try:
     import arena_logic as logic
     import arena_ui as ui
     import arena_store as store
+    import arena_snail
     from weekly_market import candle_closes, fetch_cap_top
 except Exception as exc:
     st.error(f"주식 대결 파일을 불러오지 못했습니다: {type(exc).__name__}: {exc}")
@@ -410,6 +411,17 @@ def participation_html(data, key):
     )
 
 
+def last_text(names, bold=False):
+    """꼴찌 표기. 2명 이상이면 '공동 꼴찌'로 쓰고 달팽이 레이스로 정한다고 알립니다."""
+
+    joined = ", ".join(names)
+
+    if len(names) > 1:
+        return f"공동 꼴찌 {joined} · 🐌 레이스로 결정"
+
+    return f"꼴찌 {joined}"
+
+
 def render_prize(data):
     now = now_kst()
 
@@ -422,7 +434,7 @@ def render_prize(data):
         if result["tied_all"]:
             line_day = f"{day_text(day)}: 전원 같은 성적이라 꼴찌 없이 마무리"
         else:
-            line_day = f"{day_text(day)} 우승 {', '.join(result['first'])} · 꼴찌 {', '.join(result['last'])} 🥄"
+            line_day = f"{day_text(day)} 우승 {', '.join(result['first'])} · {last_text(result['last'])} 🥄"
     else:
         line_day = "매일 결과가 확정되면 그날의 우승자와 꼴찌가 표시됩니다."
 
@@ -435,7 +447,7 @@ def render_prize(data):
         if standing["tied_all"]:
             line_week = f"{week_label(monday)} 주간: 전원 같은 성적이라 꼴찌 없이 마무리"
         else:
-            line_week = f"{week_label(monday)} 주간 우승 {', '.join(standing['first'])} · 꼴찌 {', '.join(standing['last'])} 🥄"
+            line_week = f"{week_label(monday)} 주간 우승 {', '.join(standing['first'])} · {last_text(standing['last'])} 🥄"
     else:
         line_week = "금요일 장마감(15:40) 이후 그 주의 우승자와 꼴찌가 확정됩니다."
 
@@ -505,7 +517,7 @@ def render_play(data, nick, day, error):
             f"{day_text(day)} 대결은 오전 8시에 열려요",
             ["8시 정각에 오늘의 5대결이 공개되고", "8시 59분까지 투표할 수 있어요"],
             "08:00 오픈",
-            "승패 기준: 그날 장마감 등락률 · 꼴찌가 상품을 쏩니다",
+            "승패 기준: 그날 장마감 등락률 · 꼴찌가 상품을 쏩니다 (공동 꼴찌는 🐌 레이스로 결정)",
         )))
         return
 
@@ -767,11 +779,16 @@ def render_results(data, nick):
             else:
                 headline = (
                     f"🥇 우승 {', '.join(standing['first'])} · "
-                    f"🥄 꼴찌 {', '.join(standing['last'])} (꼴찌가 상품을 쏩니다)"
+                    f"🥄 {last_text(standing['last'])} (꼴찌가 상품을 쏩니다)"
                 )
 
             with st.expander(f"{week_label(monday)} 주간 · {headline}", expanded=(monday == weeks[0][0])):
                 md(ui.frag(week_table_html(standing, mine=nick)))
+
+                if len(standing["last"]) > 1 and not standing["tied_all"]:
+                    arena_snail.render(
+                        standing["last"], f"week:{monday.isoformat()}", "🐌 주간 꼴찌 뽑기 레이스"
+                    )
 
     md(ui.frag(ui.section("최근 대결 결과", "📋")))
 
@@ -801,8 +818,11 @@ def render_results(data, nick):
             elif standing:
                 st.markdown(
                     f"🥇 우승 **{', '.join(standing['first'])}** · "
-                    f"🥄 꼴찌 **{', '.join(standing['last'])}** (꼴찌가 상품을 쏩니다)"
+                    f"🥄 **{last_text(standing['last'])}** (꼴찌가 상품을 쏩니다)"
                 )
+
+                if len(standing["last"]) > 1:
+                    arena_snail.render(standing["last"], f"day:{key}", "🐌 오늘의 꼴찌 뽑기 레이스")
             else:
                 st.caption("이날은 판정된 선택이 있는 참가자가 없습니다.")
 
@@ -896,8 +916,13 @@ def render_week_tournament(data, nick):
         if complete and not standing["tied_all"]:
             md(ui.frag(ui.me_pill(
                 f"🥇 주간 우승 <b>{ui.esc(', '.join(standing['first']))}</b> · "
-                f"🥄 꼴찌 <b>{ui.esc(', '.join(standing['last']))}</b> (꼴찌가 상품을 쏩니다)"
+                f"🥄 <b>{ui.esc(last_text(standing['last']))}</b> (꼴찌가 상품을 쏩니다)"
             )))
+
+            if len(standing["last"]) > 1:
+                arena_snail.render(
+                    standing["last"], f"week:{monday.isoformat()}", "🐌 주간 꼴찌 뽑기 레이스"
+                )
 
         entries = [
             {"nick": r["nick"], "big": str(r["hits"]), "unit": "개", "label": "적중", "small": f"오답 {r['misses']}"}
@@ -1253,4 +1278,3 @@ def main():
 
 
 main()
-
