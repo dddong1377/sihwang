@@ -4693,10 +4693,10 @@ def stock_table_lines(stocks, reason_header, show_reason=True):
     return lines
 
 
-def build_markdown(snapshot, time_text="확인 불가"):
+def build_markdown(snapshot, time_text="확인 불가", state=None):
     """시황글 마크다운 생성."""
 
-    session = st.session_state
+    session = st.session_state if state is None else state
 
     summary_text = md_lines(
         session.get(
@@ -4708,6 +4708,8 @@ def build_markdown(snapshot, time_text="확인 불가"):
     lines = [
         f"# 📅 {snapshot['date']} | 오후 시황",
         "",
+        f"국내 시장 데이터 조회: {snapshot.get('fetched_at') or '확인 불가'} (KST)",
+        "",
         f"📌 **한 줄 요약**: {summary_text}",
         "",
         "### 장중 지수 현황",
@@ -4715,6 +4717,13 @@ def build_markdown(snapshot, time_text="확인 불가"):
         "| 지수 | 현재가 | 등락률 |",
         "|---|---:|---:|",
     ]
+
+    if snapshot.get("synthetic") is True:
+        lines.insert(
+            0,
+            "**[가상 데이터 테스트 · 실제 시세 아님 · 게시 금지]**"
+        )
+        lines.insert(1, "")
 
     for key, label in (
         ("kospi", "코스피"),
@@ -4833,6 +4842,19 @@ def build_markdown(snapshot, time_text="확인 불가"):
     for title, key, default in sections:
         value = session.get(key, default).strip()
 
+        if (
+            key == "themes"
+            and session.get("sector_fetch_status") in ("failed", "empty")
+            and value == session.get("themes__generated")
+        ):
+            lines += [
+                f"### {title}",
+                "",
+                "강세 산업 데이터 확인 불가",
+                "",
+            ]
+            continue
+
         if value:
             if key == "checks":
                 items = [
@@ -4857,6 +4879,9 @@ def build_markdown(snapshot, time_text="확인 불가"):
                     if isinstance(item, dict) and item.get("name")
                 ]
 
+                if session.get("sector_fetch_status") in ("failed", "empty"):
+                    sector_items = []
+
                 def _theme_key(name):
                     return re.sub(r"[\s/#]", "", str(name or "")).casefold()
 
@@ -4880,7 +4905,7 @@ def build_markdown(snapshot, time_text="확인 불가"):
                         display_name = str(matched.get("name") or theme_name)
                     else:
                         pct_label = ""
-                        display_name = theme_name
+                        display_name = theme_name + " [강세 미확인]"
 
                     theme_lines.append(f"- **{display_name}{pct_label}**")
 

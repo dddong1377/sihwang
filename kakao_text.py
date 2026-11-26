@@ -162,6 +162,55 @@ def _check_line(text):
     return f"· {rest}" + (f" ({country})" if country else "")
 
 
+def _stock_detail_lines(header, row):
+    header = [_clean(cell) for cell in header]
+    row = [_clean(cell) for cell in row]
+
+    values = {
+        label: row[i] if i < len(row) else ""
+        for i, label in enumerate(header)
+    }
+
+    name = values.get("종목", "")
+
+    if not name:
+        return []
+
+    pct = next(
+        (value for label, value in values.items()
+         if "등락" in label),
+        "",
+    )
+
+    price = values.get("현재가", "")
+
+    reason = next(
+        (value for label, value in values.items()
+         if "이유" in label),
+        "",
+    )
+
+    theme = values.get("관련 테마", "")
+
+    title = f"▪ {name}"
+
+    if pct:
+        title += f" ({pct})"
+
+    result = [title]
+
+    if price:
+        result.append(f"현재가: {price}")
+
+    if reason and reason != "-":
+        result.append(f"→ {reason}")
+
+    if theme and theme != "-":
+        result.append(f"테마: {theme}")
+
+    return result
+
+
 def to_kakao_text(markdown):
     body_text = str(markdown or "")
     lines = body_text.splitlines()
@@ -175,6 +224,24 @@ def to_kakao_text(markdown):
             return
 
         header = table[0]
+        clean_header = [_clean(h) for h in header]
+
+        if (
+            clean_header
+            and clean_header[0] == "종목"
+            and any("등락" in h for h in clean_header)
+        ):
+            for row in table[1:]:
+                details = _stock_detail_lines(header, row)
+
+                if details:
+                    if out and out[-1] != "":
+                        out.append("")
+
+                    out.extend(details)
+
+            table.clear()
+            return
 
         if any("이유" in _clean(h) for h in header) and "종목" in _clean(header[0]):
             for row in table[1:]:
@@ -212,7 +279,7 @@ def to_kakao_text(markdown):
 
         flush_table()
 
-        if stripped.startswith("#"):
+        if re.match(r"^#{1,6}\s+", stripped):
             title = _clean(stripped.lstrip("#"))
 
             if out and out[-1] != "":
