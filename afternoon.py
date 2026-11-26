@@ -1418,7 +1418,9 @@ def fetch_cap_rows_naver(phase):
 
             if len(parsed) != 50 or len({row["symbol"] for row in parsed}) != 50:
                 raise RuntimeError(
-                    "네이버 금융 시가총액 표에서 종목을 충분히 읽지 못했습니다."
+                    f"네이버 {market} {page}페이지: "
+                    f"{len(parsed)}/50개 파싱, "
+                    f"고유 종목 {len({row['symbol'] for row in parsed})}개"
                 )
 
             for row in parsed:
@@ -1619,9 +1621,11 @@ def fetch_cap_rows():
 
     try:
         rows = fetch_cap_rows_naver(phase)
+        st.session_state.pop("cap_naver_error", None)
         return rows, "naver"
 
     except Exception as naver_error:
+        st.session_state["cap_naver_error"] = str(naver_error)[:300]
         try:
             rows = fetch_cap_rows_toss()
             return rows, "toss"
@@ -1943,6 +1947,43 @@ def refresh_with_toss(stocks, source="naver"):
 
                     stock["base_source"] = "toss"
 
+    # 불확실한 상하한가 역산 결과를 전일 종가로 교차 검증
+    uncertain = [
+        stock for stock in stocks
+        if stock.get("base_source") == "limit"
+        and stock.get("base_ambiguous")
+    ]
+
+    if uncertain:
+        try:
+            checked_closes = fetch_krx_prev_closes(
+                tuple(sorted(s["symbol"] for s in uncertain)),
+                today_text,
+            )
+        except Exception:
+            checked_closes = {}
+
+        for stock in uncertain:
+            close = num(checked_closes.get(stock["symbol"]))
+            limits_pair = stock.get("limits")
+
+            stock["checked_krx_close"] = close
+            stock["basis_check"] = "교차 검증 실패"
+
+            if close is None or close <= 0 or not limits_pair:
+                continue
+
+            matches = any(
+                limit_prices(close, mode) == tuple(limits_pair)
+                for mode in ("base", "own")
+            )
+
+            if matches:
+                stock["base_price"] = close
+                stock["base_source"] = "limit"
+                stock["base_ambiguous"] = False
+                stock["basis_check"] = "전일 종가와 상하한가 일치"
+
     # 현재가: 정규장 중에는 토스 현재가, 장외에는 네이버(KRX) 현재가 유지
     # (네이버를 못 써서 토스 목록으로 대체된 경우에는 토스 현재가가 이미 들어 있습니다)
     last = {}
@@ -2154,6 +2195,22 @@ def get_cap_rankings_pair():
             or (row.get("base_source") == "limit" and row.get("naver_base") and abs(row["base_price"] - row["naver_base"]) > 1.5 * kr_tick(row["base_price"]))]
     quality = {"source": source, "expected": CAP_RANK_LIMIT, "available": len(valid),
                "missing": missing, "weak": weak, "complete": len(valid) == CAP_RANK_LIMIT and not weak}
+    quality["weak_details"] = [
+        {
+            "종목명": row["name"],
+            "종목코드": row["symbol"],
+            "현재가": row.get("price"),
+            "등락률": row.get("pct"),
+            "기준가": row.get("base_price"),
+            "기준가 출처": row.get("base_source"),
+            "기준가 후보 불확실": bool(row.get("base_ambiguous")),
+            "네이버 기준가": row.get("naver_base"),
+            "추가 조회 전일 종가": row.get("checked_krx_close"),
+            "검증 결과": row.get("basis_check") or "추가 확인 필요",
+        }
+        for row in valid if row["name"] in weak
+    ]
+
     gainers = sorted((r for r in valid if r["pct"] > 0), key=lambda r: -r["pct"])[:5]
     losers = sorted((r for r in valid if r["pct"] < 0), key=lambda r: r["pct"])[:5]
     return gainers, losers, ranked_at, quality
@@ -5286,6 +5343,15 @@ def main():
 
                 if weak:
                     st.warning("기준가 추가 확인 필요: " + ", ".join(weak))
+
+                if quality.get("source") == "toss":
+                    naver_error = st.session_state.get("cap_naver_error")
+                    if naver_error:
+                        st.caption("네이버 대체 조회 사유: " + naver_error)
+
+                if quality.get("weak_details"):
+                    st.markdown("**기준가 상세 진단**")
+                    st.dataframe(quality["weak_details"], hide_index=True)
 
                 if quality.get("complete"):
                     st.success("시총 데이터 기본 검사 통과")
