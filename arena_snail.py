@@ -40,44 +40,67 @@ def loser_of(names, seed):
 _HTML = """
 <style>
   html,body{margin:0;background:transparent;font-family:'Pretendard','Malgun Gothic','Apple SD Gothic Neo',sans-serif}
-  .box{background:#16120f;border:1px solid #3a2a1e;border-radius:16px;padding:14px 14px 12px;color:#f1e6dc}
-  .top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+  .box{background:#120e0b;border:1px solid #3a2a1e;border-radius:18px;padding:12px 12px 10px;color:#f1e6dc;overflow:hidden}
+  .top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
   .ttl{font-weight:800;font-size:15px}
   button{cursor:pointer;border:0;border-radius:999px;padding:7px 14px;font-weight:800;font-size:13px;background:#ff7a2f;color:#1a0e06}
   button:disabled{opacity:.55;cursor:default}
-  .lane{display:flex;align-items:center;gap:8px;margin:6px 0}
-  .nm{width:84px;flex:none;font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .trk{position:relative;flex:1;height:34px;border-radius:10px;background:repeating-linear-gradient(90deg,#221a14 0 12px,#1c1511 12px 24px);border:1px solid #33261b}
-  .fin{position:absolute;right:4px;top:3px;font-size:18px}
-  .sn{position:absolute;top:2px;left:0;font-size:24px;line-height:28px;transition:none}
-  .rk{width:34px;flex:none;text-align:right;font-size:12px;font-weight:800;color:#b9a595}
-  .lane.lose .trk{border-color:#ff5a5a}.lane.lose .nm{color:#ff8f8f}
+  /* 관중석 */
+  .stand{position:relative;height:34px;border-radius:12px 12px 0 0;background:linear-gradient(#2a1c15,#1a120e);display:flex;align-items:flex-end;justify-content:space-around;padding:0 6px;overflow:hidden;font-size:17px;line-height:1}
+  .stand span{display:inline-block;transform-origin:bottom center}
+  .cheer .stand span{animation:hop .5s ease-in-out infinite alternate}
+  .cheer .stand span:nth-child(3n){animation-delay:.12s}.cheer .stand span:nth-child(3n+1){animation-delay:.25s}
+  @keyframes hop{from{transform:translateY(2px)}to{transform:translateY(-6px)}}
+  /* 경기장 */
+  .arena{position:relative;border-radius:0 0 12px 12px;overflow:hidden;background:#2f6b3a;border:1px solid #1d4a27}
+  .lane{position:relative;height:44px;background:linear-gradient(90deg,#8c3d22,#a94a28 50%,#8c3d22);border-bottom:2px dashed rgba(255,255,255,.55)}
+  .lane:last-child{border-bottom:0}
+  .gate{position:absolute;left:0;top:0;bottom:0;width:86px;background:linear-gradient(90deg,#1f1612,#2b1e17);display:flex;align-items:center;gap:6px;padding-left:6px;border-right:3px solid #f5efe8;box-sizing:border-box}
+  .bib{flex:none;width:20px;height:20px;border-radius:50%;background:#f5efe8;color:#1a0e06;font-size:12px;font-weight:900;display:flex;align-items:center;justify-content:center}
+  .nm{font-size:13px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:54px}
+  .over{position:absolute;right:0;top:0;bottom:0;width:44px;background:repeating-linear-gradient(0deg,#2f6b3a 0 8px,#2a6234 8px 16px);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:900;color:#fff}
+  .fl{position:absolute;top:0;bottom:0;width:16px;background:repeating-conic-gradient(#fff 0% 25%,#15110e 0% 50%) 0 0/16px 16px;box-shadow:0 0 0 1px #000 inset}
+  .sn{position:absolute;top:5px;left:0;font-size:26px;line-height:32px;width:30px;text-align:center}
+  .go .sn{animation:bob .32s ease-in-out infinite alternate}
+  @keyframes bob{from{transform:translateY(0)}to{transform:translateY(-3px)}}
+  .lane.win{box-shadow:inset 0 0 0 2px #ffd34d}
+  .lane.lose{box-shadow:inset 0 0 0 2px #ff5a5a}.lane.lose .nm{color:#ff9d9d}
+  .banner{position:absolute;right:0;bottom:0;width:60px;text-align:center;background:#15110e;color:#fff;font-size:10px;font-weight:900;letter-spacing:.5px;padding:2px 0;border-radius:8px 8px 0 0;z-index:3}
+  .cd{position:absolute;inset:0;display:none;align-items:center;justify-content:center;font-size:54px;font-weight:900;color:#fff;text-shadow:0 3px 12px rgba(0,0,0,.7);background:rgba(0,0,0,.35);z-index:4}
   .res{margin-top:10px;min-height:22px;font-size:14px;font-weight:800;text-align:center;color:#ffd9a8}
-  .hint{margin-top:6px;font-size:11px;color:#a8978a;text-align:center}
+  .hint{margin-top:4px;font-size:11px;color:#a8978a;text-align:center}
 </style>
-<div class="box">
+<div class="box" id="box">
   <div class="top"><div class="ttl" id="t"></div><button id="go">🐌 레이스 시작</button></div>
-  <div id="lanes"></div>
+  <div class="stand" id="stand"><div class="banner">FINISH</div></div>
+  <div class="arena" id="arena">
+    <div id="lanes"></div>
+    <div class="cd" id="cd"></div>
+  </div>
   <div class="res" id="res"></div>
   <div class="hint">결과는 날짜와 참가자로 정해진 값이라 다시 해도 같습니다</div>
 </div>
 <script>
 const P = __PLAN__;
 const TITLE = __TITLE__;
+const GATE = 86, OVER = 44, FLW = 16, SNW = 30;
 document.getElementById('t').textContent = TITLE;
+const stand = document.getElementById('stand');
+['👏','🎉','🙌','📣','👏','🎊','🙌','📣','👏','🎉','🙌','🎊','👏','📣'].forEach(e => { const s = document.createElement('span'); s.textContent = e; stand.appendChild(s); });
 const lanesEl = document.getElementById('lanes');
-const rows = P.lanes.map(l => {
+const rows = P.lanes.map((l, i) => {
   const row = document.createElement('div'); row.className = 'lane';
+  const gate = document.createElement('div'); gate.className = 'gate';
+  const bib = document.createElement('div'); bib.className = 'bib'; bib.textContent = String(i + 1);
   const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = l.name; nm.title = l.name;
-  const trk = document.createElement('div'); trk.className = 'trk';
-  const fin = document.createElement('div'); fin.className = 'fin'; fin.textContent = '🏁';
+  gate.appendChild(bib); gate.appendChild(nm);
+  const fl = document.createElement('div'); fl.className = 'fl';
+  const over = document.createElement('div'); over.className = 'over';
   const sn = document.createElement('div'); sn.className = 'sn'; sn.textContent = '🐌';
-  const rk = document.createElement('div'); rk.className = 'rk';
-  trk.appendChild(fin); trk.appendChild(sn);
-  row.appendChild(nm); row.appendChild(trk); row.appendChild(rk);
+  row.appendChild(gate); row.appendChild(fl); row.appendChild(over); row.appendChild(sn);
   lanesEl.appendChild(row);
   const pts = [[0, 0]].concat(l.way).concat([[1, 1]]);
-  return {l, row, trk, sn, rk, pts, done: false};
+  return {l, row, sn, fl, over, pts, done: false, t: 0};
 });
 function posAt(r, el) {
   const f = Math.min(1, el / r.l.dur), p = r.pts;
@@ -87,32 +110,59 @@ function posAt(r, el) {
   return 1;
 }
 function place() {
-  rows.forEach(r => { const w = r.trk.clientWidth - 34; r.sn.style.left = (posAt(r, r.t || 0) * w) + 'px'; });
+  rows.forEach(r => {
+    const w = r.row.clientWidth;
+    const finishX = w - OVER - FLW;
+    r.fl.style.left = finishX + 'px';
+    const run = finishX - GATE - SNW - 4;
+    r.sn.style.left = (GATE + 4 + posAt(r, r.t) * run) + 'px';
+  });
 }
+const box = document.getElementById('box'), cd = document.getElementById('cd');
 let timer = null;
 function reset() {
-  rows.forEach(r => { r.t = 0; r.done = false; r.rk.textContent = ''; r.row.classList.remove('lose'); });
+  rows.forEach(r => { r.t = 0; r.done = false; r.over.textContent = ''; r.row.classList.remove('lose', 'win'); });
   document.getElementById('res').textContent = '';
-  place();
+  box.classList.remove('go', 'cheer'); place();
+}
+function countdown(done) {
+  const seq = ['3', '2', '1', '출발!']; let i = 0;
+  cd.style.display = 'flex'; box.classList.add('cheer');
+  (function step() {
+    cd.textContent = seq[i];
+    if (++i <= seq.length) setTimeout(step, i === seq.length ? 600 : 700); else { cd.style.display = 'none'; done(); }
+  })();
 }
 document.getElementById('go').onclick = function () {
   if (timer) return;
   reset();
   const btn = this; btn.disabled = true;
-  const t0 = performance.now(); let order = 0;
-  timer = setInterval(() => {
-    const el = (performance.now() - t0) / 1000;
-    rows.forEach(r => {
-      r.t = el;
-      if (!r.done && el >= r.l.dur) { r.done = true; order += 1; r.rk.textContent = order + '등'; }
-    });
-    place();
-    if (rows.every(r => r.done)) {
-      clearInterval(timer); timer = null; btn.disabled = false; btn.textContent = '🐌 다시 보기';
-      rows.forEach(r => { if (r.l.name === P.loser) r.row.classList.add('lose'); });
-      document.getElementById('res').textContent = '🥄 꼴찌는 ' + P.loser + '! 상품은 ' + P.loser + '님이 쏩니다';
-    }
-  }, 40);
+  countdown(() => {
+    box.classList.add('go');
+    const t0 = performance.now(); let order = 0;
+    timer = setInterval(() => {
+      const el = (performance.now() - t0) / 1000;
+      rows.forEach(r => {
+        r.t = el;
+        if (!r.done && el >= r.l.dur) {
+          r.done = true; order += 1;
+          r.over.textContent = order === 1 ? '🥇' : order === 2 ? '🥈' : order === 3 ? '🥉' : order + '등';
+          r.sn.style.animation = 'none';
+        }
+      });
+      place();
+      if (rows.every(r => r.done)) {
+        clearInterval(timer); timer = null; btn.disabled = false; btn.textContent = '🐌 다시 보기';
+        box.classList.remove('go');
+        rows.forEach(r => {
+          if (r.l.name === P.loser) { r.row.classList.add('lose'); r.over.textContent = '🥄'; }
+        });
+        const first = rows.reduce((a, b) => (a.l.dur <= b.l.dur ? a : b));
+        if (first.l.name !== P.loser) first.row.classList.add('win');
+        document.getElementById('res').textContent = '🥄 꼴찌는 ' + P.loser + '! 상품은 ' + P.loser + '님이 쏩니다';
+      }
+    }, 40);
+  });
 };
 window.addEventListener('resize', place);
 place();
@@ -134,6 +184,6 @@ def render(names, seed, title="🐌 꼴찌 뽑기 달팽이 레이스"):
         return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c").replace("</", "<\\/")
 
     page = _HTML.replace("__PLAN__", js(data)).replace("__TITLE__", js(title))
-    components.html(page, height=60 + 46 * len(names) + 78)
+    components.html(page, height=176 + 46 * len(names))
 
     return data["loser"]
