@@ -3593,13 +3593,14 @@ def fetch_strong_themes(limit=5):
     return fallback[:limit]
 
 
-def generate_core_keywords(snapshot=None):
+def generate_core_keywords(snapshot=None, state=None):
     """당일 시황 데이터에서 검색용 핵심 해시태그를 자동 구성합니다.
 
     우선순위: 토스증권 강세 산업 → 급등·급락 주요 종목 → 이슈/뉴스에서
     확인되는 산업 키워드 → 시장 기본 키워드. 실제 검색량 순위는 아닙니다.
     """
-    state = st.session_state
+    if state is None:
+        state = st.session_state
     snapshot = snapshot or state.get("snapshot", {}) or {}
     tags = []
     seen = set()
@@ -3623,6 +3624,9 @@ def generate_core_keywords(snapshot=None):
         item for item in (state.get("sector_items") or [])
         if isinstance(item, dict) and item.get("name")
     ]
+    if state.get("sector_fetch_status") in ("failed", "empty"):
+        sector_items = []
+
     sector_items.sort(
         key=lambda row: (
             num(row.get("rank")) if num(row.get("rank")) is not None else 10**9,
@@ -3731,8 +3735,9 @@ def autofill_themes():
 # 기사 내용이 없으면 현재 시장 데이터로 생성하고,
 # 기사 내용이 있으면 기사 + 산업/종목 흐름을 함께 반영합니다.
 # ---------------------------------------------------------------
-def collect_summary_inputs(snapshot=None):
-    state = st.session_state
+def collect_summary_inputs(snapshot=None, state=None, allow_fetch=True):
+    if state is None:
+        state = st.session_state
     snapshot = snapshot or state.get("snapshot", {}) or {}
 
     # 강세 산업/섹터: 토스 섹터 랭킹을 우선 사용
@@ -3740,7 +3745,12 @@ def collect_summary_inputs(snapshot=None):
         item for item in (state.get("sector_items") or [])
         if isinstance(item, dict) and item.get("name")
     ]
-    if not sector_items:
+    sector_status = state.get("sector_fetch_status")
+
+    if sector_status in ("failed", "empty"):
+        sector_items = []
+
+    if not sector_items and allow_fetch and sector_status not in ("failed", "empty"):
         try:
             sector_items = [
                 item for item in fetch_strong_themes(limit=5)
@@ -3754,7 +3764,12 @@ def collect_summary_inputs(snapshot=None):
 
     # 수동 입력한 테마가 있으면 자동 조회 결과와 함께 보조 자료로 활용
     typed_themes = str(state.get("themes", "")).strip()
-    if not sector_names and typed_themes:
+    if (
+        not sector_names
+        and typed_themes
+        and allow_fetch
+        and sector_status not in ("failed", "empty")
+    ):
         sector_names = [
             re.sub(r"^#", "", x.strip())
             for x in re.split(r"[\s,·]+", typed_themes)

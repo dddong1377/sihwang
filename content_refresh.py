@@ -21,6 +21,7 @@ def refresh_content(
     generators,
     recorder,
     force=False,
+    sector_loader=None,
 ):
     """Refresh automatic content while preserving manual edits."""
 
@@ -31,6 +32,40 @@ def refresh_content(
         "skipped": [],
     }
 
+    if sector_loader is not None:
+        try:
+            sectors = sector_loader(snapshot)
+
+            if not isinstance(sectors, list):
+                raise ValueError("Invalid sector data")
+
+            if any(
+                not isinstance(row, dict) or not row.get("name")
+                for row in sectors
+            ):
+                raise ValueError("Invalid sector item")
+
+            state["sector_items"] = deepcopy(sectors)
+
+            state["sector_fetch_status"] = (
+                "success" if sectors else "empty"
+            )
+
+            state["sector_fetched_at"] = snapshot.get("fetched_at")
+            report["sector_status"] = state["sector_fetch_status"]
+
+        except Exception as error:
+            state["sector_items"] = []
+            state["sector_fetch_status"] = "failed"
+            state["sector_fetched_at"] = None
+
+            report["sector_status"] = "failed"
+
+            report["failed"].append({
+                "key": "sectors",
+                "error": str(error),
+            })
+
     for key in ("themes", "summary", "keywords"):
 
         if key not in generators:
@@ -39,6 +74,14 @@ def refresh_content(
 
         if not force and not can_refresh(key, state):
             report["preserved"].append(key)
+            continue
+
+        if (
+            key == "themes"
+            and sector_loader is not None
+            and state.get("sector_fetch_status") in ("failed", "empty")
+        ):
+            report["skipped"].append(key)
             continue
 
         backup = deepcopy(dict(state))
