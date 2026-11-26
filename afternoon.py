@@ -3691,6 +3691,7 @@ def autofill_themes():
         themes = fetch_strong_themes()
 
     except Exception as error:
+        state["sector_fetch_status"] = "failed"
         state["themes_note"] = f"테마 자동 불러오기 실패: {error}"
         return
 
@@ -3699,6 +3700,10 @@ def autofill_themes():
     themes.sort(key=lambda row: (num(row.get("rank")) if num(row.get("rank")) is not None else 10**9,
                                   -(num(row.get("pct")) or 0)))
     state["sector_items"] = themes
+    state["sector_fetch_status"] = "success" if themes else "empty"
+    state["sector_fetched_at"] = datetime.datetime.now(KST).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
 
     if not themes:
         state["themes_note"] = (
@@ -4200,6 +4205,89 @@ def generate_market_summary(snapshot=None):
     return result
 
 
+def content_signature(snapshot, state):
+    """자동 생성 콘텐츠에 사용되는 시장 데이터 비교."""
+
+    indices = snapshot.get("indices") or {}
+
+    market = [
+        [key, (indices.get(key) or {}).get("pct")]
+        for key in ("kospi", "kosdaq")
+    ]
+
+    rankings = [
+        [
+            key,
+            [
+                [row.get("symbol"), row.get("name"),
+                 row.get("pct"), row.get("theme"),
+                 row.get("headlines")]
+                for row in snapshot.get(key, [])
+            ],
+        ]
+        for key in ("gainers", "losers")
+    ]
+
+    sectors = [
+        [row.get("name"), row.get("pct"), row.get("rank")]
+        for row in (state.get("sector_items") or [])
+        if isinstance(row, dict)
+    ]
+
+    issues = [
+        [
+            str(state.get(f"is{i}t", "")),
+            str(state.get(f"is{i}c", "")),
+            str(state.get(f"is{i}src", "")),
+        ]
+        for i in range(1, 4)
+    ]
+
+    return json.dumps(
+        {
+            "date": snapshot.get("date"),
+            "duration": snapshot.get("duration"),
+            "universe": snapshot.get("universe"),
+            "market": market,
+            "rankings": rankings,
+            "sectors": sectors,
+            "issues": issues,
+            "themes": state.get("themes", ""),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+
+
+def record_content_generation(key, snapshot, state):
+    """자동 생성값과 생성 당시 데이터 상태를 기록."""
+    state[f"{key}__generated"] = state.get(key, "")
+    state[f"{key}__signature"] = content_signature(snapshot, state)
+    state[f"{key}__generated_at"] = datetime.datetime.now(KST).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+
+def content_freshness(key, snapshot, state):
+    """자동 생성 콘텐츠 변경 여부를 판정."""
+    value = state.get(key, "")
+
+    if not str(value).strip():
+        return "empty"
+
+    if f"{key}__signature" not in state:
+        return "untracked"
+
+    if value != state.get(f"{key}__generated"):
+        return "manual"
+
+    if state[f"{key}__signature"] != content_signature(snapshot, state):
+        return "stale"
+
+    return "matched"
+
+
 def autofill_summary():
     """버튼 클릭 시 최신 입력 기사와 시장 데이터를 반영해 요약을 다시 생성합니다."""
     state = st.session_state
@@ -4207,6 +4295,7 @@ def autofill_summary():
     try:
         with st.spinner("시장 데이터와 입력 기사를 종합하는 중..."):
             state["summary"] = generate_market_summary(snapshot)
+            record_content_generation("summary", snapshot, state)
     except Exception as error:
         state["summary_note"] = f"한 줄 요약 생성 실패: {error}"
 
@@ -4695,7 +4784,7 @@ def build_markdown(snapshot, time_text="확인 불가"):
         (
             "🏷️ 오늘 뜨는 테마",
             "themes",
-            "AI 반도체 · 2차전지",
+            "",
         ),
         (
             "👀 내일 체크 포인트",
@@ -5971,6 +6060,9 @@ def main():
             keyword_col, keyword_note_col = st.columns([1.6, 5], vertical_alignment="center")
             if keyword_col.button("핵심 키워드 자동 생성", key="keywords_btn", icon=":material/refresh:"):
                 st.session_state["keywords"] = generate_core_keywords(snapshot)
+                record_content_generation(
+                    "keywords", snapshot, st.session_state
+                )
                 st.session_state["keywords_note"] = (
                     "당일 강세 산업·급등/급락 종목·주요 이슈를 반영했습니다."
                 )
@@ -5984,6 +6076,57 @@ def main():
                 help="당일 시장 데이터로 자동 생성한 뒤 직접 수정할 수 있습니다.",
             )
 
+        with st.expander("시황 콘텐츠 최신성 진단", expanded=False):
+            st.caption(
+                "시장 데이터 조회: "
+                + str(snapshot.get("fetched_at") or "미확인")
+            )
+
+            st.caption(
+                "종목 순위 계산: "
+                + str(snapshot.get("ranking_at") or "미확인")
+            )
+
+            sector_status = st.session_state.get("sector_fetch_status")
+
+            if sector_status == "failed":
+                st.warning("강세 산업 조회 실패: 이전 데이터가 남아 있을 수 있습니다.")
+            elif sector_status == "empty":
+                st.warning("강세 산업 조회 결과 없음: 테마를 확인하세요.")
+            elif sector_status == "success":
+                st.caption(
+                    "강세 산업 조회 성공 시각: "
+                    + str(st.session_state.get("sector_fetched_at"))
+                )
+            else:
+                st.info("강세 산업 조회 시각 미기록")
+
+            for key, label in (
+                ("summary", "AI 한 줄 요약"),
+                ("keywords", "핵심 키워드"),
+            ):
+                status = content_freshness(
+                    key, snapshot, st.session_state
+                )
+
+                if status == "matched":
+                    st.success(f"{label}: 생성 당시 데이터와 일치")
+                elif status == "stale":
+                    st.warning(f"{label}: 시장 또는 입력 데이터 변경 — 다시 생성 권장")
+                elif status == "manual":
+                    st.info(f"{label}: 사용자 수정값 유지 — 내용 확인 필요")
+                elif status == "empty":
+                    st.caption(f"{label}: 내용 없음")
+                else:
+                    st.info(f"{label}: 생성 이력 미기록 — 내용 확인 필요")
+
+                generated_at = st.session_state.get(f"{key}__generated_at")
+
+                if generated_at:
+                    st.caption(f"생성 시각: {generated_at}")
+
+            st.caption("직접 작성한 경제 이슈와 체크 포인트는 자동 변경하지 않습니다.")
+
         st.subheader("시황글 미리보기")
 
         now_text = datetime.datetime.now(KST).strftime("%H:%M")
@@ -5991,7 +6134,7 @@ def main():
         markdown = build_markdown(snapshot, now_text)
 
         if not publish_blocked:
-            copy_buttons(build_markdown(snapshot, NOW_TOKEN))
+            copy_buttons(markdown)
         else:
             markdown = "**[잠정 자료 — 게시 금지]**\n\n" + markdown
 
