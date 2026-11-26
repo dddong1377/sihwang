@@ -669,11 +669,7 @@ YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MTNW-Market/1.0)"}
 
 @st.cache_data(ttl=60, show_spinner=False)
 def yahoo_quote(symbol):
-    """
-    야후 파이낸스 차트 API(비공식)로 현재가와 전일 대비 등락률 조회.
-    실패하면 None을 반환하므로 앱 전체가 멈추지 않습니다.
-    """
-
+    """동일 응답의 가격·기준가·시각을 함께 보존."""
     try:
         response = requests.get(
             "https://query1.finance.yahoo.com/v8/finance/chart/"
@@ -689,72 +685,80 @@ def yahoo_quote(symbol):
         meta = response.json()["chart"]["result"][0]["meta"]
 
         price = num(meta.get("regularMarketPrice"))
+        previous = num(meta.get("chartPreviousClose"))
 
-        previous = (
-            num(meta.get("chartPreviousClose"))
-            or num(meta.get("previousClose"))
+        if previous is None:
+            previous = num(meta.get("previousClose"))
+
+        if price is None or price <= 0:
+            return None
+
+        pct = (
+            (price / previous - 1) * 100
+            if previous is not None and previous > 0
+            else None
         )
 
-        pct = None
+        timestamp = num(meta.get("regularMarketTime"))
+        market_at = None
+        trade_date = None
 
-        if price is not None and previous:
-            pct = (price / previous - 1) * 100
+        if timestamp is not None and timestamp > 0:
+            try:
+                dt = datetime.datetime.fromtimestamp(
+                    timestamp,
+                    tz=datetime.timezone.utc,
+                )
 
-        return {"price": price, "pct": pct}
+                market_at = dt.astimezone(KST).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+
+                exchange_timezone = meta.get(
+                    "exchangeTimezoneName"
+                )
+
+                if exchange_timezone:
+                    trade_date = dt.astimezone(
+                        ZoneInfo(exchange_timezone)
+                    ).date().isoformat()
+
+            except (ValueError, OverflowError, OSError, KeyError):
+                pass
+
+        return {
+            "price": price,
+            "pct": pct,
+            "previous_close": previous,
+            "market_at": market_at,
+            "trade_date": trade_date,
+            "fetched_at": datetime.datetime.now(KST).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+            "source": "Yahoo Finance",
+            "symbol": symbol,
+            "market_state": meta.get("marketState"),
+        }
 
     except Exception:
         return None
 
 
 def get_usdkrw():
-    """
-    원/달러 환율 조회.
-    현재 환율은 토스증권 API, 등락률은 야후(KRW=X) 기준입니다.
-    토스 조회가 실패하면 야후 값으로 대체합니다.
-    """
-
-    price = None
-
-    try:
-        result = api_get(
-            "/api/v1/exchange-rate",
-            {
-                "baseCurrency": "USD",
-                "quoteCurrency": "KRW",
-            }
-        )
-
-        if isinstance(result, dict):
-            price = num(result.get("rate"))
-
-    except Exception:
-        price = None
-
-    fallback = yahoo_quote("KRW=X")
-
-    pct = fallback["pct"] if fallback else None
-
-    if price is None and fallback:
-        price = fallback["price"]
-
-    return {"price": price, "pct": pct}
+    """환율과 등락률의 출처 및 기준 통일."""
+    return yahoo_quote("KRW=X") or {
+        "price": None,
+        "pct": None,
+        "source": "Yahoo Finance",
+        "error": "환율 조회 실패",
+    }
 
 
 def get_global_markets():
-    """나스닥·S&P500 지수와 원/달러 환율 조회."""
-
-    nasdaq = yahoo_quote("^IXIC") or {}
-    sp500 = yahoo_quote("^GSPC") or {}
-
+    """해외 지표별 조회 시각과 기준 거래일 보존."""
     return {
-        "nasdaq": {
-            "price": nasdaq.get("price"),
-            "pct": nasdaq.get("pct"),
-        },
-        "sp500": {
-            "price": sp500.get("price"),
-            "pct": sp500.get("pct"),
-        },
+        "nasdaq": yahoo_quote("^IXIC") or {},
+        "sp500": yahoo_quote("^GSPC") or {},
         "usdkrw": get_usdkrw(),
     }
 
@@ -3696,6 +3700,8 @@ def autofill_themes():
 
     except Exception as error:
         state["sector_fetch_status"] = "failed"
+        state["sector_items"] = []
+        state["sector_fetched_at"] = None
         state["themes_note"] = f"테마 자동 불러오기 실패: {error}"
         return
 
@@ -4270,6 +4276,7 @@ def content_signature(snapshot, state):
             "market": market,
             "rankings": rankings,
             "sectors": sectors,
+            "sector_status": state.get("sector_fetch_status"),
             "issues": issues,
             "themes": state.get("themes", ""),
         },
@@ -4705,6 +4712,16 @@ def build_markdown(snapshot, time_text="확인 불가", state=None):
         )
     )
 
+    summary_status = content_freshness(
+        "summary", snapshot, session
+    )
+
+    if summary_status == "stale":
+        summary_text = (
+            "시장 데이터가 변경되었습니다. "
+            "한 줄 요약을 다시 생성해 주세요."
+        )
+
     lines = [
         f"# 📅 {snapshot['date']} | 오후 시황",
         "",
@@ -4794,10 +4811,22 @@ def build_markdown(snapshot, time_text="확인 불가", state=None):
         "",
     ]
 
+    issue_section_start = len(lines) - 2
+
     for i in (1, 2, 3):
         title = one_line(session.get(f"is{i}t", ""))
 
         if not title:
+            continue
+
+        if title in (
+            "당일 상승률 상위 종목 흐름",
+            "당일 하락률 상위 종목 흐름",
+            "시장 변동성 확인",
+        ) and not any(
+            str(session.get(f"is{i}{suffix}", "")).strip()
+            for suffix in ("c", "src", "s", "k", "link")
+        ):
             continue
 
         lines.append(
@@ -4821,6 +4850,12 @@ def build_markdown(snapshot, time_text="확인 불가", state=None):
 
         lines.append("")
 
+    if not any(
+        line.strip()
+        for line in lines[issue_section_start + 2:]
+    ):
+        del lines[issue_section_start:]
+
     sections = [
         (
             "🏷️ 오늘 뜨는 테마",
@@ -4841,6 +4876,18 @@ def build_markdown(snapshot, time_text="확인 불가", state=None):
 
     for title, key, default in sections:
         value = session.get(key, default).strip()
+
+        if (
+            key == "keywords"
+            and content_freshness(key, snapshot, session) == "stale"
+        ):
+            lines += [
+                f"### {title}",
+                "",
+                "시장 데이터 변경으로 핵심 키워드 재생성 필요",
+                "",
+            ]
+            continue
 
         if (
             key == "themes"
@@ -5397,6 +5444,42 @@ def render_saved_aft_posts():
  
         if st.toggle("마크다운 원문 보기", key="aft_arch_raw"):
             st.code(text, language="markdown")
+def refresh_market_content_offline(snapshot, state):
+    """가상 시장 데이터용 콘텐츠 일괄 갱신."""
+
+    if snapshot.get("synthetic") is not True:
+        raise ValueError("Synthetic market data required")
+
+    from content_refresh import refresh_content
+
+    def make_themes(snap, working):
+        return " ".join(
+            "#" + str(row["name"]).replace(" ", "")
+            for row in working.get("sector_items", [])
+        )
+
+    def make_summary(snap, working):
+        data = collect_summary_inputs(
+            snap, working, allow_fetch=False
+        )
+        data["articles"] = []
+        data["issue_titles"] = []
+
+        return "[가상 데이터] " + fallback_market_summary(data)
+
+    return refresh_content(
+        state,
+        snapshot,
+        {
+            "themes": make_themes,
+            "summary": make_summary,
+            "keywords": generate_core_keywords,
+        },
+        record_content_generation,
+        sector_loader=lambda snap: snap["sector_items"],
+    )
+
+
 def main():
     st.title("MTNW 오후 시황")
     apply_label_style()
@@ -5955,9 +6038,9 @@ def main():
             )
 
             issues = [
-                (1, "🔺", "당일 상승률 상위 종목 흐름"),
-                (2, "🔻", "당일 하락률 상위 종목 흐름"),
-                (3, "➖", "시장 변동성 확인"),
+                (1, "🔺", ""),
+                (2, "🔻", ""),
+                (3, "➖", ""),
             ]
 
             for i, direction, title in issues:
@@ -6046,7 +6129,7 @@ def main():
                         height=68,
                     )
 
-            st.session_state.setdefault("themes", "AI 반도체 · 2차전지")
+            st.session_state.setdefault("themes", "")
 
             t1, t2 = st.columns([1.6, 5], vertical_alignment="center")
 

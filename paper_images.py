@@ -77,7 +77,8 @@ function mastheadBig(ctx) {
   text(ctx, eb, W - M - ew / 2, y + 27, 19, 2, PAPER, 'center');
   text(ctx, D.model.date_text, W - M, y + 62, 17, 1, MUTED, 'right');
   hline(ctx, M, y + 84, CW, 4); hline(ctx, M, y + 92, CW, 1.5);
-  const meta = (D.issueNo ? '제' + D.issueNo + '호 · ' : '') + D.model.edition + ' 발행';
+  const meta = (D.issueNo ? '제' + D.issueNo + '호 · ' : '') + D.model.edition + ' 발행'
+    + (D.model.market_at ? ' · 국내 시장 조회 ' + D.model.market_at : '');
   text(ctx, meta, M, y + 112, 15, 1, MUTED);
   return y + 132;
 }

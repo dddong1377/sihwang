@@ -161,10 +161,32 @@ def parse_markdown(markdown):
 
     sections = new_sections
 
+    metadata = []
+    summary_lines = []
+
+    for raw in cover_lines:
+        text = raw.strip()
+
+        if text.startswith("국내 시장 데이터 조회:"):
+            metadata.append(text)
+        elif text:
+            summary_lines.append(raw)
+
+    if metadata:
+        cover_title += " · " + " · ".join(metadata)
+
     summary = " ".join(
-        raw.strip().lstrip(">").strip() for raw in cover_lines if raw.strip()
+        raw.strip().lstrip(">").strip()
+        for raw in summary_lines
     )
     summary = re.sub(r"^\s*📌?\s*\**한 줄 요약\**\s*[:：]?\s*", "", summary)
+
+    summary = re.sub(
+        r"📌?\s*\**한 줄 요약\**\s*[:：]\s*",
+        "",
+        summary,
+        count=1,
+    )
 
     return cover_title, _plain(summary), sections
 
@@ -539,11 +561,23 @@ function blockTable(b) {
       r.forEach((c, i) => {
         ctx.font = fnt(fs, bolds[ri][i]); ctx.fillStyle = INK;
         const t = stamp(texts[ri][i]);
+        let display = t;
+
+        if (ri > 0 && /등락|전일/.test(b.header[i] || '')) {
+          display = t.replace(/🔺/g, '▲').replace(/🔻/g, '▼');
+
+          if (/^\s*(▲|\+)/.test(display)) {
+            ctx.fillStyle = '#D92335';
+          } else if (/^\s*(▼|-|−)/.test(display)) {
+            ctx.fillStyle = '#175CD3';
+          }
+        }
+
         const a = ri === 0 ? 'center' : al[i];
         const cy = y + ri * rowH + rowH / 2 + fs * 0.04;
-        if (a === 'right') { ctx.textAlign = 'right'; ctx.fillText(t, cx + colW[i] - PX * fs, cy); }
-        else if (a === 'center') { ctx.textAlign = 'center'; ctx.fillText(t, cx + colW[i] / 2, cy); }
-        else { ctx.textAlign = 'left'; ctx.fillText(t, cx + PX * fs, cy); }
+        if (a === 'right') { ctx.textAlign = 'right'; ctx.fillText(display, cx + colW[i] - PX * fs, cy); }
+        else if (a === 'center') { ctx.textAlign = 'center'; ctx.fillText(display, cx + colW[i] / 2, cy); }
+        else { ctx.textAlign = 'left'; ctx.fillText(display, cx + PX * fs, cy); }
         cx += colW[i];
       });
     });

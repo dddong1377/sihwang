@@ -164,6 +164,13 @@ def build_model(markdown):
     kind = detect_kind(title)
     date, date_text = parse_date(title)
 
+    found = re.search(
+        r"국내 시장 데이터 조회:\s*([^\n]+)",
+        str(markdown or ""),
+    )
+
+    market_at = found.group(1).strip() if found else ""
+
     model = {
         "kind": kind,
         "edition": EDITION[kind],
@@ -171,6 +178,7 @@ def build_model(markdown):
         "title": clean_title(title),
         "date_iso": date.isoformat() if date else "",
         "date_text": date_text,
+        "market_at": market_at,
         "headline": summary,
         "indices": [],
         "bands": [],

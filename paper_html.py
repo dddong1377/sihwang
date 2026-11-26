@@ -252,6 +252,9 @@ def build_paper_html(model, issue_no=None):
 
     kicker = "주간 종합 · 이번 주의 한 줄" if model["kind"] == "week" else "1면 종합 · 오늘의 한 줄"
     meta = (f"제{issue_no}호 · " if issue_no else "") + f'{model["edition"]} 발행'
+    if model.get("market_at"):
+        meta += " · 국내 시장 조회 " + model["market_at"]
+
     issues = model["issues"]
     lead = issues[0] if issues else None
     rest = issues[1:]
