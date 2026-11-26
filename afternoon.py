@@ -518,26 +518,16 @@ def krx_regular_open(now=None):
 
 
 def get_indices():
-    """
-    코스피·코스닥 지수 조회.
-
-    주의:
-    아래 시장 지표 API 경로와 응답 필드는
-    실제 토스 API 명세에 맞는지 별도 검증이 필요합니다.
-    """
+    """코스피·코스닥 지수 및 기준 거래일 대비 등락률 조회."""
 
     result = api_get(
         "/api/v1/market-indicators/prices",
-        {
-            "symbols": "KOSPI,KOSDAQ"
-        }
+        {"symbols": "KOSPI,KOSDAQ"},
     )
 
-    if isinstance(result, dict):
-        rows = result.get("prices", [])
-    elif isinstance(result, list):
-        rows = result
-    else:
+    rows = result.get("prices", []) if isinstance(result, dict) else result
+
+    if not isinstance(rows, list):
         rows = []
 
     by_symbol = {
@@ -547,47 +537,131 @@ def get_indices():
     }
 
     output = {}
+    fetched_at = datetime.datetime.now(KST)
 
     for symbol in ("KOSPI", "KOSDAQ"):
         item = by_symbol.get(symbol, {})
-
         price = num(item.get("lastPrice"))
         pct = None
+        previous_close = None
+        quote_day = None
+        basis_source = None
+        error_message = ""
 
         try:
             candle_result = api_get(
                 f"/api/v1/market-indicators/{symbol}/candles",
-                {
-                    "interval": "1d",
-                    "count": 3,
-                }
+                {"interval": "1d", "count": 3},
             )
 
-            candles = candle_result.get("candles", [])
+            candles = (
+                candle_result.get("candles", [])
+                if isinstance(candle_result, dict)
+                else candle_result
+            )
 
-            quote_time = datetime.datetime.fromisoformat(str(item.get("timestamp", "")).replace("Z", "+00:00"))
-            quote_day = (quote_time.astimezone(KST) if quote_time.tzinfo else quote_time).date()
+            if not isinstance(candles, list):
+                raise ValueError("일봉 응답 형식 오류")
+
             by_day = {}
-            for candle in candles:
-                day = datetime.date.fromisoformat(str(candle.get("timestamp", ""))[:10])
-                close = num(candle.get("closePrice"))
-                if day < quote_day and close and close > 0:
-                    if day in by_day and by_day[day] != close:
-                        raise ValueError("지수 일봉 중복 충돌")
-                    by_day[day] = close
-            if price is not None and price > 0 and by_day:
-                pct = (price / by_day[max(by_day)] - 1) * 100
 
-        except Exception:
-            pass
+            for candle in candles:
+                if not isinstance(candle, dict):
+                    continue
+
+                try:
+                    day = datetime.date.fromisoformat(
+                        str(candle.get("timestamp", ""))[:10]
+                    )
+                except ValueError:
+                    continue
+
+                close = num(candle.get("closePrice"))
+
+                if close is None or close <= 0:
+                    continue
+
+                if day > fetched_at.date():
+                    continue
+
+                if day in by_day and by_day[day] != close:
+                    raise ValueError("지수 일봉 중복 충돌")
+
+                by_day[day] = close
+
+            if not by_day:
+                raise ValueError("유효한 일봉 없음")
+
+            raw_timestamp = item.get("timestamp")
+
+            if raw_timestamp:
+                try:
+                    quote_time = datetime.datetime.fromisoformat(
+                        str(raw_timestamp).replace("Z", "+00:00")
+                    )
+                    quote_day = (
+                        quote_time.astimezone(KST)
+                        if quote_time.tzinfo
+                        else quote_time
+                    ).date()
+                    basis_source = "quote_timestamp"
+                except ValueError:
+                    quote_day = None
+
+            if quote_day is None:
+                latest_day = max(by_day)
+                latest_close = by_day[latest_day]
+
+                if price is not None and math.isclose(
+                    price, latest_close,
+                    rel_tol=0, abs_tol=0.005
+                ):
+                    quote_day = latest_day
+                    basis_source = "latest_candle_match"
+
+                elif latest_day == fetched_at.date():
+                    quote_day = latest_day
+                    basis_source = "current_day_candle"
+
+                else:
+                    raise ValueError("지수 기준 거래일 확인 불가")
+
+            if quote_day > fetched_at.date():
+                raise ValueError("지수 기준일이 미래 날짜입니다")
+
+            previous_days = [
+                day for day in by_day
+                if day < quote_day
+            ]
+
+            if not previous_days:
+                raise ValueError("직전 일봉 없음")
+
+            previous_close = by_day[max(previous_days)]
+
+            if price is None or price <= 0:
+                raise ValueError("현재 지수값 확인 불가")
+
+            pct = (price / previous_close - 1) * 100
+
+        except Exception as error:
+            error_message = str(error)[:200]
 
         output[symbol.lower()] = {
             "price": price,
             "pct": pct,
             "timestamp": item.get("timestamp"),
+            "trade_date": (
+                quote_day.isoformat() if quote_day else None
+            ),
+            "fetched_at": fetched_at.isoformat(),
+            "previous_close": previous_close,
+            "basis_source": basis_source,
+            "error": error_message,
         }
 
     return output
+
 
 
 YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MTNW-Market/1.0)"}
@@ -2101,6 +2175,7 @@ def refresh_live(snapshot):
     for stock in gainers + losers:
         enrich_stock(stock, today)
 
+    snapshot["indices"] = get_indices()
     snapshot["quality"] = quality
     snapshot["gainers"] = gainers
     snapshot["losers"] = losers
@@ -5188,12 +5263,70 @@ def main():
                                or snapshot.get("duration") != duration
                                or (is_cap and not quality.get("complete"))
                                or any(num(snapshot.get("indices", {}).get(k, {}).get("pct")) is None for k in ("kospi", "kosdaq")))
+        with st.expander("시장 데이터 품질 진단", expanded=False):
+            if is_cap:
+                expected = quality.get("expected", CAP_RANK_LIMIT)
+                available = quality.get("available", 0)
+                missing = quality.get("missing") or []
+                weak = quality.get("weak") or []
+                coverage = available / expected * 100 if expected else 0
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("분석 대상", f"{expected}종목")
+                c2.metric("확보 종목", f"{available}종목")
+                c3.metric("데이터 확보율", f"{coverage:.1f}%")
+
+                c4, c5, c6 = st.columns(3)
+                c4.metric("미확보 수", max(0, expected - available))
+                c5.metric("기준가 추가 확인", len(weak))
+                c6.metric("데이터 출처", str(quality.get("source", "미확인")).upper())
+
+                if missing:
+                    st.warning("등락률/가격 미확보: " + ", ".join(missing))
+
+                if weak:
+                    st.warning("기준가 추가 확인 필요: " + ", ".join(weak))
+
+                if quality.get("complete"):
+                    st.success("시총 데이터 기본 검사 통과")
+                else:
+                    st.warning("시총 데이터 검증 미완료: 재조회가 필요합니다.")
+            else:
+                st.info("전체 시장 모드: 시총 100종목 확보율은 적용되지 않습니다.")
+
+            st.markdown("**시장 지표 검증**")
+
+            for code, label in (("kospi", "코스피"), ("kosdaq", "코스닥")):
+                row = snapshot.get("indices", {}).get(code, {})
+                price = num(row.get("price"))
+                pct = num(row.get("pct"))
+
+                if price is not None and price > 0 and pct is not None:
+                    st.success(f"{label}: 지수 및 등락률 확보")
+                else:
+                    st.warning(f"{label}: 지수 또는 등락률 미확보")
+
+                if row.get("error"):
+                    st.caption(f"오류 원인: {row['error']}")
+
+                st.caption(
+                    f"기준 거래일: {row.get('trade_date') or '미확인'}"
+                    f" / 기준가 출처: {row.get('basis_source') or '미확인'}"
+                )
+
+                if row.get("fetched_at"):
+                    st.caption(f"조회 시각: {row['fetched_at']}")
+
+            ranked_stocks = snapshot.get("gainers", []) + snapshot.get("losers", [])
+            st.caption(f"상승·하락 순위 계산 시각: {snapshot.get('ranking_at') or '미확인'}")
+            st.caption("실제 거래소 및 시세 최신성은 별도 검증이 필요합니다.")
+
         if is_cap:
-            st.caption(f"시총 데이터: {quality.get('available', 0)}/{CAP_RANK_LIMIT}종목 · 출처: {quality.get('source', '미확인')} · 거래소/시각 별도 확인 필요")
             if quality.get("missing"):
-                st.warning("등락률/가격 미확보: " + ", ".join(quality["missing"]))
+                st.warning("등락률/가격 미확보 종목이 있습니다. 품질 진단을 확인하세요.")
             if quality.get("weak"):
-                st.warning("기준가 추가 확인 필요: " + ", ".join(quality["weak"]))
+                st.warning("기준가 추가 확인 대상이 있습니다. 품질 진단을 확인하세요.")
+
         if publish_blocked:
             st.warning("잠정 순위 또는 이전 조회 결과입니다. 다시 조회하기 전까지 복사·이미지 생성·저장을 제한합니다.")
 
