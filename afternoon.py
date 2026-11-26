@@ -3713,6 +3713,10 @@ def autofill_themes():
 
     state["themes"] = " ".join(theme_hashtag(theme["name"]) for theme in themes)
 
+    record_content_generation(
+        "themes", state.get("snapshot", {}), state
+    )
+
     stock_sector_count = sum(1 for theme in themes if theme.get("stock_names"))
     state["themes_note"] = (
         "토스증권 TOP_GAINERS 공식 순위 기준(랭킹 순서) · "
@@ -4286,6 +4290,19 @@ def content_freshness(key, snapshot, state):
         return "stale"
 
     return "matched"
+
+
+def can_update_auto_content(key, state):
+    """자동 갱신 가능한 값인지 확인합니다."""
+    if key not in state:
+        return True
+
+    generated_key = f"{key}__generated"
+
+    if generated_key not in state:
+        return False
+
+    return state[key] == state[generated_key]
 
 
 def autofill_summary():
@@ -5490,12 +5507,22 @@ def main():
                         universe,
                     )
                     # 시세를 새로 조회할 때 당일 데이터 기준 핵심 키워드도 갱신합니다.
-                    st.session_state["keywords"] = generate_core_keywords(
-                        st.session_state["snapshot"]
-                    )
-                    st.session_state["keywords_note"] = (
-                        "시세 조회 데이터 기준 자동 생성 · 필요하면 직접 수정하세요."
-                    )
+                    if can_update_auto_content("keywords", st.session_state):
+                        st.session_state["keywords"] = generate_core_keywords(
+                            st.session_state["snapshot"]
+                        )
+                        record_content_generation(
+                            "keywords",
+                            st.session_state["snapshot"],
+                            st.session_state,
+                        )
+                        st.session_state["keywords_note"] = (
+                            "시세 조회 데이터 기준 자동 생성"
+                        )
+                    else:
+                        st.session_state["keywords_note"] = (
+                            "기존 작성값 유지 · 필요하면 자동 생성 버튼을 누르세요."
+                        )
 
                     st.session_state["duration"] = duration
                     st.session_state["universe"] = universe
@@ -5716,7 +5743,9 @@ def main():
         # 처음 한 번만 오늘 강했던 테마를 자동으로 채움 (이후 수기 수정 유지)
         if "themes_filled" not in st.session_state:
             st.session_state["themes_filled"] = True
-            autofill_themes()
+
+            if can_update_auto_content("themes", st.session_state):
+                autofill_themes()
 
         with st.expander(
             "시황글 추가 내용 편집 · 이슈·뉴스·테마·체크포인트",
@@ -5735,6 +5764,9 @@ def main():
             # 첫 화면에서만 자동 생성합니다. 이후에는 사용자의 수정 내용을 유지합니다.
             if "summary" not in st.session_state:
                 st.session_state["summary"] = generate_market_summary(snapshot)
+                record_content_generation(
+                    "summary", snapshot, st.session_state
+                )
 
             summary_btn_col, summary_note_col = st.columns([1.7, 5], vertical_alignment="center")
             summary_btn_col.button(
@@ -6103,6 +6135,7 @@ def main():
 
             for key, label in (
                 ("summary", "AI 한 줄 요약"),
+                ("themes", "강세 테마 입력값"),
                 ("keywords", "핵심 키워드"),
             ):
                 status = content_freshness(
