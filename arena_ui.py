@@ -264,7 +264,9 @@ def prize_cards(cards):
             f'<div class="t">🍀 꼴찌가 상품을 쏩니다!</div><div class="r">{esc(c["line"])}</div>{sub}</div>'
         )
 
-    return f'<div class="ar-prizes">{"".join(out)}</div>'
+    one = ' style="grid-template-columns:1fr"' if len(out) == 1 else ""
+
+    return f'<div class="ar-prizes"{one}>{"".join(out)}</div>'
 
 
 def cta_panel(title, lines, accent="", note=""):

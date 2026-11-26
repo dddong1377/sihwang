@@ -278,31 +278,6 @@ def latest_standings(data):
     return None, None
 
 
-def completed_weeks(data, now):
-    """주간 우승·꼴찌가 확정된 주의 [(월요일, 순위)] 최근 순."""
-
-    mondays = {
-        logic.week_start(datetime.date.fromisoformat(key)) for key in data["rounds"]
-    }
-
-    found = []
-
-    for monday in sorted(mondays, reverse=True):
-        if logic.week_complete(data, monday, now):
-            standing = logic.week_standings(data, monday)
-
-            if standing:
-                found.append((monday, standing))
-
-    return found
-
-
-def week_label(monday):
-    friday = monday + datetime.timedelta(days=4)
-
-    return f"{monday.month}/{monday.day}~{friday.month}/{friday.day}"
-
-
 def prize_info(current):
     if current and current.get("name"):
         return current["name"], ("🎲 랜덤 추첨" if current.get("how") == "random" else "✋ 관리자 지정")
@@ -411,6 +386,12 @@ def participation_html(data, key):
     )
 
 
+def solo(standing):
+    """참가자가 1명뿐이라 우승·꼴찌를 가를 수 없는 경우."""
+
+    return len(standing["rows"]) < 2 if standing else True
+
+
 def last_text(names, bold=False):
     """꼴찌 표기. 2명 이상이면 '공동 꼴찌'로 쓰고 달팽이 레이스로 정한다고 알립니다."""
 
@@ -431,36 +412,17 @@ def render_prize(data):
     if result:
         day = datetime.date.fromisoformat(key)
 
-        if result["tied_all"]:
-            line_day = f"{day_text(day)}: 전원 같은 성적이라 꼴찌 없이 마무리"
+        if result["tied_all"] and solo(result):
+            line_day = f"{day_text(day)}: 참가자가 1명뿐이라 꼴찌 없이 마무리"
+        elif result["tied_all"]:
+            line_day = f"{day_text(day)}: 전원 같은 성적 · 전원 공동 우승·공동 꼴찌 · 🐌 레이스로 결정"
         else:
             line_day = f"{day_text(day)} 우승 {', '.join(result['first'])} · {last_text(result['last'])} 🥄"
     else:
         line_day = "매일 결과가 확정되면 그날의 우승자와 꼴찌가 표시됩니다."
 
-    name_week, how_week = prize_info(data["prizes"].get("weekly_current"))
-    weeks = completed_weeks(data, now)
-
-    if weeks:
-        monday, standing = weeks[0]
-
-        if standing["tied_all"]:
-            line_week = f"{week_label(monday)} 주간: 전원 같은 성적이라 꼴찌 없이 마무리"
-        else:
-            line_week = f"{week_label(monday)} 주간 우승 {', '.join(standing['first'])} · {last_text(standing['last'])} 🥄"
-    else:
-        line_week = "금요일 장마감(15:40) 이후 그 주의 우승자와 꼴찌가 확정됩니다."
-
-    sub_week = ""
-    this_monday = logic.week_start(now.date())
-    current = logic.week_standings(data, this_monday)
-
-    if current and not logic.week_complete(data, this_monday, now):
-        sub_week = f"이번 주 진행 중 · 현재 1위 {', '.join(current['first'])} ({current['rows'][0]['hits']}개 적중)"
-
     md(ui.frag(ui.prize_cards([
         {"title": "📅 일간 토너먼트 우승 상품", "name": name_day, "how": how_day, "line": line_day},
-        {"title": "🏅 주간 토너먼트 우승 상품", "name": name_week, "how": how_week, "line": line_week, "sub": sub_week},
     ])))
 
 
@@ -768,28 +730,6 @@ def render_results(data, nick):
         else:
             st.caption("아직 판정이 끝난 예측이 없습니다. 결과는 대결일 장마감(15:40) 이후에 확정됩니다.")
 
-    weeks = completed_weeks(data, now)
-
-    if weeks:
-        md(ui.frag(ui.section("주간 토너먼트 결과", "🏅")))
-
-        for monday, standing in weeks[:4]:
-            if standing["tied_all"]:
-                headline = "전원 같은 성적이라 꼴찌 없이 마무리"
-            else:
-                headline = (
-                    f"🥇 우승 {', '.join(standing['first'])} · "
-                    f"🥄 {last_text(standing['last'])} (꼴찌가 상품을 쏩니다)"
-                )
-
-            with st.expander(f"{week_label(monday)} 주간 · {headline}", expanded=(monday == weeks[0][0])):
-                md(ui.frag(week_table_html(standing, mine=nick)))
-
-                if len(standing["last"]) > 1 and not standing["tied_all"]:
-                    arena_snail.render(
-                        standing["last"], f"week:{monday.isoformat()}", "🐌 주간 꼴찌 뽑기 레이스"
-                    )
-
     md(ui.frag(ui.section("최근 대결 결과", "📋")))
 
     days = sorted(data["rounds"], reverse=True)[:7]
@@ -813,8 +753,14 @@ def render_results(data, nick):
 
             standing = logic.day_standings(data, key)
 
-            if standing and standing["tied_all"]:
-                st.markdown("🤝 참가자 전원이 같은 성적이라 꼴찌 없이 마무리됐어요.")
+            if standing and standing["tied_all"] and solo(standing):
+                st.markdown("🤝 참가자가 1명뿐이라 꼴찌 없이 마무리됐어요.")
+            elif standing and standing["tied_all"]:
+                st.markdown(
+                    f"🤝 참가자 전원({len(standing['rows'])}명)이 같은 성적이라 **전원 공동 우승이자 공동 꼴찌**예요 "
+                    "(꼴찌 한 명은 🐌 레이스로 결정)"
+                )
+                arena_snail.render(standing["last"], f"day:{key}", "🐌 오늘의 꼴찌 뽑기 레이스")
             elif standing:
                 st.markdown(
                     f"🥇 우승 **{', '.join(standing['first'])}** · "
@@ -869,22 +815,6 @@ def render_results(data, nick):
 # 탭 3: 랭킹
 # ===============================================================
 
-def week_table_html(standing, mine=None, title="Top Users", sub="월~금 합산 · 많이 맞힌 순"):
-    rows = []
-
-    for row in standing["rows"]:
-        cells = []
-
-        for offset in range(5):
-            cell = row["days"].get(offset)
-            cells.append(f"{cell[0]}/{cell[0] + cell[1]}" if cell else "-")
-
-        cells.append(str(row["hits"]))
-        rows.append({"nick": row["nick"], "cells": cells})
-
-    return ui.top_table(title, sub, ["순위", "닉네임", "월", "화", "수", "목", "금", "합계"], rows, mine=mine)
-
-
 def render_board(key, entries, rows, headers, title, sub, nick, note=""):
     md(ui.frag(ui.podium(entries)))
 
@@ -901,58 +831,15 @@ def render_board(key, entries, rows, headers, title, sub, nick, note=""):
     md(ui.frag(ui.top_table(title, sub, headers, rows if show_all else rows[:10], mine=nick)))
 
 
-def render_week_tournament(data, nick):
-    now = now_kst()
-    monday = logic.week_start(now.date())
-    standing = logic.week_standings(data, monday)
-    complete = logic.week_complete(data, monday, now)
-
-    st.caption(f"이번 주 ({week_label(monday)}) {'· 확정' if complete else '· 진행 중'}")
-
-    if not standing:
-        md(ui.frag(ui.podium([])))
-        st.caption("아직 이번 주에 판정이 끝난 대결이 없습니다. 하루 결과가 확정되면 합산이 시작됩니다.")
-    else:
-        if complete and not standing["tied_all"]:
-            md(ui.frag(ui.me_pill(
-                f"🥇 주간 우승 <b>{ui.esc(', '.join(standing['first']))}</b> · "
-                f"🥄 <b>{ui.esc(last_text(standing['last']))}</b> (꼴찌가 상품을 쏩니다)"
-            )))
-
-            if len(standing["last"]) > 1:
-                arena_snail.render(
-                    standing["last"], f"week:{monday.isoformat()}", "🐌 주간 꼴찌 뽑기 레이스"
-                )
-
-        entries = [
-            {"nick": r["nick"], "big": str(r["hits"]), "unit": "개", "label": "적중", "small": f"오답 {r['misses']}"}
-            for r in standing["rows"][:3]
-        ]
-        md(ui.frag(ui.podium(entries)))
-
-        names = [r["nick"] for r in standing["rows"]]
-
-        if nick and nick in names:
-            md(ui.frag(ui.me_pill(f"내 순위 <b>{names.index(nick) + 1}위</b> · 전체 {len(names)}명")))
-
-        show_all = len(names) > 10 and st.toggle("전체 보기", key="arena_all_week")
-        view = dict(standing)
-        view["rows"] = standing["rows"] if show_all else standing["rows"][:10]
-        md(ui.frag(week_table_html(view, mine=nick)))
-
-    st.caption(
-        "월~금 일간 대결의 맞힌 개수를 합산해 순위를 정합니다(많은 순, 같으면 오답이 적은 순). "
-        "표의 월~금 칸은 '맞힌 개수/판정된 개수'입니다. 금요일 장마감(15:40) 이후 우승자와 꼴찌가 확정됩니다."
-    )
-
-
 def render_ranking(data, nick=None):
     today = now_kst().date()
 
-    tab_week, tab_month, tab_all = st.tabs(tab_names("🏅 주간 토너먼트", "월간 (최근 30일)", "누적"))
+    tab_season, tab_month, tab_all = st.tabs(
+        tab_names("🗓 시즌 (월간 누적)", "최근 30일", "누적")
+    )
 
-    with tab_week:
-        render_week_tournament(data, nick)
+    with tab_season:
+        render_season(data, nick)
 
     views = (
         (tab_month, "month", (today - datetime.timedelta(days=30)).isoformat(), "최근 30일 · 보정 점수 순"),
@@ -1002,6 +889,257 @@ def render_ranking(data, nick=None):
         "월간·누적 순위는 참여 횟수가 적은 사람이 우연히 100%가 되어도 1위가 되지 않도록 보정한 점수 순입니다. "
         "무승부·무효·선택하지 않은 대결은 집계하지 않습니다."
     )
+
+
+# ===============================================================
+# 시즌(월간 누적) 배너 · 개인 심화 통계
+# ===============================================================
+
+WEEKDAY_NAMES = ("월", "화", "수", "목", "금")
+
+
+def render_season_banner(data, now):
+    """지난달 시즌 MVP 배너. 다음 달 1일부터 일주일 동안만 페이지 맨 위에 겁니다."""
+
+    info = logic.season_banner(data, now.date())
+
+    if not info:
+        return
+
+    champions = info["champions"]
+    top = champions[0]
+    names = [c["nick"] for c in champions]
+    title = f"{info['month']}월 시즌 MVP" + (" (공동)" if len(champions) > 1 else "")
+    meta = f"적중률 {top['rate'] * 100:.0f}% ({top['hits']}/{top['total']}) · {top['days']}일 참여"
+    left = info["left"]
+    note = f"{info['until'].month}/{info['until'].day}까지 게시" + (" · 오늘이 마지막이에요" if left == 1 else f" · {left}일 남음")
+
+    md(ui.frag(ui.season_banner(title, names, meta, note)))
+
+
+def render_season(data, nick):
+    """달력 기준 월간 시즌 순위(보정 점수 순)와 지난 시즌 MVP."""
+
+    months = logic.season_months(data)
+    today = now_kst().date()
+
+    if not months:
+        md(ui.frag(ui.podium([])))
+        st.caption("아직 판정된 대결이 없어 시즌 순위가 없습니다.")
+        return
+
+    labels = [f"{y}년 {m}월" + (" (진행 중)" if (y, m) == (today.year, today.month) else "") for y, m in months]
+    label = st.selectbox("시즌 선택", labels, key="arena_season_pick") if len(months) > 1 else labels[0]
+    year, month = months[labels.index(label)]
+
+    standing = logic.month_standings(data, year, month)
+    ranked = standing["rows"][:standing["ranked"]]
+    waiting = standing["rows"][standing["ranked"]:]
+    first, last = logic.month_bounds(year, month)
+    closed = today > last
+
+    st.caption(
+        f"{month}월 시즌 · 판정된 대결일 {standing['judged_days']}일 · "
+        + ("확정" if closed else "진행 중 (월말까지 누적)")
+    )
+
+    entries = [
+        {
+            "nick": r["nick"], "big": f"{r['rate'] * 100:.0f}", "unit": "%", "label": "적중률",
+            "small": f"{r['hits']} / {r['total']} 적중",
+        }
+        for r in ranked[:3]
+    ]
+    rows = [
+        {
+            "nick": r["nick"],
+            "cells": [f"{r['hits']} / {r['total']}", f"{r['score'] * 100:.0f}", f"{r['rate'] * 100:.0f}%", f"{r['days']}일"],
+        }
+        for r in ranked
+    ]
+
+    if ranked:
+        render_board(
+            f"season_{year}{month}", entries, rows, ["순위", "닉네임", "적중", "보정 점수", "적중률", "참여"],
+            "Season Top", f"{year}년 {month}월 · 보정 점수 순", nick,
+            f"그 달 판정된 대결 {logic.MIN_SEASON}개 이상부터 순위에 들어가요",
+        )
+
+        if closed:
+            champs = logic.season_champions(standing)
+            md(ui.frag(ui.me_pill(
+                f"🏆 {month}월 시즌 MVP <b>{ui.esc(', '.join(c['nick'] for c in champs))}</b>"
+            )))
+    else:
+        md(ui.frag(ui.podium([])))
+        st.caption(f"그 달 판정된 대결이 {logic.MIN_SEASON}개 이상인 참가자부터 시즌 순위에 들어갑니다.")
+
+    if waiting:
+        with st.expander(f"집계 중 ({logic.MIN_SEASON}개 미만 · {len(waiting)}명)"):
+            md(ui.frag(ui.data_table(
+                ["닉네임", "적중"], [[r["nick"], f"{r['hits']} / {r['total']}"] for r in waiting],
+            )))
+
+    past = [(y, m) for y, m in months if logic.month_bounds(y, m)[1] < today]
+
+    if past:
+        md(ui.frag(ui.section("지난 시즌 MVP", "🏆")))
+        history = []
+
+        for y, m in past[:12]:
+            champs = logic.season_champions(logic.month_standings(data, y, m))
+
+            if champs:
+                top = champs[0]
+                history.append([
+                    f"{y}.{m:02d}", ", ".join(c["nick"] for c in champs),
+                    f"{top['rate'] * 100:.0f}% ({top['hits']}/{top['total']})",
+                ])
+
+        if history:
+            md(ui.frag(ui.data_table(["시즌", "MVP", "적중률"], history, "minmax(0,.8fr) minmax(0,1.4fr) minmax(0,1.2fr)")))
+        else:
+            st.caption("아직 순위권에 든 시즌이 없습니다.")
+
+    st.caption(
+        f"시즌은 달력 기준 한 달 동안의 적중을 합산합니다. 참여가 적은 사람이 우연히 100%가 되어도 1위가 되지 않도록 "
+        f"보정 점수 순으로 정하고, 시즌이 끝나면 MVP 배너를 {logic.BANNER_DAYS}일 동안 페이지 맨 위에 겁니다."
+    )
+
+
+def render_mystats(data, nick):
+    """개인 심화 통계: 연속 기록, 요일·월별 성적, 자주 고른 종목, 소수 의견 적중."""
+
+    if not nick:
+        st.info("로그인하면 내 통계를 볼 수 있어요. (상단 로그인 · 닉네임 등록)")
+        return
+
+    key = store.nick_key(nick)
+    now = now_kst()
+    stats = logic.deep_stats(data, key)
+
+    if not stats:
+        st.caption("아직 판정이 끝난 예측이 없습니다. 결과는 대결일 장마감(15:40) 이후에 확정됩니다.")
+        return
+
+    rate = stats["hits"] / stats["total"]
+    ranked, waiting = logic.ranking(logic.user_stats(data), logic.MIN_RANKED["all"])
+    names = [r["nick"] for r in ranked]
+    rank_text = f"{names.index(nick) + 1}위 / {len(names)}명" if nick in names else "집계 중"
+
+    md(ui.frag(ui.section("내 통계", "📊")))
+    md(ui.frag(ui.stat_cards([
+        {"k": "누적 적중률", "v": f"{rate * 100:.0f}", "unit": "%", "s": f"{stats['hits']} / {stats['total']} 적중"},
+        {"k": "누적 순위", "v": rank_text.split(" ")[0] if nick in names else "-", "s": rank_text if nick in names else f"{logic.MIN_RANKED['all']}개 이상부터 집계"},
+        {"k": "참여한 날", "v": str(stats["days"]), "unit": "일"},
+        {"k": "만점의 날", "v": str(stats["perfect"]), "unit": "회", "s": "하루 3개 이상 전부 적중"},
+    ])))
+
+    cur_part, best_part = stats["streak_part"]
+    cur_hit, best_hit = stats["streak_hit"]
+
+    md(ui.frag(ui.stat_cards([
+        {"k": "연속 참여", "v": str(cur_part), "unit": "일", "s": f"최고 {best_part}일"},
+        {"k": "연속 적중", "v": str(cur_hit), "unit": "개", "s": f"최고 {best_hit}개"},
+        {"k": "역발상 적중", "v": f"{stats['contrarian'][0]}", "unit": f" / {stats['contrarian'][1]}", "s": "다수와 반대로 골라 맞힌 수"},
+        {"k": "고른 종목 수", "v": str(stats["stock_count"]), "unit": "개"},
+    ])))
+
+    # 배지
+    badge_list = []
+
+    if cur_part >= 3:
+        badge_list.append(f"🔥 {cur_part}일 연속 참여")
+
+    if cur_hit >= 3:
+        badge_list.append(f"🎯 {cur_hit}연속 적중 중")
+
+    if stats["perfect"]:
+        badge_list.append(f"💯 만점의 날 {stats['perfect']}회")
+
+    if stats["contrarian"][0] >= 3:
+        badge_list.append(f"🦊 역발상 적중 {stats['contrarian'][0]}회")
+
+    if rate >= 0.6 and stats["total"] >= logic.MIN_RANKED["all"]:
+        badge_list.append("📈 적중률 60% 이상")
+
+    if badge_list:
+        md(ui.frag(ui.badges(badge_list)))
+
+    # 최근 일별 적중률
+    recent = stats["per_day"][-14:]
+    items = []
+
+    for day, h, t in recent:
+        d = datetime.date.fromisoformat(day)
+        ratio = h / t
+        items.append({
+            "label": f"{d.month}/{d.day}", "value": ratio,
+            "tone": "g" if ratio >= 0.6 else ("y" if ratio >= 0.4 else "o"),
+            "tip": f"{d.month}/{d.day} {h}/{t} 적중",
+        })
+
+    md(ui.frag(ui.section("최근 일별 적중률", "📅")))
+    md(ui.frag(ui.bars(items)))
+    st.caption("초록 60% 이상 · 노랑 40% 이상 · 주황 그 미만 (최근 14번 참여 기준)")
+
+    # 요일별
+    weekday_items = []
+
+    for index, name in enumerate(WEEKDAY_NAMES):
+        h, t = stats["weekday"][index]
+        ratio = h / t if t else 0
+
+        weekday_items.append({
+            "label": f"{name} {h}/{t}" if t else f"{name} -", "value": ratio,
+            "tone": "g" if t and ratio >= 0.6 else ("y" if t and ratio >= 0.4 else "o"),
+            "tip": f"{name}요일 {h}/{t}",
+        })
+
+    md(ui.frag(ui.section("요일별 적중률", "🗓")))
+    md(ui.frag(ui.bars(weekday_items)))
+
+    played = {i: v for i, v in stats["weekday"].items() if v[1] >= 3}
+
+    if played:
+        best = max(played, key=lambda i: played[i][0] / played[i][1])
+        st.caption(f"{WEEKDAY_NAMES[best]}요일에 가장 잘 맞혔어요 ({played[best][0]}/{played[best][1]}). 표본이 3개 이상인 요일만 비교합니다.")
+
+    # 월별
+    if len(stats["months"]) >= 1:
+        md(ui.frag(ui.section("월별 성적", "🗂")))
+        md(ui.frag(ui.data_table(
+            ["월", "적중", "적중률"],
+            [[m, f"{h} / {t}", f"{h / t * 100:.0f}%"] for m, (h, t) in stats["months"].items()],
+        )))
+
+    # 종목
+    if stats["liked"]:
+        md(ui.frag(ui.section("자주 고른 종목", "🧾")))
+        md(ui.frag(ui.data_table(
+            ["종목", "고른 횟수", "적중"],
+            [[name, f"{t}회", f"{h} / {t} ({h / t * 100:.0f}%)"] for name, (h, t) in stats["liked"]],
+            "minmax(0,1.6fr) minmax(0,1fr) minmax(0,1.4fr)",
+        )))
+
+        if stats["best_stock"]:
+            name, (h, t) = stats["best_stock"]
+            st.caption(f"가장 믿을 만한 종목은 {name}이에요 ({h}/{t}). 2번 이상 고른 종목만 비교합니다.")
+
+    # 시즌 이력
+    medals = []
+
+    for y, m in logic.season_months(data):
+        if logic.month_bounds(y, m)[1] < now.date():
+            champs = logic.season_champions(logic.month_standings(data, y, m))
+
+            if any(c["nick"] == nick for c in champs):
+                medals.append(f"{y}.{m:02d}")
+
+    if medals:
+        md(ui.frag(ui.me_pill(f"🏆 시즌 MVP {len(medals)}회 · {', '.join(medals)}")))
+
+    st.caption("무승부·무효·선택하지 않은 대결은 집계하지 않습니다. 역발상은 3명 이상이 참여한 대결에서 소수 쪽을 골라 맞힌 경우입니다.")
 
 
 # ===============================================================
@@ -1060,13 +1198,8 @@ def render_admin(data):
         except Exception as error:
             st.error(f"저장 실패: {str(error)[:150]}")
 
-    target = st.radio(
-        "어느 토너먼트의 상품을 바꿀까요?",
-        ["일간 토너먼트", "주간 토너먼트"],
-        horizontal=True,
-        key="arena_prize_target",
-    )
-    slot = "current" if target == "일간 토너먼트" else "weekly_current"
+    target = "일간 토너먼트"
+    slot = "current"
 
     if not items:
         st.caption("목록을 저장하면 랜덤 뽑기와 직접 선택을 쓸 수 있습니다.")
@@ -1238,6 +1371,7 @@ def main():
         ["투표 08:00~08:59", "15:40 이후 확정", "꼴찌가 쏩니다"],
     )))
 
+    render_season_banner(data, now)
     render_round_strip(data, now, view_day)
     render_prize(data)
 
@@ -1254,8 +1388,8 @@ def main():
             except Exception:
                 pass
 
-    tab_play, tab_result, tab_rank, tab_admin = st.tabs(
-        tab_names("🎯 오늘의 대결", "📋 결과·내 기록", "🏆 랭킹", "🔧 관리자")
+    tab_play, tab_result, tab_stats, tab_rank, tab_admin = st.tabs(
+        tab_names("🎯 오늘의 대결", "📋 결과·내 기록", "📊 내 통계", "🏆 랭킹", "🔧 관리자")
     )
 
     with tab_play:
@@ -1268,6 +1402,9 @@ def main():
     with tab_result:
         render_results(data, nick)
 
+    with tab_stats:
+        render_mystats(data, nick)
+
     with tab_rank:
         render_ranking(data, nick)
 
@@ -1278,4 +1415,3 @@ def main():
 
 
 main()
-
