@@ -138,8 +138,14 @@ def fetch_cap_top(day_text):
 
     top = [(symbol, name) for _, symbol, name in caps[:CAP_RANK_LIMIT]]
 
-    if len(top) < 50:
-        raise TossError("시가총액 상위 종목 수가 부족합니다.")
+    if len(top) != CAP_RANK_LIMIT:
+        raise TossError(
+            f"시가총액 분석 대상 부족: "
+            f"{len(top)}/{CAP_RANK_LIMIT}종목"
+        )
+
+    if len({symbol for symbol, _ in top}) != len(top):
+        raise TossError("시총 상위 종목 코드 중복")
 
     return top
 
@@ -176,21 +182,55 @@ def candle_closes(symbol):
 
 
 def weekly_return(closes, monday, friday, skip_today):
-    """(주간 등락률, 마지막 종가일) 또는 None. 기준은 월요일 이전 마지막 종가."""
+    """월요일 이전 마지막 유효 종가 대비 주간 누적 수익률."""
+
+    import math
+
+    valid = {}
+
+    for day, close in closes:
+
+        if not isinstance(day, datetime.date):
+            continue
+
+        if isinstance(day, datetime.datetime):
+            day = day.date()
+
+        try:
+            close = float(close)
+        except (TypeError, ValueError):
+            continue
+
+        if not math.isfinite(close) or close <= 0:
+            continue
+
+        if day in valid and valid[day] != close:
+            return None
+
+        valid[day] = close
 
     base = None
     last = None
 
-    for day, close in closes:
+    for day, close in sorted(valid.items()):
+
         if day < monday:
-            base = close
-        elif day <= friday and day != skip_today:
+            base = (day, close)
+
+        elif monday <= day <= friday and day != skip_today:
             last = (day, close)
 
-    if not base or not last:
+    if base is None or last is None:
         return None
 
-    return (last[1] - base) / base * 100, last[0]
+    # 지나치게 오래된 기준 종가는 사용하지 않음
+    if (monday - base[0]).days > 14:
+        return None
+
+    return (
+        (last[1] / base[1] - 1) * 100,
+        last[0],
+    )
 
 
 @st.cache_data(ttl=10 * 60, show_spinner=False)
@@ -230,10 +270,19 @@ def fetch_weekly_movers(monday_text, closed_text):
     with ThreadPoolExecutor(max_workers=3) as pool:
         rows = [row for row in pool.map(one, top) if row]
 
-    if len(rows) < 30:
+    if len(rows) != len(top):
         raise TossError(
-            f"토스 일봉에서 주간 등락률을 계산한 종목이 {len(rows)}개뿐입니다. "
-            "(최근 2주를 벗어난 주는 조회할 수 없습니다.)"
+            f"주간 종목 데이터 미확보: "
+            f"{len(rows)}/{len(top)}종목. "
+            "전체 순위를 확정할 수 없습니다."
+        )
+
+    last_days = {row["last_day"] for row in rows}
+
+    if len(last_days) != 1:
+        raise TossError(
+            "종목별 최종 종가일 불일치: "
+            "주간 순위를 확정할 수 없습니다."
         )
 
     ups = sorted((row for row in rows if row["pct"] > 0), key=lambda r: -r["pct"])
