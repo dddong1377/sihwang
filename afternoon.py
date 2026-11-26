@@ -1734,6 +1734,60 @@ def limit_prices(base, mode="base"):
     return upper, lower
 
 
+def inspect_base_candidates(upper, lower, price):
+    """기존 역산 규칙에서 가능한 기준가 후보 및 등락률 범위를 확인."""
+    upper = num(upper)
+    lower = num(lower)
+    price = num(price)
+
+    if not upper or not lower or upper <= lower:
+        return {
+            "count": 0,
+            "candidates": [],
+            "pct_min": None,
+            "pct_max": None,
+            "pct_width": None,
+        }
+
+    upper = int(round(upper))
+    lower = int(round(lower))
+    center = upper / 1.3
+
+    start = int(center * 0.97)
+    current = max(1, start - start % kr_tick(start))
+    end = int(center * 1.03) + 1
+
+    found = set()
+
+    while current <= end:
+        if any(
+            limit_prices(current, mode) == (upper, lower)
+            for mode in ("base", "own")
+        ):
+            found.add(current)
+
+        current += kr_tick(current)
+
+    candidates = sorted(found)
+
+    rates = [
+        (price / base - 1) * 100
+        for base in candidates
+        if price is not None and price > 0
+    ]
+
+    low = min(rates) if rates else None
+    high = max(rates) if rates else None
+
+    return {
+        "count": len(candidates),
+        "candidates": candidates,
+        "pct_min": low,
+        "pct_max": high,
+        "pct_width": high - low if rates else None,
+    }
+
+
 def derive_base_from_limits(upper, lower, hint=None):
     """당일 상·하한가에 정확히 들어맞는 전일 기준가(호가 단위 위의 값)를 찾습니다.
     두 가지 반올림 규칙을 모두 시도하고, 그래도 없으면 상·하한가 범위의 중간값을 가장 가까운 호가에 맞춰 씁니다.
@@ -2195,6 +2249,19 @@ def get_cap_rankings_pair():
             or (row.get("base_source") == "limit" and row.get("naver_base") and abs(row["base_price"] - row["naver_base"]) > 1.5 * kr_tick(row["base_price"]))]
     quality = {"source": source, "expected": CAP_RANK_LIMIT, "available": len(valid),
                "missing": missing, "weak": weak, "complete": len(valid) == CAP_RANK_LIMIT and not weak}
+    for row in valid:
+        if row["name"] not in weak:
+            continue
+
+        limits = row.get("limits")
+
+        if limits and len(limits) == 2:
+            row["candidate_analysis"] = inspect_base_candidates(
+                limits[0], limits[1], row.get("price")
+            )
+        else:
+            row["candidate_analysis"] = {}
+
     quality["weak_details"] = [
         {
             "종목명": row["name"],
@@ -2206,6 +2273,16 @@ def get_cap_rankings_pair():
             "기준가 후보 불확실": bool(row.get("base_ambiguous")),
             "네이버 기준가": row.get("naver_base"),
             "추가 조회 전일 종가": row.get("checked_krx_close"),
+            "상한가": (row.get("limits") or [None, None])[0],
+            "하한가": (row.get("limits") or [None, None])[1],
+            "실제 후보 수": row.get("candidate_analysis", {}).get("count"),
+            "기준가 후보": ", ".join(
+                str(v) for v in
+                row.get("candidate_analysis", {}).get("candidates", [])
+            ),
+            "최소 등락률": row.get("candidate_analysis", {}).get("pct_min"),
+            "최대 등락률": row.get("candidate_analysis", {}).get("pct_max"),
+            "오차 범위(%p)": row.get("candidate_analysis", {}).get("pct_width"),
             "검증 결과": row.get("basis_check") or "추가 확인 필요",
         }
         for row in valid if row["name"] in weak
