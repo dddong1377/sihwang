@@ -2214,6 +2214,94 @@ def render_basis_status(snapshot):
         )
 
 
+def assess_ranking_safety(valid, gainers, losers, quality):
+    """기준가 불확실성이 TOP5 구성과 표시 수치에 미치는 영향."""
+    result = {
+        "safe": False,
+        "harmless": [],
+        "risk": [],
+    }
+
+    if quality.get("available") != quality.get("expected"):
+        result["risk"].append("분석 대상 종목 미확보")
+        return result
+
+    if quality.get("missing"):
+        result["risk"].append("가격 또는 등락률 누락")
+        return result
+
+    weak = set(quality.get("weak") or [])
+
+    if not weak:
+        result["safe"] = True
+        return result
+
+    top_ids = {
+        row["symbol"] for row in gainers + losers
+    }
+
+    up_cut = gainers[-1]["pct"] if len(gainers) == 5 else 0
+    down_cut = losers[-1]["pct"] if len(losers) == 5 else 0
+
+    for row in valid:
+        name = row["name"]
+
+        if name not in weak:
+            continue
+
+        analysis = row.get("candidate_analysis") or {}
+        low = num(analysis.get("pct_min"))
+        high = num(analysis.get("pct_max"))
+        count = analysis.get("count", 0)
+
+        if row["symbol"] in top_ids:
+            result["risk"].append(
+                f"{name}: TOP5 표시 수치 불확실"
+            )
+            continue
+
+        if (
+            row.get("base_source") != "limit"
+            or not row.get("base_ambiguous")
+            or row.get("naver_base")
+            or not isinstance(count, int)
+            or count < 2
+            or low is None
+            or high is None
+            or low > high
+        ):
+            result["risk"].append(
+                f"{name}: 신뢰 가능한 오차 범위 미확보"
+            )
+            continue
+
+        pct = num(row.get("pct"))
+
+        if pct is None or not low - 1e-9 <= pct <= high + 1e-9:
+            result["risk"].append(
+                f"{name}: 현재 등락률과 후보 범위 불일치"
+            )
+            continue
+
+        if high >= up_cut or low <= down_cut:
+            result["risk"].append(
+                f"{name}: TOP5 진입 가능성"
+            )
+            continue
+
+        result["harmless"].append(name)
+
+    if (
+        set(result["harmless"]) != weak
+        and not result["risk"]
+    ):
+        result["risk"].append("검증 대상 누락")
+
+    result["safe"] = not result["risk"]
+
+    return result
+
+
 def get_cap_rankings_pair():
     """동일한 후보 및 시세 스냅샷에서 양쪽 순위를 산출합니다."""
     cap_rows, source = fetch_cap_rows()
@@ -2290,6 +2378,14 @@ def get_cap_rankings_pair():
 
     gainers = sorted((r for r in valid if r["pct"] > 0), key=lambda r: -r["pct"])[:5]
     losers = sorted((r for r in valid if r["pct"] < 0), key=lambda r: r["pct"])[:5]
+    safety = assess_ranking_safety(
+        valid, gainers, losers, quality
+    )
+
+    quality["ranking_safe"] = safety["safe"]
+    quality["ranking_harmless"] = safety["harmless"]
+    quality["ranking_risk"] = safety["risk"]
+
     return gainers, losers, ranked_at, quality
 
 
@@ -5395,7 +5491,7 @@ def main():
         publish_blocked = bool(st.session_state.get("api_error") or live_failed
                                or snapshot.get("universe") != universe
                                or snapshot.get("duration") != duration
-                               or (is_cap and not quality.get("complete"))
+                               or (is_cap and not quality.get("ranking_safe", False))
                                or any(num(snapshot.get("indices", {}).get(k, {}).get("pct")) is None for k in ("kospi", "kosdaq")))
         with st.expander("시장 데이터 품질 진단", expanded=False):
             if is_cap:
@@ -5430,10 +5526,35 @@ def main():
                     st.markdown("**기준가 상세 진단**")
                     st.dataframe(quality["weak_details"], hide_index=True)
 
+                st.markdown("**TOP 5 순위 영향 검증**")
+
+                if quality.get("ranking_safe"):
+                    st.success("급등·급락 TOP 5 순위 영향 검사 통과")
+                else:
+                    st.warning("TOP 5 순위 안전성 미확인")
+
+                if quality.get("ranking_harmless"):
+                    st.info(
+                        "현재 후보 범위에서 TOP 5 영향 없음: "
+                        + ", ".join(quality["ranking_harmless"])
+                    )
+
+                for risk in quality.get("ranking_risk", []):
+                    st.warning(risk)
+
                 if quality.get("complete"):
                     st.success("시총 데이터 기본 검사 통과")
                 else:
-                    st.warning("시총 데이터 검증 미완료: 재조회가 필요합니다.")
+                    if quality.get("ranking_safe"):
+                        st.info(
+                            "일부 기준가는 미확정이나 "
+                            "현재 TOP 5 순위에는 영향이 없습니다."
+                        )
+                    else:
+                        st.warning(
+                            "시총 데이터 검증 미완료: "
+                            "재조회가 필요합니다."
+                        )
             else:
                 st.info("전체 시장 모드: 시총 100종목 확보율은 적용되지 않습니다.")
 
