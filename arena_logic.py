@@ -401,3 +401,223 @@ def pick_share(data, day, index):
 
     return count
 
+
+
+# ---------------------------------------------------------------
+# 시즌(달력 기준 월간 누적) · 개인 심화 통계
+# ---------------------------------------------------------------
+
+MIN_SEASON = 10        # 시즌 순위에 들어가려면 그 달에 판정된 선택이 이만큼은 있어야 함
+BANNER_DAYS = 7        # 시즌 MVP 배너를 거는 기간(다음 달 1일부터 7일간)
+
+
+def month_bounds(year, month):
+    first = datetime.date(year, month, 1)
+    last = (datetime.date(year + (month == 12), month % 12 + 1, 1)) - datetime.timedelta(days=1)
+
+    return first, last
+
+
+def month_standings(data, year, month):
+    """그 달에 판정된 선택만 모아 낸 시즌 순위. {"rows": [...], "judged_days": n, "ranked": 순위권 수}
+
+    각 행: nick, hits, total, rate, score(보정 점수), days(참여 일수). 순위권(MIN_SEASON 이상)이 먼저 옵니다."""
+
+    first, last = month_bounds(year, month)
+    since, until = first.isoformat(), last.isoformat()
+
+    totals = {}
+    judged_days = 0
+
+    for day, rec in data["rounds"].items():
+        if rec.get("state") != "judged" or not (since <= day <= until):
+            continue
+
+        scores = _round_scores(data, day)
+        judged_days += 1
+
+        for key, (h, m) in (scores or {}).items():
+            row = totals.setdefault(key, {
+                "nick": data["users"][key]["nick"], "hits": 0, "total": 0, "days": 0,
+            })
+            row["hits"] += h
+            row["total"] += h + m
+            row["days"] += 1
+
+    rows = []
+
+    for row in totals.values():
+        row["rate"] = row["hits"] / row["total"] if row["total"] else 0.0
+        row["score"] = wilson_lower(row["hits"], row["total"])
+        rows.append(row)
+
+    qualified = [r for r in rows if r["total"] >= MIN_SEASON]
+    others = [r for r in rows if r["total"] < MIN_SEASON]
+
+    qualified.sort(key=lambda r: (-r["score"], -r["total"], r["nick"]))
+    others.sort(key=lambda r: (-r["total"], r["nick"]))
+
+    return {"rows": qualified + others, "judged_days": judged_days, "ranked": len(qualified)}
+
+
+def season_months(data):
+    """판정된 라운드가 있는 달 [(연, 월)] 최근 순."""
+
+    found = set()
+
+    for day, rec in data["rounds"].items():
+        if rec.get("state") == "judged":
+            found.add((int(day[:4]), int(day[5:7])))
+
+    return sorted(found, reverse=True)
+
+
+def season_champions(standing):
+    """시즌 순위의 1위(동점이면 모두). 순위권이 없으면 []."""
+
+    rows = standing["rows"][:standing["ranked"]]
+
+    if not rows:
+        return []
+
+    top = (round(rows[0]["score"], 9), rows[0]["total"])
+
+    return [r for r in rows if (round(r["score"], 9), r["total"]) == top]
+
+
+def season_banner(data, today):
+    """다음 달 1일부터 7일간(월말 시즌 종료 후 일주일) 걸 배너 정보. 걸 게 없으면 None.
+
+    {"year","month","champions":[행...],"until": 마지막 게시일, "left": 남은 일수(오늘 포함)}"""
+
+    this_first = today.replace(day=1)
+    until = this_first + datetime.timedelta(days=BANNER_DAYS - 1)
+
+    if today > until:
+        return None
+
+    prev_last = this_first - datetime.timedelta(days=1)
+    standing = month_standings(data, prev_last.year, prev_last.month)
+    champions = season_champions(standing)
+
+    if not champions:
+        return None
+
+    return {
+        "year": prev_last.year,
+        "month": prev_last.month,
+        "champions": champions,
+        "until": until,
+        "left": (until - today).days + 1,
+    }
+
+
+def deep_stats(data, key, now_date=None):
+    """개인 심화 통계. 판정된 선택이 없으면 None.
+
+    무승부·무효·선택 안 한 대결은 뺍니다."""
+
+    days = sorted(d for d, rec in data["rounds"].items() if rec.get("state") == "judged")
+    per_day = []          # (날짜, 맞힘, 전체)
+    seq = []              # 시간순 적중 여부
+    stocks = {}           # 종목명 -> [맞힘, 전체]
+    contrarian = [0, 0]   # 소수 의견 [맞힘, 전체]
+    weekday = {i: [0, 0] for i in range(5)}
+    months = {}
+    participated = set()
+
+    for day in days:
+        rec = data["rounds"][day]
+        pick = (data["picks"].get(day) or {}).get(key)
+
+        if not pick:
+            continue
+
+        h = t = 0
+        choices = pick.get("choices") or []
+
+        for index, choice in enumerate(choices):
+            if choice not in ("a", "b") or index >= len(rec["results"]) or index >= len(rec["matches"]):
+                continue
+
+            winner = rec["results"][index]["winner"]
+
+            if winner not in ("a", "b"):
+                continue
+
+            hit = choice == winner
+            h += int(hit)
+            t += 1
+            seq.append(hit)
+
+            name = rec["matches"][index][choice]["name"]
+            cell = stocks.setdefault(name, [0, 0])
+            cell[0] += int(hit)
+            cell[1] += 1
+
+            share = pick_share(data, day, index)
+            voters = share["a"] + share["b"]
+
+            if voters >= 3 and share[choice] < share["a" if choice == "b" else "b"]:
+                contrarian[0] += int(hit)
+                contrarian[1] += 1
+
+        if t:
+            d = datetime.date.fromisoformat(day)
+
+            if d.weekday() < 5:
+                weekday[d.weekday()][0] += h
+                weekday[d.weekday()][1] += t
+
+            cell = months.setdefault(day[:7], [0, 0])
+            cell[0] += h
+            cell[1] += t
+            per_day.append((day, h, t))
+            participated.add(day)
+
+    if not seq:
+        return None
+
+    # 연속 참여(판정된 라운드 기준) · 연속 적중(선택 기준)
+    cur_part = best_part = run = 0
+
+    for day in days:
+        if day in participated:
+            run += 1
+            best_part = max(best_part, run)
+        else:
+            run = 0
+
+    cur_part = run
+
+    cur_hit = best_hit = run = 0
+
+    for hit in seq:
+        run = run + 1 if hit else 0
+        best_hit = max(best_hit, run)
+
+    cur_hit = run
+
+    best_day = max(per_day, key=lambda r: (r[1] / r[2], r[2], r[0]))
+    perfect = sum(1 for _, h, t in per_day if t >= 3 and h == t)
+
+    liked = sorted(stocks.items(), key=lambda kv: (-kv[1][1], -kv[1][0], kv[0]))
+    proven = [kv for kv in stocks.items() if kv[1][1] >= 2]
+    best_stock = max(proven, key=lambda kv: (kv[1][0] / kv[1][1], kv[1][1])) if proven else None
+
+    return {
+        "hits": sum(1 for x in seq if x),
+        "total": len(seq),
+        "days": len(per_day),
+        "per_day": per_day,
+        "weekday": weekday,
+        "months": dict(sorted(months.items())),
+        "streak_part": (cur_part, best_part),
+        "streak_hit": (cur_hit, best_hit),
+        "best_day": best_day,
+        "perfect": perfect,
+        "contrarian": contrarian,
+        "liked": liked[:5],
+        "best_stock": best_stock,
+        "stock_count": len(stocks),
+    }

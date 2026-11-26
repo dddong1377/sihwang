@@ -183,6 +183,19 @@ html body [data-baseweb="popover"] li:hover,html body [data-baseweb="popover"] l
 .ar-st .s{font-size:12px;color:#8f8076;margin-top:2px}
 .ar-sec{margin:16px 0 8px;font-size:18px;font-weight:800;color:#fff}
 .ar-sec i{font-style:normal;color:var(--orange);margin-right:6px}
+.ar-ban{position:relative;margin:10px 0 12px;border:1.5px solid #8a6a12;border-radius:20px;background:radial-gradient(520px 200px at 50% -20%,#4a3608,#1a1408 70%);padding:14px 16px;text-align:center;overflow:hidden}
+.ar-ban .k{font-size:12px;font-weight:900;letter-spacing:.1em;color:var(--yellow)}
+.ar-ban .n{margin:6px 0 2px;font-size:clamp(22px,4vw,34px);font-weight:900;color:#fff;line-height:1.15}
+.ar-ban .n em{font-style:normal;margin-right:6px}
+.ar-ban .m{font-size:14px;color:#f1e3b4;font-weight:700}
+.ar-ban .d{margin-top:6px;font-size:12px;color:#b9a77a}
+.ar-bars{display:flex;align-items:flex-end;gap:4px;height:84px;margin:8px 0 2px;padding:0 2px}
+.ar-bar{flex:1 1 0;max-width:56px;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%}
+.ar-bar i{display:block;width:100%;max-width:26px;border-radius:5px 5px 2px 2px;background:#2f2f36;min-height:3px}
+.ar-bar i.g{background:var(--green)}.ar-bar i.y{background:var(--yellow)}.ar-bar i.o{background:var(--orange)}
+.ar-bar span{margin-top:4px;font-size:10.5px;color:#8f8076;white-space:nowrap}
+.ar-badges{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 10px}
+.ar-badge{border:1px solid #4a3418;background:#1d1409;color:#f3dfb0;border-radius:999px;padding:5px 12px;font-size:12.5px;font-weight:800}
 @media (max-width:760px){
 .ar-prizes{grid-template-columns:1fr}
 .ar-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
@@ -395,3 +408,37 @@ def data_table(headers, rows, widths=""):
     body = "".join(line(r) for r in rows)
 
     return f'<div class="ar-panel" style="padding:10px 10px 6px;margin:8px 0">{line(headers, "h")}{body}</div>'
+
+
+def season_banner(title, names, meta, note):
+    """시즌 MVP 배너. names: 닉네임 목록(동점이면 여러 명)."""
+
+    who = " · ".join(esc(n) for n in names)
+
+    return (
+        '<div class="ar-ban">'
+        f'<div class="k">{esc(title)}</div>'
+        f'<div class="n"><em>🏆</em>{who}</div>'
+        f'<div class="m">{esc(meta)}</div>'
+        f'<div class="d">{esc(note)}</div></div>'
+    )
+
+
+def bars(items):
+    """items: [{'label','value'(0~1),'tone'('g'|'y'|'o'|''),'tip'}] 막대 그래프."""
+
+    out = []
+
+    for it in items:
+        height = max(0, min(1, it["value"])) * 100
+        tip = esc(it.get("tip", ""))
+        out.append(
+            f'<div class="ar-bar" title="{tip}"><i class="{it.get("tone", "")}" style="height:{height:.0f}%"></i>'
+            f'<span>{esc(it["label"])}</span></div>'
+        )
+
+    return f'<div class="ar-bars">{"".join(out)}</div>'
+
+
+def badges(items):
+    return f'<div class="ar-badges">{"".join(f"<span class=ar-badge>{esc(t)}</span>" for t in items)}</div>'
