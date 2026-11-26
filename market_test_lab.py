@@ -275,3 +275,170 @@ for key, label in (
 
 
 st.caption("TEST LAB · 실제 저장 및 게시 기능 미연결")
+
+
+# ===== 통합 출력 미리보기 =====
+
+import ast
+import html
+import math
+import json
+import re
+
+from pathlib import Path
+from functools import lru_cache
+
+from offline_analysis import load_analysis
+from emphasis import emphasize
+from kakao_text import to_kakao_text
+from card_images import render_card_images
+from paper_images import render_paper_images
+
+
+@lru_cache(maxsize=1)
+def fixture_output_engine():
+
+    scope = dict(load_analysis())
+
+    scope.update({
+        "html": html,
+        "math": math,
+        "json": json,
+        "re": re,
+        "datetime": datetime,
+        "KST": ZoneInfo("Asia/Seoul"),
+    })
+
+    required = {
+        "build_markdown",
+        "stock_table_lines",
+        "md_to_html",
+        "fmt",
+        "arrow",
+        "pct_text",
+        "pct_text_trunc",
+        "cell_text",
+        "md_lines",
+        "one_line",
+        "num",
+        "GLOBAL_ITEMS",
+        "CAP_SUFFIX",
+        "POST_NOTE",
+    }
+
+    source = Path(__file__).with_name(
+        "afternoon.py"
+    ).read_text(encoding="utf-8")
+
+    tree = ast.parse(source)
+
+    for node in tree.body:
+
+        names = []
+
+        if isinstance(node, ast.FunctionDef):
+            names = [node.name]
+
+        elif isinstance(node, ast.Assign):
+            names = [
+                t.id for t in node.targets
+                if isinstance(t, ast.Name)
+            ]
+
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name):
+                names = [node.target.id]
+
+        if required.intersection(names):
+
+            if isinstance(node, ast.FunctionDef):
+                node.decorator_list = []
+
+            exec(
+                compile(
+                    ast.Module(
+                        body=[node],
+                        type_ignores=[],
+                    ),
+                    "<fixture-output>",
+                    "exec",
+                ),
+                scope,
+            )
+
+    assert required <= scope.keys()
+
+    return scope["build_markdown"]
+
+
+st.divider()
+
+st.subheader("통합 시황글 미리보기")
+
+assert snapshot.get("synthetic") is True
+
+output_state = dict(
+    st.session_state.get("fixture_content", {})
+)
+
+for field in ("themes", "summary", "keywords"):
+    output_state[field] = st.session_state.get(
+        "fixture_content_" + field,
+        "",
+    )
+
+output_state["checks"] = st.session_state.get(
+    "fixture_manual_checks", ""
+)
+
+manual_issue = st.session_state.get(
+    "fixture_manual_issue", ""
+)
+
+if manual_issue.strip():
+    output_state["is1t"] = "가상 경제 이슈"
+    output_state["is1c"] = manual_issue
+
+markdown = emphasize(
+    fixture_output_engine()(
+        snapshot,
+        state=output_state,
+    )
+)
+
+assert "게시 금지" in markdown
+
+st.markdown(markdown)
+
+with st.expander("카카오톡 출력 미리보기"):
+    st.code(
+        to_kakao_text(markdown),
+        language=None,
+    )
+
+with st.expander("마크다운 원본"):
+    st.code(markdown, language="markdown")
+
+if st.checkbox(
+    "가상 카드·신문 이미지 생성 도구 표시",
+    key="fixture_show_images",
+):
+
+    st.warning(
+        "가상 데이터 이미지입니다. 실제 시세가 아니며 게시 금지입니다."
+    )
+
+    render_card_images(
+        markdown,
+        "가상테스트카드",
+    )
+
+    render_paper_images(
+        markdown,
+        "가상테스트지면",
+        issue_no=1,
+    )
+
+st.caption(
+    "외부 금융 API 호출 없음 · 실제 게시 및 저장 미연결"
+)

@@ -39,6 +39,12 @@ main_pages = [
 
 test_pages = [
     st.Page(
+        "market_test_lab.py",
+        title="시황 통합 테스트",
+        icon="🧪",
+        url_path="market_test_lab",
+    ),
+    st.Page(
         "arena.py",
         title="주식 대결(테스트)",
         icon="🥊",
