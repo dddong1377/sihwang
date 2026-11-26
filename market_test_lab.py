@@ -155,61 +155,14 @@ import datetime
 from zoneinfo import ZoneInfo
 
 
-def fixture_themes(snapshot, state):
-    state["sector_items"] = snapshot["sector_items"]
-
-    return " ".join(
-        "#" + row["name"]
-        for row in snapshot["sector_items"]
-    )
-
-
-def fixture_summary(snapshot, state):
-    kospi = snapshot["indices"]["kospi"]["pct"]
-    kosdaq = snapshot["indices"]["kosdaq"]["pct"]
-
-    sectors = ", ".join(
-        row["name"]
-        for row in state.get("sector_items", [])[:3]
-    ) or "강세 산업 없음"
-
-    return (
-        f"[가상 시장] 코스피 {kospi:+.2f}%, "
-        f"코스닥 {kosdaq:+.2f}% | "
-        f"강세 산업: {sectors}"
-    )
-
-
-def fixture_keywords(snapshot, state):
-    names = [
-        row["name"]
-        for row in snapshot["gainers"][:3]
-    ]
-
-    sectors = [
-        row["name"]
-        for row in state.get("sector_items", [])[:3]
-    ]
-
-    return " ".join(
-        "#" + name
-        for name in ["코스피", "코스닥"] + sectors + names
-    )
-
-
-def fixture_recorder(key, snapshot, state):
-    state[f"{key}__generated"] = state[key]
-
-    state[f"{key}__generated_at"] = (
-        datetime.datetime.now(
-            ZoneInfo("Asia/Seoul")
-        ).strftime("%Y-%m-%d %H:%M:%S")
-    )
-
-    state[f"{key}__signature"] = (
-        snapshot["scenario"],
-        snapshot["revision"],
-    )
+from offline_analysis import (
+    generate_themes as fixture_themes,
+    generate_summary as fixture_summary,
+    generate_keywords as fixture_keywords,
+    record_generation as fixture_recorder,
+    freshness as fixture_freshness,
+    load_sectors as fixture_sector_loader,
+)
 
 
 def fixture_refresh_callback():
@@ -235,6 +188,7 @@ def fixture_refresh_callback():
             "keywords": fixture_keywords,
         },
         fixture_recorder,
+        sector_loader=fixture_sector_loader,
     )
 
     st.session_state["fixture_content"] = working
@@ -295,19 +249,29 @@ for key, label in (
 
     generated = content.get(f"{key}__generated")
 
-    signature = content.get(f"{key}__signature")
+    current_state = dict(content)
+
+    for field in ("themes", "summary", "keywords"):
+        current_state[field] = st.session_state.get(
+            "fixture_content_" + field,
+            content.get(field, ""),
+        )
+
+    status = fixture_freshness(
+        key, snapshot, current_state
+    )
 
     if current != generated:
         st.info("수동 수정값 · 자동 갱신 시 보존")
 
-    elif signature != (
-        snapshot["scenario"],
-        snapshot["revision"],
-    ):
+    elif status == "stale":
         st.warning("시장 데이터 변경 · 다시 생성 권장")
 
-    else:
+    elif status == "matched":
         st.success("현재 가상 시장 데이터와 일치")
+
+    else:
+        st.info("콘텐츠 생성 이력 또는 입력값 확인 필요")
 
 
 st.caption("TEST LAB · 실제 저장 및 게시 기능 미연결")
