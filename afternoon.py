@@ -77,6 +77,7 @@ BASE_SOURCE_LABELS = {
     "krx_close": "KRX 전일 종가(네이버 일별 시세)",
     "krx_calc": "네이버 등락률 역산(오차 가능)",
     "toss": "토스 일봉(NXT 포함 가능, KRX와 다를 수 있음)",
+    "naver_reported": "네이버 표시 등락률(동일 가격 쌍)",
 }
 
 # ---------------------------------------------------------------
@@ -496,7 +497,8 @@ def num(value, default=None):
     """숫자 변환."""
 
     try:
-        return float(str(value).replace(",", ""))
+        parsed = float(str(value).replace(",", ""))
+        return parsed if math.isfinite(parsed) else default
 
     except (TypeError, ValueError):
         return default
@@ -563,15 +565,18 @@ def get_indices():
 
             candles = candle_result.get("candles", [])
 
-            if price is not None and len(candles) >= 2:
-                previous_close = num(
-                    candles[1].get("closePrice")
-                )
-
-                if previous_close:
-                    pct = (
-                        price / previous_close - 1
-                    ) * 100
+            quote_time = datetime.datetime.fromisoformat(str(item.get("timestamp", "")).replace("Z", "+00:00"))
+            quote_day = (quote_time.astimezone(KST) if quote_time.tzinfo else quote_time).date()
+            by_day = {}
+            for candle in candles:
+                day = datetime.date.fromisoformat(str(candle.get("timestamp", ""))[:10])
+                close = num(candle.get("closePrice"))
+                if day < quote_day and close and close > 0:
+                    if day in by_day and by_day[day] != close:
+                        raise ValueError("지수 일봉 중복 충돌")
+                    by_day[day] = close
+            if price is not None and price > 0 and by_day:
+                pct = (price / by_day[max(by_day)] - 1) * 100
 
         except Exception:
             pass
@@ -1278,8 +1283,10 @@ def parse_naver_market_sum(page_html, market):
         pct = num(cells[i_pct].replace("%", ""))
         cap = num(cells[i_cap])
 
-        if price is None or pct is None or cap is None:
-            continue
+        if cap is None or cap <= 0:
+            raise ValueError("시가총액 값 누락: " + link.group(1))
+        if price is not None and price <= 0:
+            price = None
 
         # 전일 기준가: 전일비(금액)만 읽고, 부호는 등락률과 맞는 쪽을 골라 결정
         base = None
@@ -1287,7 +1294,7 @@ def parse_naver_market_sum(page_html, market):
         if i_diff is not None:
             magnitude = num(re.sub(r"[^\d.,]", "", cells[i_diff]))
 
-            if magnitude is not None:
+            if magnitude is not None and price is not None and pct is not None:
                 for candidate in (price - magnitude, price + magnitude):
                     if (
                         candidate > 0
@@ -1335,12 +1342,14 @@ def fetch_cap_rows_naver(phase):
 
             parsed = parse_naver_market_sum(page_html, market)
 
-            if len(parsed) < 10:
+            if len(parsed) != 50 or len({row["symbol"] for row in parsed}) != 50:
                 raise RuntimeError(
                     "네이버 금융 시가총액 표에서 종목을 충분히 읽지 못했습니다."
                 )
 
             for row in parsed:
+                if row["symbol"] in rows:
+                    raise RuntimeError("시총 페이지 간 중복 종목: " + row["symbol"])
                 rows[row["symbol"]] = row
 
     return list(rows.values())
@@ -1503,6 +1512,11 @@ def fetch_cap_rows_toss():
     )
 
     last = fetch_toss_prices(tuple(candidates))
+    missing = tuple(symbol for symbol in candidates if not last.get(symbol))
+    if missing:
+        last.update(fetch_toss_prices(missing))
+    if any(not last.get(symbol) or symbol not in universe for symbol in candidates):
+        raise RuntimeError("토스 시총 후보 가격/종목 정보 누락: 순위 확정 불가")
 
     rows = []
 
@@ -1516,7 +1530,7 @@ def fetch_cap_rows_toss():
                 "name": info["name"],
                 "market": info["market"],
                 "price": price,
-                "pct": 0.0,
+                "pct": None,
                 "cap": price * info["shares"],
                 "base": None,
             })
@@ -1562,11 +1576,11 @@ def fetch_prev_closes(symbols, day_text):
                 }
             )
 
-            for candle in result.get("candles", []):
-                day = str(candle.get("timestamp", ""))[:10]
-
-                if day and day < day_text:
-                    return symbol, num(candle.get("closePrice"))
+            eligible = [(str(c.get("timestamp", ""))[:10], num(c.get("closePrice")))
+                        for c in result.get("candles", []) if isinstance(c, dict)]
+            eligible = [(day, close) for day, close in eligible if day and day < day_text and close and close > 0]
+            if eligible:
+                return symbol, max(eligible, key=lambda row: row[0])[1]
 
         except Exception:
             pass
@@ -1763,6 +1777,11 @@ def refresh_with_toss(stocks, source="naver"):
     if not stocks:
         return stocks
 
+    for stock in stocks:
+        stock["original_price"] = stock.get("price")
+        stock["original_pct"] = stock.get("pct")
+        stock["price_source"] = source
+
     today_text = datetime.datetime.now(KST).date().isoformat()
 
     # 순서만 바뀌어도 캐시가 깨지지 않게 정렬해서 키로 씁니다
@@ -1772,7 +1791,7 @@ def refresh_with_toss(stocks, source="naver"):
     for stock in stocks:
         stock["naver_base"] = stock.get("base_price")
 
-        if not stock["naver_base"] and source == "naver" and stock["pct"] > -100 and stock["price"]:
+        if not stock["naver_base"] and source == "naver" and stock["pct"] is not None and stock["pct"] > -100 and stock["price"]:
             stock["naver_base_calc"] = stock["price"] / (1 + stock["pct"] / 100)
 
     # 1) 토스 상·하한가로 KRX 전일 기준가 역산
@@ -1793,6 +1812,8 @@ def refresh_with_toss(stocks, source="naver"):
         found = limit_bases.get(stock["symbol"])
 
         if found:
+            if found[1] > 1 and stock.get("naver_base"):
+                continue
             stock["base_price"] = found[0]
             stock["base_ambiguous"] = found[1] > 1
             stock["base_source"] = "limit"
@@ -1824,7 +1845,7 @@ def refresh_with_toss(stocks, source="naver"):
             continue
 
         # 4) 네이버 현재가·등락률로 역산
-        if source == "naver" and stock["pct"] > -100 and stock["price"]:
+        if source == "naver" and stock["pct"] is not None and stock["pct"] > -100 and stock["price"]:
             stock["base_price"] = stock["price"] / (1 + stock["pct"] / 100)
             stock["base_source"] = "krx_calc"
 
@@ -1846,7 +1867,7 @@ def refresh_with_toss(stocks, source="naver"):
                 if fallback:
                     stock["base_price"] = fallback
 
-                stock["base_source"] = "toss"
+                    stock["base_source"] = "toss"
 
     # 현재가: 정규장 중에는 토스 현재가, 장외에는 네이버(KRX) 현재가 유지
     # (네이버를 못 써서 토스 목록으로 대체된 경우에는 토스 현재가가 이미 들어 있습니다)
@@ -1855,19 +1876,37 @@ def refresh_with_toss(stocks, source="naver"):
     if krx_regular_open():
         try:
             last = fetch_toss_prices(symbols)
+            missing_prices = tuple(symbol for symbol in symbols if not last.get(symbol))
+            if missing_prices:
+                try:
+                    last.update(fetch_toss_prices(missing_prices))
+                except Exception:
+                    pass
         except Exception:
             last = {}
 
     for stock in stocks:
         price = last.get(stock["symbol"])
 
-        if price:
-            stock["price"] = price
-
         base = stock.get("base_price")
-
+        if source == "naver" and stock.get("original_price") and stock.get("original_pct") is not None and (not base or stock.get("base_ambiguous") or stock.get("base_source") in ("krx_calc", "toss")):
+            stock["price"] = stock["original_price"]
+            stock["pct"] = stock["original_pct"]
+            stock["base_price"] = None  # 표시 등락률과 다른 가격을 결합하지 않음
+            stock["base_source"] = "naver_reported"
+            stock["base_ambiguous"] = False
+            continue
+        if price and base:
+            stock["price"] = price
+            stock["price_source"] = "toss_rest"
         if base and stock.get("price"):
             stock["pct"] = (stock["price"] / base - 1) * 100
+        elif source == "naver" and stock.get("original_price") and stock.get("original_pct") is not None:
+            stock["price"] = stock["original_price"]
+            stock["pct"] = stock["original_pct"]
+            stock["base_source"] = "naver_reported"
+        else:
+            stock["pct"] = None
 
     return stocks
 
@@ -1905,6 +1944,7 @@ def apply_realtime(stocks):
             stock["price"] = price
             stock["pct"] = (price / base - 1) * 100
             stock["live"] = True
+            stock["price_source"] = "toss_ws"
 
     return stocks
 
@@ -2005,72 +2045,63 @@ def render_basis_status(snapshot):
         )
 
 
-def get_cap_rankings(mode="up"):
-    """시가총액 상위 100위(우선주·스팩 등 제외)를 전일 KRX 기준가로 재계산한 뒤,
-    등락률 순으로 급등/급락 TOP 5를 뽑습니다."""
-
+def get_cap_rankings_pair():
+    """동일한 후보 및 시세 스냅샷에서 양쪽 순위를 산출합니다."""
     cap_rows, source = fetch_cap_rows()
-
-    candidates = [
-        row
-        for row in cap_rows
-        if not EXCLUDE.search(row["name"])
-    ]
-
+    candidates = [row for row in cap_rows if not EXCLUDE.search(row["name"])]
+    if len({row["symbol"] for row in candidates}) != len(candidates):
+        raise RuntimeError("시가총액 후보 종목 중복")
     candidates.sort(key=lambda row: row["cap"], reverse=True)
-
     universe = candidates[:CAP_RANK_LIMIT]
-
-    if len(universe) < 50:
-        raise RuntimeError("시가총액 상위 종목 수가 부족합니다.")
-
+    if len(universe) < CAP_RANK_LIMIT:
+        if source == "naver":
+            cap_rows = fetch_cap_rows_toss()
+            source = "toss"
+            candidates = [row for row in cap_rows if not EXCLUDE.search(row["name"])]
+            candidates.sort(key=lambda row: row["cap"], reverse=True)
+            universe = candidates[:CAP_RANK_LIMIT]
+        if len(universe) < CAP_RANK_LIMIT or len({row["symbol"] for row in universe}) != CAP_RANK_LIMIT:
+            raise RuntimeError("시가총액 100개 종목 미확보: 순위 확정 불가")
     ranked_at = datetime.datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
-
-    stocks = []
-
-    for cap_rank, row in enumerate(universe, start=1):
-        stocks.append({
-            "name": row["name"],
-            "symbol": row["symbol"],
-            "price": row["price"],
-            "pct": row["pct"],
-            "base_price": row.get("base"),
-            "base_source": None,
-            "rank": cap_rank,
-            "theme": classify_theme(row["name"]),
-            "reason": "시가총액 상위 100위 내 당일 등락률 기준 (전일 KRX 기준가 대비)",
-            "timestamp": ranked_at,
-        })
-
-    # 1) 전일 KRX 기준가 확보 + 정규장 중 토스 현재가로 등락률 계산
-    # 2) 웹소켓 체결가가 정상 수신 중이고 정규장이면 실시간 값으로 덮어쓰기
+    stocks = [{"name": row["name"], "symbol": row["symbol"], "price": row["price"],
+               "pct": row["pct"], "base_price": row.get("base"), "base_source": None,
+               "rank": rank, "theme": classify_theme(row["name"]),
+               "reason": "시가총액 상위 100위 내 당일 등락률 기준", "timestamp": ranked_at}
+              for rank, row in enumerate(universe, 1)]
     stocks = refresh_with_toss(stocks, source)
-    stocks = apply_realtime(stocks)
+    try:
+        stocks = apply_realtime(stocks)
+    except Exception:
+        pass  # REST/기존 시세를 유지
+    valid = [row for row in stocks if num(row.get("price"), 0) > 0 and num(row.get("pct")) is not None]
+    valid_ids = {row["symbol"] for row in valid}
+    missing = [row["name"] for row in stocks if row["symbol"] not in valid_ids]
+    weak = [row["name"] for row in valid if row.get("base_ambiguous") or row.get("base_source") in (None, "toss", "krx_calc")
+            or (row.get("base_source") == "limit" and row.get("naver_base") and abs(row["base_price"] - row["naver_base"]) > 1.5 * kr_tick(row["base_price"]))]
+    quality = {"source": source, "expected": CAP_RANK_LIMIT, "available": len(valid),
+               "missing": missing, "weak": weak, "complete": len(valid) == CAP_RANK_LIMIT and not weak}
+    gainers = sorted((r for r in valid if r["pct"] > 0), key=lambda r: -r["pct"])[:5]
+    losers = sorted((r for r in valid if r["pct"] < 0), key=lambda r: r["pct"])[:5]
+    return gainers, losers, ranked_at, quality
 
-    if mode == "up":
-        picked = [stock for stock in stocks if stock["pct"] > 0]
-    else:
-        picked = [stock for stock in stocks if stock["pct"] < 0]
 
-    picked.sort(
-        key=lambda stock: stock["pct"],
-        reverse=(mode == "up")
-    )
-
-    return picked[:5], ranked_at
+def get_cap_rankings(mode="up"):
+    gainers, losers, ranked_at, _ = get_cap_rankings_pair()
+    return (gainers if mode == "up" else losers), ranked_at
 
 
 def refresh_live(snapshot):
     """시총 100위 모드에서 TOP5를 실시간 체결가로 다시 계산해 snapshot에 반영."""
 
-    gainers, up_at = get_cap_rankings("up")
-    losers, down_at = get_cap_rankings("down")
+    gainers, losers, up_at, quality = get_cap_rankings_pair()
+    down_at = up_at
 
     today = datetime.datetime.now(KST).date()
 
     for stock in gainers + losers:
         enrich_stock(stock, today)
 
+    snapshot["quality"] = quality
     snapshot["gainers"] = gainers
     snapshot["losers"] = losers
     snapshot["ranking_at"] = up_at or down_at
@@ -2088,13 +2119,14 @@ def fetch_snapshot(duration, universe="all"):
 
     actual_universe = universe
     note = None
+    quality = None
 
     gainers, losers, up_at, down_at = [], [], None, None
 
     if universe == "cap100":
         try:
-            gainers, up_at = get_cap_rankings("up")
-            losers, down_at = get_cap_rankings("down")
+            gainers, losers, up_at, quality = get_cap_rankings_pair()
+            down_at = up_at
 
             if duration != "1d":
                 note = (
@@ -2103,11 +2135,7 @@ def fetch_snapshot(duration, universe="all"):
                 )
 
         except Exception as error:
-            actual_universe = "all"
-            note = (
-                "시총 100위 목록을 가져오지 못해 국내 전체 종목 기준으로 "
-                f"표시합니다. 이 모드의 등락률은 토스 기준이라 KRX와 다를 수 있습니다. ({error})"
-            )
+            raise RuntimeError(f"시총 100위 조회 실패 (전체 시장으로 전환하지 않음): {error}") from error
 
     if actual_universe == "all":
         gainers, up_at = get_rankings(
@@ -2135,6 +2163,7 @@ def fetch_snapshot(duration, universe="all"):
         "duration": duration,
         "universe": actual_universe,
         "note": note,
+        "quality": quality,
         "indices": indices,
         "global": global_markets,
         "gainers": gainers,
@@ -4721,7 +4750,7 @@ def render_stock_section(
 
     head.markdown(
         "<span style='color:#FF6B6B;font-weight:600;font-size:1rem'>"
-        "종목은 정확하지만 현재가·등락률은 실시간과 다를 수 있어 "
+        "종목 순위·현재가·등락률은 실제 시장과 다를 수 있어 "
         "확인 필수 (칸을 눌러 직접 수정 가능)</span>",
         unsafe_allow_html=True,
     )
@@ -5114,11 +5143,13 @@ def main():
         is_cap = snapshot.get("universe") == "cap100"
 
         # 실시간 모드: 방금 전체 조회를 했다면 이미 최신이므로 건너뜁니다.
+        live_failed = False
         if is_cap and live_every and not should_fetch:
             try:
                 refresh_live(snapshot)
 
             except Exception as error:
+                live_failed = True
                 st.warning(f"실시간 갱신 실패: {error}")
 
         if is_cap:
@@ -5151,6 +5182,20 @@ def main():
 
         if snapshot.get("note"):
             st.warning(snapshot["note"])
+        quality = snapshot.get("quality") or {}
+        publish_blocked = bool(st.session_state.get("api_error") or live_failed
+                               or snapshot.get("universe") != universe
+                               or snapshot.get("duration") != duration
+                               or (is_cap and not quality.get("complete"))
+                               or any(num(snapshot.get("indices", {}).get(k, {}).get("pct")) is None for k in ("kospi", "kosdaq")))
+        if is_cap:
+            st.caption(f"시총 데이터: {quality.get('available', 0)}/{CAP_RANK_LIMIT}종목 · 출처: {quality.get('source', '미확인')} · 거래소/시각 별도 확인 필요")
+            if quality.get("missing"):
+                st.warning("등락률/가격 미확보: " + ", ".join(quality["missing"]))
+            if quality.get("weak"):
+                st.warning("기준가 추가 확인 필요: " + ", ".join(quality["weak"]))
+        if publish_blocked:
+            st.warning("잠정 순위 또는 이전 조회 결과입니다. 다시 조회하기 전까지 복사·이미지 생성·저장을 제한합니다.")
 
         st.markdown("### 시장 지표")
         render_market_cards(snapshot)
@@ -5158,7 +5203,7 @@ def main():
         st.markdown("### 오늘의 급등·급락 종목")
         with st.container(border=True):
             render_stock_section(
-                f"급등 특징주 TOP 5{CAP_SUFFIX if is_cap else ''}",
+                f"급등 특징주 TOP 5{CAP_SUFFIX if is_cap else ''}" + (" · 잠정" if publish_blocked else ""),
                 snapshot["gainers"],
                 "up",
                 "🔺",
@@ -5171,7 +5216,7 @@ def main():
 
         with st.container(border=True):
             render_stock_section(
-                f"급락 특징주 TOP 5{CAP_SUFFIX if is_cap else ''}",
+                f"급락 특징주 TOP 5{CAP_SUFFIX if is_cap else ''}" + (" · 잠정" if publish_blocked else ""),
                 snapshot["losers"],
                 "down",
                 "🔻",
@@ -5548,12 +5593,15 @@ def main():
 
         markdown = build_markdown(snapshot, now_text)
 
-        copy_buttons(build_markdown(snapshot, NOW_TOKEN))
+        if not publish_blocked:
+            copy_buttons(build_markdown(snapshot, NOW_TOKEN))
+        else:
+            markdown = "**[잠정 자료 — 게시 금지]**\n\n" + markdown
 
         # ▼▼▼ 여기에 추가 (들여쓰기 공백 8칸) ▼▼▼
         save_col, archive_col, _spacer = st.columns([2.6, 1.8, 3.6], vertical_alignment="center")
 
-        if save_col.button("오늘 오후 시황글 저장 (주간 정리용)", key="save_aft_btn", icon=":material/save:"):
+        if save_col.button("오늘 오후 시황글 저장 (주간 정리용)", key="save_aft_btn", icon=":material/save:", disabled=publish_blocked):
             save_post("aft", markdown)
             st.toast("오후 시황글을 저장했습니다.", icon=":material/check:")
             st.session_state.pop("aft_archive", None)
