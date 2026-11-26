@@ -179,6 +179,20 @@ def fixture_refresh_callback():
         if widget_key in st.session_state:
             working[key] = st.session_state[widget_key]
 
+    working["checks"] = st.session_state.get(
+        "fixture_manual_checks", ""
+    )
+
+    manual_issue = st.session_state.get(
+        "fixture_manual_issue", ""
+    )
+
+    working["is1t"] = (
+        "가상 경제 이슈" if manual_issue.strip() else ""
+    )
+
+    working["is1c"] = manual_issue
+
     report = refresh_content(
         working,
         snapshot,
@@ -190,6 +204,23 @@ def fixture_refresh_callback():
         fixture_recorder,
         sector_loader=fixture_sector_loader,
     )
+
+    if working.get("sector_fetch_status") in ("empty", "failed"):
+
+        if (
+            working.get("themes", "")
+            == working.get("themes__generated", "")
+        ):
+            working["themes"] = ""
+            fixture_recorder("themes", snapshot, working)
+
+            for key in ("summary", "keywords"):
+                if (
+                    key in working
+                    and working[key] == working.get(key + "__generated")
+                    and key in report.get("updated", [])
+                ):
+                    fixture_recorder(key, snapshot, working)
 
     st.session_state["fixture_content"] = working
     st.session_state["fixture_refresh_report"] = report
@@ -256,6 +287,20 @@ for key, label in (
             "fixture_content_" + field,
             content.get(field, ""),
         )
+
+    current_state["checks"] = st.session_state.get(
+        "fixture_manual_checks", ""
+    )
+
+    manual_issue = st.session_state.get(
+        "fixture_manual_issue", ""
+    )
+
+    current_state["is1t"] = (
+        "가상 경제 이슈" if manual_issue.strip() else ""
+    )
+
+    current_state["is1c"] = manual_issue
 
     status = fixture_freshness(
         key, snapshot, current_state
@@ -395,9 +440,10 @@ manual_issue = st.session_state.get(
     "fixture_manual_issue", ""
 )
 
-if manual_issue.strip():
-    output_state["is1t"] = "가상 경제 이슈"
-    output_state["is1c"] = manual_issue
+output_state["is1t"] = (
+    "가상 경제 이슈" if manual_issue.strip() else ""
+)
+output_state["is1c"] = manual_issue
 
 markdown = emphasize(
     fixture_output_engine()(
