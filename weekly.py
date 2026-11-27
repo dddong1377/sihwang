@@ -1115,7 +1115,7 @@ def fetch_index_candles(code, count=10, cursor=None):
     return candles, result.get("nextDateTime")
 
 
-def fetch_index_week(monday):
+def _fetch_index_week_toss(monday):
     """월~금 코스피·코스닥의 KRX 장마감 등락률(%)을 {라벨: {요일index: 등락률}}로 돌려줍니다."""
 
     friday = monday + datetime.timedelta(days=4)
@@ -1173,6 +1173,104 @@ def fetch_index_week(monday):
         result[label] = found
 
     return result
+
+
+YAHOO_INDEX = {"코스피": "^KS11", "코스닥": "^KQ11"}
+YAHOO_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept": "application/json",
+}
+
+
+def _yahoo_index_closes(symbol):
+    """야후 일봉 종가 [(날짜, 종가)] 오름차순. 실패하면 예외."""
+
+    response = requests.get(
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+        params={"range": "1mo", "interval": "1d"},
+        headers=YAHOO_HEADERS,
+        timeout=(5, 12),
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(f"야후 지수 조회 실패({symbol}, HTTP {response.status_code})")
+
+    result = response.json()["chart"]["result"][0]
+    stamps = result.get("timestamp") or []
+    closes = result["indicators"]["quote"][0].get("close") or []
+
+    rows = sorted(
+        (datetime.datetime.fromtimestamp(ts, KST).date(), close)
+        for ts, close in zip(stamps, closes)
+        if close
+    )
+
+    if len(rows) < 3:
+        raise RuntimeError(f"야후 지수 데이터가 부족합니다({symbol}).")
+
+    return rows
+
+
+def _fetch_index_week_public(monday):
+    """토스를 쓸 수 없을 때: 야후 일봉으로 월~금 등락률(전일 종가 대비)을 계산합니다."""
+
+    friday = monday + datetime.timedelta(days=4)
+    now = datetime.datetime.now(KST)
+    today = now.date()
+    result = {}
+
+    for label, symbol in YAHOO_INDEX.items():
+        rows = _yahoo_index_closes(symbol)
+        found = {}
+
+        for index in range(1, len(rows)):
+            day, close = rows[index]
+
+            if not (monday <= day <= friday):
+                continue
+
+            if day == today and now.time() < MARKET_CLOSE_CONFIRM:
+                continue
+
+            prev = rows[index - 1][1]
+
+            if prev:
+                found[day.weekday()] = (close - prev) / prev * 100
+
+        result[label] = found
+
+    return result
+
+
+def fetch_index_week(monday):
+    """코스피·코스닥 월~금 장마감 등락률. 토스 공개 API가 막히면 야후로 대신합니다.
+
+    fetch_index_week.note 에 어떤 경로로 가져왔는지 적어 둡니다."""
+
+    try:
+        result = _fetch_index_week_toss(monday)
+
+        if all(result.get(label) for label in INDEX_CODES):
+            fetch_index_week.note = ""
+
+            return result
+
+        reason = "토스 응답에 일부 요일이 비어 있음"
+
+    except Exception as error:
+        reason = str(error)[:120]
+
+    try:
+        result = _fetch_index_week_public(monday)
+    except Exception as error:
+        raise RuntimeError(f"{reason} / 야후 대체 조회도 실패: {str(error)[:120]}") from error
+
+    fetch_index_week.note = f"토스 지수 조회 실패({reason}) → 야후 금융 일봉으로 대체"
+
+    return result
+
+
+fetch_index_week.note = ""
 
 
 # ===============================================================
@@ -1679,6 +1777,9 @@ def run_weekly(monday, status):
 
     try:
         week["index"] = fetch_index_week(monday)
+
+        if fetch_index_week.note:
+            status.write(f"ℹ️ {fetch_index_week.note}")
 
         status.write(
             "✅ 지수 조회 완료 · "
