@@ -522,7 +522,8 @@ def season_banner(season, names, meta, note, joint=False):
         f'<span class="yr">{esc(season)}</span><span class="mv">{esc(mvp)}</span></div>'
         f'<div class="nm{many}">{who}</div>'
         + (f'<div class="mt">{esc(meta)}</div>' if meta else "")
-        + f'<div class="nt">{esc(note)}</div></div></div>'
+        + (f'<div class="nt">{esc(note)}</div>' if note else "")
+        + '</div></div>'
     )
 
 
