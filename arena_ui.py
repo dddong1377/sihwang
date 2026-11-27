@@ -304,6 +304,33 @@ filter:drop-shadow(0 3px 0 #5a0f12) drop-shadow(0 0 2px #3a0508);overflow-wrap:a
 CSS = CSS + BAN_CSS
 
 
+PZ_CSS = _compact("""
+.ar-pzh{position:relative;max-width:760px;margin:14px auto 18px;text-align:center;border:1.5px solid #8a6a12;border-radius:26px;
+padding:clamp(18px,3.4vw,30px) clamp(14px,3vw,30px) clamp(16px,3vw,24px);overflow:hidden;
+background:radial-gradient(520px 220px at 50% -10%,#4a3608 0%,#1a1408 62%,#0f0d09 100%);
+box-shadow:0 0 0 1px #3a2308 inset,0 12px 38px rgba(0,0,0,.5),0 0 40px rgba(255,190,60,.08)}
+.ar-pzh .k{display:inline-block;font-size:13px;font-weight:900;letter-spacing:.06em;color:#ffd23f;background:#2a1d06;border:1px solid #6b4f12;border-radius:999px;padding:4px 14px}
+.ar-pzh .v{margin:12px 0 8px;font-size:clamp(34px,7vw,64px);font-weight:900;line-height:1.1;
+background:linear-gradient(180deg,#fff7c9 0%,#f1cd5e 50%,#c28d22 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;
+filter:drop-shadow(0 3px 0 #5a0f12) drop-shadow(0 0 2px #3a0508);overflow-wrap:anywhere}
+.ar-pzh .h{display:inline-block;font-size:12px;font-weight:800;color:#cfc3a6;border:1px solid #5a4a24;border-radius:999px;padding:2px 12px}
+.ar-pzh .t{margin-top:10px;font-size:clamp(15px,2.4vw,19px);font-weight:900;color:#4ade80}
+.ar-pzh .res{margin-top:16px;padding-top:14px;border-top:1px solid #4a3612}
+.ar-pzh .rd{font-size:13px;font-weight:800;color:#b99a62;margin-bottom:10px}
+.ar-pzh .rw{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.ar-pzh .bx{border-radius:18px;padding:12px 10px;min-width:0}
+.ar-pzh .bx span{display:block;font-size:13px;font-weight:900;margin-bottom:4px}
+.ar-pzh .bx b{display:block;font-size:clamp(20px,3.6vw,32px);font-weight:900;color:#fff;line-height:1.2;overflow-wrap:anywhere}
+.ar-pzh .bx i{display:block;margin-top:4px;font-style:normal;font-size:12px;font-weight:700}
+.ar-pzh .win{background:linear-gradient(160deg,#2c2208,#17120a);border:1.5px solid #e6b94a}.ar-pzh .win span{color:#ffd23f}
+.ar-pzh .lose{background:linear-gradient(160deg,#2a1010,#160c0c);border:1.5px solid #c24a4a}.ar-pzh .lose span{color:#ff8a8a}.ar-pzh .lose i{color:#e6b3b3}
+.ar-pzh .tx{margin-top:14px;font-size:14px;color:#cfc3a6}
+@media (max-width:560px){.ar-pzh .rw{grid-template-columns:1fr}}
+""")
+
+CSS = CSS + PZ_CSS
+
+
 def css_only():
     return f'<style>{CSS}</style>'
 
@@ -364,6 +391,31 @@ def prize_cards(cards):
     one = ' style="grid-template-columns:1fr"' if len(out) == 1 else ""
 
     return f'<div class="ar-prizes"{one}>{"".join(out)}</div>'
+
+
+def prize_hero(title, name, how, outcome):
+    """일간 토너먼트 상품을 가운데에 크게. outcome: {'text'} 또는 {'date','win','lose','lose_label','lose_note'}"""
+
+    how_html = f'<span class="h">{esc(how)}</span>' if how else ""
+
+    if outcome.get("win"):
+        note = f'<i>{esc(outcome["lose_note"])}</i>' if outcome.get("lose_note") else ""
+        lose_label = outcome.get("lose_label", "꼴찌")
+        res = (
+            f'<div class="res"><div class="rd">{esc(outcome["date"])} 결과</div><div class="rw">'
+            f'<div class="bx win"><span>🥇 우승</span><b>{esc(outcome["win"])}</b></div>'
+            f'<div class="bx lose"><span>🥄 {esc(lose_label)} · 상품을 쏩니다</span><b>{esc(outcome["lose"])}</b>{note}</div>'
+            '</div></div>'
+        )
+    else:
+        res = f'<div class="res"><div class="tx">{esc(outcome.get("text", ""))}</div></div>'
+
+    return (
+        f'<div class="ar-pzh"><span class="k">{esc(title)}</span>'
+        f'<div class="v">{esc(name)}</div>{how_html}'
+        '<div class="t">🍀 꼴찌가 상품을 쏩니다!</div>'
+        f'{res}</div>'
+    )
 
 
 def cta_panel(title, lines, accent="", note=""):
