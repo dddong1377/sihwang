@@ -239,7 +239,54 @@ function cautionPiece(p, w) {
     para(ctx, lines, x + 20, y + 14, 17, 26, 0, INK);
   }};
 }
+function chartPiece(title, ch, w) {   // 코스피·코스닥 일별 등락률 꺾은선 (체크박스를 켰을 때만)
+  const head = sectionHead(title), PH = 250, padL = 52, padR = 22, padT = 44, padB = 34;
+  const cols = [INK, ACC];
+  return {h: head.h + 10 + PH, draw(ctx, x, y) {
+    head.draw(ctx, x, y, w);
+    const top = y + head.h + 10, X0 = x + padL, X1 = x + w - padR, Y0 = top + padT, Y1 = top + PH - padB;
+    const all = []; ch.series.forEach(s => s.values.forEach(v => { if (v !== null) all.push(v); }));
+    let lo = Math.min(0, ...all), hi = Math.max(0, ...all);
+    const span = (hi - lo) || 1; lo -= span * 0.18; hi += span * 0.18;
+    const yy = v => Y1 - (v - lo) / (hi - lo) * (Y1 - Y0);
+    const n = ch.labels.length, xx = i => n < 2 ? (X0 + X1) / 2 : X0 + 18 + i * (X1 - X0 - 36) / (n - 1);
+    ctx.fillStyle = '#FBF8F1'; ctx.fillRect(x, top, w, PH);
+    // 눈금 · 0% 기준선
+    const step = (hi - lo) > 6 ? 2 : (hi - lo) > 3 ? 1 : 0.5;
+    for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+      const py = yy(v); const zero = Math.abs(v) < 1e-9;
+      ctx.strokeStyle = zero ? MUTED : RULE; ctx.lineWidth = zero ? 1.6 : 1; ctx.setLineDash(zero ? [] : [4, 4]);
+      ctx.beginPath(); ctx.moveTo(X0, py); ctx.lineTo(X1, py); ctx.stroke(); ctx.setLineDash([]);
+      text(ctx, (v > 0 ? '+' : '') + v.toFixed(step < 1 ? 1 : 0) + '%', X0 - 8, py, 13, 0, MUTED, 'right');
+    }
+    ch.labels.forEach((lb, i) => text(ctx, lb, xx(i), Y1 + 20, 14, 1, INK, 'center'));
+    // 범례
+    let lx = X0;
+    ch.series.forEach((s, k) => {
+      ctx.fillStyle = cols[k % 2]; ctx.fillRect(lx, top + 14, 22, 5);
+      text(ctx, s.name, lx + 30, top + 17, 16, 2, cols[k % 2]); lx += 30 + tw(s.name, 16, 2) + 22;
+    });
+    // 선 · 점 · 값
+    ch.series.forEach((s, k) => {
+      const col = cols[k % 2];
+      ctx.strokeStyle = col; ctx.lineWidth = 3; ctx.lineJoin = 'round'; ctx.beginPath(); let open = false;
+      s.values.forEach((v, i) => { if (v === null) { open = false; return; } if (!open) { ctx.moveTo(xx(i), yy(v)); open = true; } else ctx.lineTo(xx(i), yy(v)); });
+      ctx.stroke();
+      s.values.forEach((v, i) => {
+        if (v === null) return;
+        ctx.fillStyle = col; ctx.beginPath(); ctx.arc(xx(i), yy(v), 4.5, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = PAPER; ctx.beginPath(); ctx.arc(xx(i), yy(v), 2, 0, Math.PI * 2); ctx.fill();
+        const others = ch.series.filter((q, j) => j !== k && q.values[i] !== null && q.values[i] !== undefined).map(q => q.values[i]);
+        const above = others.length ? v >= Math.max(...others) : v >= 0;     // 겹치지 않게 위쪽 값은 위에, 아래쪽 값은 아래에
+        const label = (v > 0 ? '+' : '') + v.toFixed(2) + '%', lyy = yy(v) + (above ? -15 : 17);
+        ctx.font = fnt(13, 2); ctx.lineWidth = 4; ctx.strokeStyle = '#FBF8F1'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.strokeText(label, xx(i), lyy);
+        text(ctx, label, xx(i), lyy, 13, 2, v > 0 ? UP : v < 0 ? DOWN : INK, 'center');
+      });
+    });
+  }};
+}
 function bandPiece(b, w) {   // 주간 성적표처럼 열이 많은 표 (전체 폭)
+  if (D.chart && b.header[0] === '지수') return chartPiece(b.title, D.chart, w);
   return tablePiece({title: b.title, header: b.header, rows: b.rows, align: b.align, name: 0, extra: []}, w);
 }
 function flowPiece(text_, w) {
@@ -477,7 +524,7 @@ def saved_days():
         return []
 
 
-def build_paper_data(markdown, prefix, now_token="", scale=1.5, issue_no=None):
+def build_paper_data(markdown, prefix, now_token="", scale=1.5, issue_no=None, index_chart=None):
     model = build_model(markdown)
 
     if issue_no is None:
@@ -490,16 +537,17 @@ def build_paper_data(markdown, prefix, now_token="", scale=1.5, issue_no=None):
         "fonts": _font_data(),
         "model": model,
         "issueNo": issue_no,
+        "chart": index_chart,
     }
 
 
-def render_paper_images(markdown, prefix, now_token="", scale=1.5, issue_no=None):
+def render_paper_images(markdown, prefix, now_token="", scale=1.5, issue_no=None, index_chart=None):
     """'📰 지면 이미지 만들기' 버튼과 미리보기를 표시합니다 (카드 이미지 버튼 아래)."""
 
     import streamlit.components.v1 as components
 
     payload = json.dumps(
-        build_paper_data(markdown, prefix, now_token, scale, issue_no), ensure_ascii=False
+        build_paper_data(markdown, prefix, now_token, scale, issue_no, index_chart), ensure_ascii=False
     ).replace("</", "<\\/")
 
     page = f"""
