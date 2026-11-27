@@ -7,7 +7,9 @@
 
 import hashlib
 import html
+import math
 import re
+from urllib.parse import quote
 
 AVATARS = ["🦊", "🐯", "🐻", "🐼", "🐨", "🦁", "🐸", "🐵", "🦄", "🐙", "🦉", "🐧", "🐶", "🐱", "🦖", "🐳"]
 
@@ -183,12 +185,6 @@ html body [data-baseweb="popover"] li:hover,html body [data-baseweb="popover"] l
 .ar-st .s{font-size:12px;color:#8f8076;margin-top:2px}
 .ar-sec{margin:16px 0 8px;font-size:18px;font-weight:800;color:#fff}
 .ar-sec i{font-style:normal;color:var(--orange);margin-right:6px}
-.ar-ban{position:relative;margin:10px 0 12px;border:1.5px solid #8a6a12;border-radius:20px;background:radial-gradient(520px 200px at 50% -20%,#4a3608,#1a1408 70%);padding:14px 16px;text-align:center;overflow:hidden}
-.ar-ban .k{font-size:12px;font-weight:900;letter-spacing:.1em;color:var(--yellow)}
-.ar-ban .n{margin:6px 0 2px;font-size:clamp(22px,4vw,34px);font-weight:900;color:#fff;line-height:1.15}
-.ar-ban .n em{font-style:normal;margin-right:6px}
-.ar-ban .m{font-size:14px;color:#f1e3b4;font-weight:700}
-.ar-ban .d{margin-top:6px;font-size:12px;color:#b9a77a}
 .ar-bars{display:flex;align-items:flex-end;gap:4px;height:84px;margin:8px 0 2px;padding:0 2px}
 .ar-bar{flex:1 1 0;max-width:56px;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%}
 .ar-bar i{display:block;width:100%;max-width:26px;border-radius:5px 5px 2px 2px;background:#2f2f36;min-height:3px}
@@ -205,6 +201,107 @@ html body [data-baseweb="popover"] li:hover,html body [data-baseweb="popover"] l
 .ar-rd .n{font-size:12.5px}
 }
 """)
+
+
+# ---------------------------------------------------------------
+# 시즌 MVP 배너 (시상식 느낌: 와인색 바탕 · 금색 선 · 트로피 · 월계관)
+# ---------------------------------------------------------------
+
+def _svg_uri(svg):
+    return "url(\"data:image/svg+xml," + quote(svg, safe="/:=,;()'") + "\")"
+
+
+def _laurel():
+    """월계관: 가운데가 비고 아래쪽이 모이는 두 가닥의 잎."""
+
+    leaves = []
+
+    for side in (-1, 1):
+        for i in range(11):
+            t = i / 10
+            angle = math.radians(105 + t * 150)
+            x = 60 + side * 44 * math.cos(angle) * -1
+            y = 62 - 44 * math.sin(angle) * -1 * -1
+            rot = side * (35 + t * 70) - 90 * side
+            leaves.append(
+                f'<ellipse cx="{x:.1f}" cy="{y:.1f}" rx="4" ry="10" fill="url(#g)" '
+                f'transform="rotate({rot:.0f} {x:.1f} {y:.1f})"/>'
+            )
+
+    stars = "".join(
+        f'<path d="M{cx} {cy - r} l{r * .3:.1f} {r * .65:.1f} {r * .7:.1f} .1 -{r * .55:.1f} {r * .45:.1f} {r * .2:.1f} {r * .72:.1f} '
+        f'-{r * .65:.1f} -{r * .4:.1f} -{r * .65:.1f} {r * .4:.1f} {r * .2:.1f} -{r * .72:.1f} -{r * .55:.1f} -{r * .45:.1f} {r * .7:.1f} -{r * .1:.1f}z" fill="#f2c94c"/>'
+        for cx, cy, r in ((60, 7, 6), (47, 11, 4), (73, 11, 4))
+    )
+
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">'
+        '<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#f7dc7a"/><stop offset="1" stop-color="#b88a1f"/></linearGradient></defs>'
+        + "".join(leaves) + stars + "</svg>"
+    )
+
+
+def _trophy():
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 200">'
+        '<defs><linearGradient id="t" x1="0" y1="0" x2="1" y2="1">'
+        '<stop offset="0" stop-color="#fff0a8"/><stop offset=".45" stop-color="#e9b93d"/><stop offset="1" stop-color="#9a6a12"/></linearGradient></defs>'
+        '<path d="M38 22h84v38c0 30-18 52-42 56-24-4-42-26-42-56z" fill="url(#t)"/>'
+        '<path d="M38 34H16c0 30 12 46 34 52M122 34h22c0 30-12 46-34 52" fill="none" stroke="url(#t)" stroke-width="9" stroke-linecap="round"/>'
+        '<path d="M72 114h16v30H72z" fill="url(#t)"/>'
+        '<path d="M52 144h56l8 16H44z" fill="url(#t)"/>'
+        '<rect x="38" y="160" width="84" height="22" rx="4" fill="url(#t)"/>'
+        '<path d="M80 40l6 13 14 2-10 10 3 14-13-7-13 7 3-14-10-10 14-2z" fill="#7a1010" opacity=".85"/>'
+        '</svg>'
+    )
+
+
+def _lines():
+    gold = 'stroke="#e6b94a" stroke-width="2" fill="none"'
+
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" preserveAspectRatio="xMidYMid slice">'
+        f'<path d="M0 110L210 0" {gold} opacity=".9"/><path d="M0 190L120 0" {gold} opacity=".55"/>'
+        f'<path d="M0 40L90 0" {gold} opacity=".45"/>'
+        f'<path d="M960 70L810 0" {gold} opacity=".9"/><path d="M960 150L700 0" {gold} opacity=".5"/>'
+        f'<path d="M960 230L880 300" {gold} opacity=".8"/><path d="M0 250L70 300" {gold} opacity=".8"/>'
+        f'<path d="M0 0L210 0L0 110z" fill="#3b0a0a" opacity=".55"/><path d="M960 0L810 0L960 70z" fill="#3b0a0a" opacity=".55"/>'
+        '</svg>'
+    )
+
+
+BAN_CSS = _compact(
+    """
+.ar-ban{position:relative;margin:10px 0 14px;border:1.5px solid #8a6a12;border-radius:22px;overflow:hidden;
+display:flex;align-items:center;gap:clamp(10px,3vw,34px);padding:clamp(14px,3vw,26px) clamp(16px,4vw,40px);
+background:%LINES% center/cover no-repeat,radial-gradient(700px 260px at 62% 40%,#2a0707 0%,#110303 72%);
+box-shadow:0 0 0 1px #3a2308 inset,0 10px 34px rgba(0,0,0,.45)}
+.ar-ban:before{content:"";position:absolute;left:0;top:0;bottom:0;width:34%;opacity:.5;pointer-events:none;
+background-image:radial-gradient(#c79a35 1px,transparent 1.4px);background-size:10px 10px;
+-webkit-mask-image:linear-gradient(90deg,#000,transparent);mask-image:linear-gradient(90deg,#000,transparent)}
+.ar-ban .tr{position:relative;flex:0 0 auto;width:clamp(74px,16vw,150px);aspect-ratio:4/5;
+background:%TROPHY% center/contain no-repeat;filter:drop-shadow(0 8px 14px rgba(0,0,0,.55))}
+.ar-ban .bd{position:relative;flex:1;min-width:0;text-align:center}
+.ar-ban .top{display:flex;align-items:center;justify-content:center;gap:clamp(8px,2vw,16px);flex-wrap:wrap}
+.ar-ban .wr{position:relative;display:inline-flex;flex-direction:column;align-items:center;justify-content:center;
+width:clamp(84px,13vw,118px);aspect-ratio:1;background:%LAUREL% center/contain no-repeat;line-height:1}
+.ar-ban .wr b{font-size:clamp(12px,2.1vw,17px);font-weight:900;color:#ee3d4b;letter-spacing:0;margin-top:8px}
+.ar-ban .wr u{text-decoration:none;font-size:clamp(9px,1.5vw,12.5px);font-weight:900;color:#e9bf55;margin-top:2px}
+.ar-ban .yr{font-size:clamp(20px,3.6vw,38px);font-weight:900;color:#ee3d4b}
+.ar-ban .mv{font-size:clamp(24px,4.4vw,48px);font-weight:900;color:#ffd23f;text-shadow:0 2px 0 #5a1a0a}
+.ar-ban .nm{margin:6px 0 4px;font-size:clamp(34px,8vw,84px);font-weight:900;line-height:1.08;letter-spacing:.01em;
+background:linear-gradient(180deg,#fff7c9 0%,#f1cd5e 48%,#c28d22 100%);-webkit-background-clip:text;background-clip:text;
+-webkit-text-fill-color:transparent;color:transparent;
+filter:drop-shadow(0 3px 0 #5a0f12) drop-shadow(0 0 2px #3a0508);overflow-wrap:anywhere}
+.ar-ban .nm.many{font-size:clamp(24px,5vw,52px)}
+.ar-ban .mt{font-size:clamp(14px,2.2vw,22px);font-weight:600;color:#f6efe2;font-family:"Nanum Myeongjo","Noto Serif KR",serif}
+.ar-ban .nt{margin-top:8px;font-size:12px;color:#b99a62}
+@media (max-width:560px){.ar-ban{flex-direction:column;text-align:center;padding:16px 14px}.ar-ban .tr{width:78px}}
+"""
+).replace("%LINES%", _svg_uri(_lines())).replace("%TROPHY%", _svg_uri(_trophy())).replace("%LAUREL%", _svg_uri(_laurel()))
+
+CSS = CSS + BAN_CSS
 
 
 def css_only():
@@ -412,17 +509,20 @@ def data_table(headers, rows, widths=""):
     return f'<div class="ar-panel" style="padding:10px 10px 6px;margin:8px 0">{line(headers, "h")}{body}</div>'
 
 
-def season_banner(title, names, meta, note):
-    """시즌 MVP 배너. names: 닉네임 목록(동점이면 여러 명)."""
+def season_banner(season, names, meta, note, joint=False):
+    """시즌 MVP 배너. season: '11월 시즌', names: 닉네임 목록(동점이면 여러 명)."""
 
     who = " · ".join(esc(n) for n in names)
+    many = " many" if len(names) > 1 or len(" ".join(names)) > 8 else ""
+    mvp = "MVP (공동)" if joint else "MVP"
 
     return (
-        '<div class="ar-ban">'
-        f'<div class="k">{esc(title)}</div>'
-        f'<div class="n"><em>🏆</em>{who}</div>'
-        f'<div class="m">{esc(meta)}</div>'
-        f'<div class="d">{esc(note)}</div></div>'
+        '<div class="ar-ban"><div class="tr"></div><div class="bd">'
+        '<div class="top"><span class="wr"><b>MTNW</b><u>AWARD</u></span>'
+        f'<span class="yr">{esc(season)}</span><span class="mv">{esc(mvp)}</span></div>'
+        f'<div class="nm{many}">{who}</div>'
+        + (f'<div class="mt">{esc(meta)}</div>' if meta else "")
+        + f'<div class="nt">{esc(note)}</div></div></div>'
     )
 
 
