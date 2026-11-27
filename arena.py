@@ -909,12 +909,12 @@ def render_season_banner(data, now):
     champions = info["champions"]
     top = champions[0]
     names = [c["nick"] for c in champions]
-    title = f"{info['month']}월 시즌 MVP" + (" (공동)" if len(champions) > 1 else "")
-    meta = f"적중률 {top['rate'] * 100:.0f}% ({top['hits']}/{top['total']}) · {top['days']}일 참여"
+    season = f"{info['month']}월 시즌"
+    meta = ""
     left = info["left"]
     note = f"{info['until'].month}/{info['until'].day}까지 게시" + (" · 오늘이 마지막이에요" if left == 1 else f" · {left}일 남음")
 
-    md(ui.frag(ui.season_banner(title, names, meta, note)))
+    md(ui.frag(ui.season_banner(season, names, meta, note, joint=len(champions) > 1)))
 
 
 def render_season(data, nick):
