@@ -911,8 +911,7 @@ def render_season_banner(data, now):
     names = [c["nick"] for c in champions]
     season = f"{info['month']}월 시즌"
     meta = ""
-    left = info["left"]
-    note = f"{info['until'].month}/{info['until'].day}까지 게시" + (" · 오늘이 마지막이에요" if left == 1 else f" · {left}일 남음")
+    note = ""
 
     md(ui.frag(ui.season_banner(season, names, meta, note, joint=len(champions) > 1)))
 
