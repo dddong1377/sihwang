@@ -404,26 +404,32 @@ def last_text(names, bold=False):
 
 
 def render_prize(data):
-    now = now_kst()
+    """일간 토너먼트 상품 카드(가운데·크게) + 그날의 우승자·꼴찌."""
 
     name_day, how_day = prize_info(data["prizes"].get("current"))
     key, result = latest_standings(data)
+    outcome = {"text": "매일 결과가 확정되면 그날의 우승자와 꼴찌가 표시됩니다."}
 
     if result:
         day = datetime.date.fromisoformat(key)
 
         if result["tied_all"] and solo(result):
-            line_day = f"{day_text(day)}: 참가자가 1명뿐이라 꼴찌 없이 마무리"
+            outcome = {"text": f"{day_text(day)} · 참가자가 1명뿐이라 꼴찌 없이 마무리"}
         elif result["tied_all"]:
-            line_day = f"{day_text(day)}: 전원 같은 성적 · 전원 공동 우승·공동 꼴찌 · 🐌 레이스로 결정"
+            outcome = {
+                "date": day_text(day), "win": "전원 공동 우승",
+                "lose": "전원 공동 꼴찌", "lose_note": "🐌 레이스로 한 명을 정해요",
+            }
         else:
-            line_day = f"{day_text(day)} 우승 {', '.join(result['first'])} · {last_text(result['last'])} 🥄"
-    else:
-        line_day = "매일 결과가 확정되면 그날의 우승자와 꼴찌가 표시됩니다."
+            many = len(result["last"]) > 1
+            outcome = {
+                "date": day_text(day), "win": " · ".join(result["first"]),
+                "lose": " · ".join(result["last"]),
+                "lose_label": "공동 꼴찌" if many else "꼴찌",
+                "lose_note": "🐌 레이스로 한 명을 정해요" if many else "",
+            }
 
-    md(ui.frag(ui.prize_cards([
-        {"title": "📅 일간 토너먼트 우승 상품", "name": name_day, "how": how_day, "line": line_day},
-    ])))
+    md(ui.frag(ui.prize_hero("📅 일간 토너먼트 우승 상품", name_day, how_day, outcome)))
 
 
 def render_round_strip(data, now, active_day):
