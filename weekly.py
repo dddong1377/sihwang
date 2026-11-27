@@ -2128,7 +2128,25 @@ def copy_buttons(markdown):
 
     components.html(page, height=45)
     render_card_images(markdown, "주간정리")
-    render_paper_images(markdown, "주간지면")
+    chart = None
+    info = st.session_state.get("wk_index")
+
+    if info and any(info["index"].get(label) for label in ("코스피", "코스닥")):
+        if st.checkbox(
+            "지면에 지수 등락률 꺾은선 그래프 넣기 (체크 해제하면 표)",
+            key="wk_paper_chart",
+            help="체크하면 지면 이미지의 '한 주 시장 성적표' 표 자리에 코스피·코스닥 꺾은선 그래프가 들어갑니다.",
+        ):
+            days_idx = sorted(info["labels"])
+            chart = {
+                "labels": [info["labels"][i] for i in days_idx],
+                "series": [
+                    {"name": label, "values": [info["index"].get(label, {}).get(i) for i in days_idx]}
+                    for label in ("코스피", "코스닥")
+                ],
+            }
+
+    render_paper_images(markdown, "주간지면", index_chart=chart)
 
 
 # ===============================================================
@@ -2203,6 +2221,12 @@ def render_index_chart(info):
     )
 
 
+def color_arrows(text):
+    """미리보기 전용: 상승(🔺)은 빨강 ▲, 하락(🔻)은 파랑 ▼로 보여 줍니다. 글 원문·복사 내용은 그대로 둡니다."""
+
+    return text.replace("🔺", ":red[▲]").replace("🔻", ":blue[▼]")
+
+
 def render_report_with_chart(report, info):
     """미리보기에서 '한 주 시장 성적표'의 표 자리에 꺾은선형 그래프를 넣습니다."""
 
@@ -2214,7 +2238,7 @@ def render_report_with_chart(report, info):
     )
 
     if heading is None:
-        st.markdown(report)
+        st.markdown(color_arrows(report))
         return
 
     start = next(
@@ -2223,7 +2247,7 @@ def render_report_with_chart(report, info):
     )
 
     if start is None:
-        st.markdown(report)
+        st.markdown(color_arrows(report))
         return
 
     end = start
@@ -2231,9 +2255,9 @@ def render_report_with_chart(report, info):
     while end < len(lines) and lines[end].startswith("|"):
         end += 1
 
-    st.markdown("\n".join(lines[:start]))
+    st.markdown(color_arrows("\n".join(lines[:start])))
     render_index_chart(info)
-    st.markdown("\n".join(lines[end:]))
+    st.markdown(color_arrows("\n".join(lines[end:])))
 
 
 def fill_from_archive(monday):
@@ -2451,7 +2475,7 @@ def main():
             if use_chart:
                 render_report_with_chart(report, info)
             else:
-                st.markdown(report)
+                st.markdown(color_arrows(report))
 
 
 main()
