@@ -59,6 +59,9 @@ TOSS_INFO_BASE = "https://wts-info-api.tossinvest.com"
 INDEX_CODES = {"코스피": "KGG01P", "코스닥": "QGG01P"}
 # 이 시각 이후의 당일 봉만 '장마감'으로 인정 (KRX 정규장 15:30 마감)
 MARKET_CLOSE_CONFIRM = datetime.time(15, 40)
+# 지수 장마감 값 사용 시각: 토스는 종가가 15:30 직후 확정, 야후는 한국 지수 반영이 늦어 여유를 둡니다
+INDEX_CONFIRM_TOSS = datetime.time(15, 31)
+INDEX_CONFIRM_PUBLIC = datetime.time(15, 55)
 
 # 법적·윤리적 위험이 있는 표현: 포함된 제목은 코드가 버립니다.
 BANNED_HEADLINE_WORDS = (
@@ -1154,7 +1157,7 @@ def _fetch_index_week_toss(monday):
                     continue
 
                 # 장 마감 전 진행 중인 봉은 제외
-                if day == today and now.time() < MARKET_CLOSE_CONFIRM:
+                if day == today and now.time() < INDEX_CONFIRM_TOSS:
                     continue
 
                 close = to_float(candle.get("close"))
@@ -1229,7 +1232,7 @@ def _fetch_index_week_public(monday):
             if not (monday <= day <= friday):
                 continue
 
-            if day == today and now.time() < MARKET_CLOSE_CONFIRM:
+            if day == today and now.time() < INDEX_CONFIRM_PUBLIC:
                 continue
 
             prev = rows[index - 1][1]
