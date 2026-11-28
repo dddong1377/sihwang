@@ -937,7 +937,7 @@ def get_rankings(mode="up", duration="1d"):
             "base_source": "toss",
             "rank": row.get("rank"),
             "theme": theme,
-            "reason": "토스증권 당일 등락률 순위 기준",
+            "reason": "당일 등락률 순위 기준",
             "timestamp": ranked_at,
         })
 

@@ -239,15 +239,20 @@ function cautionPiece(p, w) {
     para(ctx, lines, x + 20, y + 14, 17, 26, 0, INK);
   }};
 }
-function chartPiece(title, ch, w) {   // 코스피·코스닥 일별 등락률 꺾은선 (체크박스를 켰을 때만)
-  const head = sectionHead(title), PH = 250, padL = 52, padR = 22, padT = 44, padB = 34;
+function chartPiece(title, ch, w) {   // 코스피·코스닥 일별 등락률 꺾은선 + 상승일·하락일의 주요 이슈 말풍선
+  const head = sectionHead(title), padL = 52, padR = 22, padT = 44, PLOT = 190;
   const cols = [INK, ACC];
+  const notes = ch.notes || [], has = d => notes.some(n => n && n.text && n.dir === d);
+  const hasUp = has('up'), hasDn = has('down');
+  const BOXH = 94, topBand = hasUp ? BOXH + 12 : 0, botBand = hasDn ? BOXH + 12 : 0;
+  const PH = padT + topBand + PLOT + 32 + botBand + 6;
   return {h: head.h + 10 + PH, draw(ctx, x, y) {
     head.draw(ctx, x, y, w);
-    const top = y + head.h + 10, X0 = x + padL, X1 = x + w - padR, Y0 = top + padT, Y1 = top + PH - padB;
+    const top = y + head.h + 10, X0 = x + padL, X1 = x + w - padR;
+    const Y0 = top + padT + topBand, Y1 = Y0 + PLOT;
     const all = []; ch.series.forEach(s => s.values.forEach(v => { if (v !== null) all.push(v); }));
     let lo = Math.min(0, ...all), hi = Math.max(0, ...all);
-    const span = (hi - lo) || 1; lo -= span * 0.18; hi += span * 0.18;
+    const span = (hi - lo) || 1; lo -= span * 0.22; hi += span * 0.22;
     const yy = v => Y1 - (v - lo) / (hi - lo) * (Y1 - Y0);
     const n = ch.labels.length, xx = i => n < 2 ? (X0 + X1) / 2 : X0 + 18 + i * (X1 - X0 - 36) / (n - 1);
     ctx.fillStyle = '#FBF8F1'; ctx.fillRect(x, top, w, PH);
@@ -266,6 +271,24 @@ function chartPiece(title, ch, w) {   // 코스피·코스닥 일별 등락률 �
       ctx.fillStyle = cols[k % 2]; ctx.fillRect(lx, top + 14, 22, 5);
       text(ctx, s.name, lx + 30, top + 17, 16, 2, cols[k % 2]); lx += 30 + tw(s.name, 16, 2) + 22;
     });
+    // 주요 이슈 말풍선 (상승한 날은 위, 하락한 날은 아래) + 점선 연결
+    const bw = Math.min(132, (X1 - X0) / Math.max(n, 1) - 8), lh = 16;
+    const pointY = i => { for (const s of ch.series) if (s.values[i] !== null && s.values[i] !== undefined) return yy(s.values[i]); return null; };
+    notes.forEach((nt, i) => {
+      if (!nt || !nt.text) return;
+      const py = pointY(i); if (py === null) return;
+      const up = nt.dir === 'up', col = up ? UP : DOWN;
+      const bx = Math.max(x + 4, Math.min(x + w - 4 - bw, xx(i) - bw / 2));
+      const by = up ? top + padT : Y1 + 32;
+      const lines = clamp(wrap(nt.text, bw - 14, 12.5, 1), 4, bw - 14, 12.5, 1);
+      ctx.strokeStyle = col; ctx.lineWidth = 1.4; ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(xx(i), up ? by + BOXH : by); ctx.lineTo(xx(i), py); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = '#FFFFFF'; ctx.fillRect(bx, by, bw, BOXH);
+      ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.strokeRect(bx, by, bw, BOXH);
+      ctx.fillStyle = col; ctx.fillRect(bx, by, bw, 22);
+      text(ctx, (up ? '▲ ' : '▼ ') + (nt.pct || ''), bx + 8, by + 12, 12.5, 2, '#FFFFFF');
+      lines.forEach((ln, k) => text(ctx, ln, bx + 7, by + 34 + k * lh, 12.5, 1, INK));
+    });
     // 선 · 점 · 값
     ch.series.forEach((s, k) => {
       const col = cols[k % 2];
@@ -277,7 +300,7 @@ function chartPiece(title, ch, w) {   // 코스피·코스닥 일별 등락률 �
         ctx.fillStyle = col; ctx.beginPath(); ctx.arc(xx(i), yy(v), 4.5, 0, Math.PI * 2); ctx.fill();
         ctx.fillStyle = PAPER; ctx.beginPath(); ctx.arc(xx(i), yy(v), 2, 0, Math.PI * 2); ctx.fill();
         const others = ch.series.filter((q, j) => j !== k && q.values[i] !== null && q.values[i] !== undefined).map(q => q.values[i]);
-        const above = others.length ? v >= Math.max(...others) : v >= 0;     // 겹치지 않게 위쪽 값은 위에, 아래쪽 값은 아래에
+        const above = others.length ? v >= Math.max(...others) : v >= 0;
         const label = (v > 0 ? '+' : '') + v.toFixed(2) + '%', lyy = yy(v) + (above ? -15 : 17);
         ctx.font = fnt(13, 2); ctx.lineWidth = 4; ctx.strokeStyle = '#FBF8F1'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.strokeText(label, xx(i), lyy);
         text(ctx, label, xx(i), lyy, 13, 2, v > 0 ? UP : v < 0 ? DOWN : INK, 'center');

@@ -75,6 +75,7 @@ BANNED_HEADLINE_WORDS = (
 DEFAULT_REASON_MARKERS = (
     "시가총액 상위 100위",
     "토스증권 당일 등락률 순위 기준",
+    "당일 등락률 순위 기준",
 )
 
 
@@ -970,13 +971,13 @@ def pct_text(value):
 
 
 def mover_source_name(week):
-    return "네이버 금융" if "네이버" in str(week.get("mover_source", "")) else "토스증권"
+    return "네이버 금융" if "네이버" in str(week.get("mover_source", "")) else "토스증권"  # 진행 창 안내용
 
 
 def mover_fact(label, item, pct, index, week):
     if week.get("mover_basis") == "toss":
         return (
-            f"{label} 종목(시총 상위 100위, {mover_source_name(week)}): "
+            f"{label} 종목(시총 상위 100위): "
             f"{item['name']} 주간 {pct:+.2f}%"
         )
 
@@ -1000,7 +1001,7 @@ def build_facts(days, week, issues, flow):
         ]
 
         lines.append(
-            f"{label} 장마감 일간 등락률(토스증권, KRX 정규장): " + ", ".join(parts)
+            f"{label} 장마감 일간 등락률(KRX 정규장): " + ", ".join(parts)
         )
 
     if week["surge"]:
@@ -1564,6 +1565,138 @@ def load_schedule(next_monday):
 # 8. 결과 조립
 # ===============================================================
 
+ISSUE_LINE = re.compile(r"^\s*\*{0,2}\s*\d+\.\s*(?:[🔺🔻➖▲▼]\ufe0f?\s*)?(.+?)\s*\*{0,2}\s*$")
+
+
+def day_main_issue(day):
+    """그날 오후 시황글(없으면 장전 시황글)의 첫 번째 주요 이슈 제목."""
+
+    for key, names in (("aft", ["주요 경제 이슈"]), ("pre", ["핵심 포인트", "핵심 이슈"])):
+        section = find_section(day.get(key, ""), names)
+
+        for line in section.splitlines():
+            found = ISSUE_LINE.match(line)
+
+            if found:
+                title = found.group(1).replace("**", "").strip().strip("\"'“”‘’")
+
+                if title:
+                    return title
+
+    return headline_of(day.get("aft", "")) or headline_of(day.get("pre", ""))
+
+
+ANY_ISSUE_LINE = re.compile(r"^\s*\*{0,2}\s*\d+\.\s*(.+?)\s*\*{0,2}\s*$")
+
+NOTE_PROMPT = """아래는 이번 주 요일별 코스피·코스닥 장마감 등락률과, 그날 시황글에 실린 이슈 후보입니다.
+각 요일마다 그날 지수가 그렇게 움직인 이유를 가장 잘 설명하는 이슈 하나를 후보 중에서 고르고,
+25자 이내의 한 줄로 요약하세요.
+
+규칙:
+1. 반드시 후보에 있는 내용만 쓰고, 없는 사실·수치를 만들지 않는다.
+2. 지수가 오른 날은 상승 요인, 내린 날은 하락 요인을 고른다. 마땅한 후보가 없으면 가장 비중 큰 이슈를 고른다.
+3. 명사형으로 끝내고, 투자 권유·단정 표현은 쓰지 않는다.
+4. 출력은 요일마다 한 줄, 형식은 "요일번호|문구" (월=0, 화=1, 수=2, 목=3, 금=4). 다른 말은 쓰지 않는다.
+
+__DAYS__
+"""
+
+
+def day_issue_candidates(day):
+    """그날 시황글의 이슈 후보 문장들(방향 표시 포함)."""
+
+    found = []
+
+    for key, names in (("aft", ["주요 경제 이슈"]), ("pre", ["핵심 포인트", "핵심 이슈"])):
+        for line in find_section(day.get(key, ""), names).splitlines():
+            m = ANY_ISSUE_LINE.match(line)
+
+            if m:
+                text = m.group(1).replace("**", "").strip()
+
+                if text and text not in found:
+                    found.append(text[:70])
+
+    head = headline_of(day.get("aft", "")) or headline_of(day.get("pre", ""))
+
+    if head and head not in found:
+        found.append(head[:70])
+
+    return found[:6]
+
+
+def auto_note_texts(days, index):
+    """AI가 요일별로 지수 움직임을 가장 잘 설명하는 이슈를 골라 한 줄로 만듭니다. {요일번호: 문구}"""
+
+    blocks = []
+
+    for day in days:
+        cands = day_issue_candidates(day)
+
+        if not cands:
+            continue
+
+        parts = []
+
+        for label in ("코스피", "코스닥"):
+            value = (index.get(label) or {}).get(day["i"])
+
+            if value is not None:
+                parts.append(f"{label} {value:+.2f}%")
+
+        if not parts:
+            continue
+
+        blocks.append(
+            f"[{day['i']}] {DAY_LABELS[day['i']]}요일 {day['date'].month}/{day['date'].day} · " + ", ".join(parts)
+            + "\n" + "\n".join(f"- {c}" for c in cands)
+        )
+
+    if not blocks:
+        return {}
+
+    raw = groq_chat(NOTE_PROMPT.replace("__DAYS__", "\n\n".join(blocks)), 700, 0.1, "요일별 지수 이슈")
+    result = {}
+
+    for line in str(raw).splitlines():
+        m = re.match(r"^\s*\[?(\d)\]?\s*[|:：]\s*(.+?)\s*$", line)
+
+        if m and 0 <= int(m.group(1)) <= 4:
+            text = m.group(2).strip().strip("\"'“”‘’").replace("**", "")
+            text = re.sub(r"^[🔺🔻▲▼➖]\ufe0f?\s*", "", text)
+
+            if 2 <= len(text) <= 45:
+                result[int(m.group(1))] = text
+
+    return result
+
+
+def index_notes(days, index, ai_texts=None):
+    """상승한 날·하락한 날 각각의 주요 이슈. {요일번호: {"dir", "pct", "text"}} (코스피 기준, 없으면 코스닥).
+
+    ai_texts: AI가 고른 요일별 한 줄(없으면 그날 시황글의 첫 이슈 제목)."""
+
+    notes = {}
+
+    for day in days:
+        value = None
+
+        for label in ("코스피", "코스닥"):
+            value = (index.get(label) or {}).get(day["i"])
+
+            if value is not None:
+                break
+
+        text = (ai_texts or {}).get(day["i"]) or day_main_issue(day)
+
+        if value is None or not text or abs(value) < 1e-9:
+            continue
+
+        notes[day["i"]] = {"dir": "up" if value > 0 else "down", "pct": f"{value:+.2f}%", "text": text}
+
+    return notes
+
+
 def index_table_md(week, days):
     if not any(week["index"][label] for label in ("코스피", "코스닥")):
         return ""
@@ -1593,9 +1726,9 @@ def index_table_md(week, days):
 
 def mover_label(week):
     if week.get("mover_basis") == "toss":
-        return f"시총 상위 100위 · {mover_source_name(week)} 주간 등락률 기준"
+        return "시총 상위 100위 · 주간 등락률 기준"
 
-    return "시황글 기준 · 하루 최대 등락률 (토스 조회 실패)"
+    return "시황글 기준 · 하루 최대 등락률"
 
 
 def top_title(base, count, default):
@@ -1671,7 +1804,7 @@ def build_report(monday, headline, days, week, issues, flow, checks, schedule, a
         lines += ["### 📊 한 주 시장 성적표", "", table, ""]
 
         lines += [
-            "※ 토스증권 기준 KRX 정규장(09:00~15:30) 장마감 지수의 전일 대비 등락률입니다. "
+            "※ KRX 정규장(09:00~15:30) 장마감 지수의 전일 대비 등락률입니다. "
             "휴장일은 '-'로 표시됩니다.",
             "",
         ]
@@ -1916,8 +2049,17 @@ def run_weekly(monday, status):
     state["wk_alts"] = alternatives
 
     # 꺾은선형 그래프 미리보기에 쓸 지수 데이터 (글 텍스트와 별도로 보관)
+    ai_texts = {}
+
+    try:
+        status.write("🧭 요일별 지수 움직임의 주요 이슈를 고르는 중...")
+        ai_texts = auto_note_texts(days, week["index"])
+    except Exception as error:
+        status.write(f"⚠️ 요일별 이슈 자동 선정 실패(각 날의 첫 이슈로 대신합니다): {str(error)[:120]}")
+
     state["wk_index"] = {
         "index": week["index"],
+        "notes": index_notes(days, week["index"], ai_texts),
         "labels": {
             day["i"]: f"{DAY_LABELS[day['i']]} {day['date'].month}/{day['date'].day}"
             for day in days
@@ -2138,8 +2280,10 @@ def copy_buttons(markdown):
             help="체크하면 지면 이미지의 '한 주 시장 성적표' 표 자리에 코스피·코스닥 꺾은선 그래프가 들어갑니다.",
         ):
             days_idx = sorted(info["labels"])
+            notes = info.get("notes") or {}
             chart = {
                 "labels": [info["labels"][i] for i in days_idx],
+                "notes": [notes.get(i) for i in days_idx],
                 "series": [
                     {"name": label, "values": [info["index"].get(label, {}).get(i) for i in days_idx]}
                     for label in ("코스피", "코스닥")
@@ -2215,8 +2359,20 @@ def render_index_chart(info):
 
         st.line_chart(wide)
 
+    notes = info.get("notes") or {}
+
+    if notes:
+        st.markdown(
+            "\n".join(
+                f"- {':red[▲ 상승]' if note['dir'] == 'up' else ':blue[▼ 하락]'} "
+                f"**{info['labels'][i]}** ({note['pct']}) · {note['text']}"
+                for i, note in sorted(notes.items())
+                if i in info["labels"]
+            )
+        )
+
     st.caption(
-        "토스증권 기준 KRX 정규장 장마감 지수의 전일 대비 등락률입니다. "
+        "KRX 정규장 장마감 지수의 전일 대비 등락률입니다. "
         "휴장일·미집계일은 선이 끊깁니다."
     )
 
